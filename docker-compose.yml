@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: opencharge_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: opencharge
+      POSTGRES_USER: opencharge
+      POSTGRES_PASSWORD: opencharge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opencharge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: opencharge_api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://opencharge:opencharge@db:5432/opencharge?sslmode=disable
+      PORT: 8080
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend/web
+      dockerfile: Dockerfile
+    container_name: opencharge_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
