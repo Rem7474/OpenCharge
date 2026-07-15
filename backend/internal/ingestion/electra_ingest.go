@@ -10,22 +10,23 @@ import (
 
 	"github.com/Rem7474/opencharge/internal/domain"
 	"github.com/Rem7474/opencharge/internal/repository"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 const electraStationsURL = "https://stations.go-electra.com/stations.js"
 
 type electraStation struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Address     string  `json:"address"`
-	City        string  `json:"city"`
-	PostalCode  string  `json:"postalCode"`
-	Country     string  `json:"country"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	Operator    string  `json:"operator"`
-	Pricings    electraPricings `json:"pricings"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	Address    string         `json:"address"`
+	City       string         `json:"city"`
+	PostalCode string         `json:"postalCode"`
+	Country    string         `json:"country"`
+	Latitude   float64        `json:"latitude"`
+	Longitude  float64        `json:"longitude"`
+	Operator   string         `json:"operator"`
+	Pricings   electraPricings `json:"pricings"`
 }
 
 type electraPricings struct {
@@ -34,10 +35,10 @@ type electraPricings struct {
 }
 
 type electraPricing struct {
-	EnergyPricePerKwh       *float64        `json:"energyPricePerKwh"`
-	SessionDurationPricePerMin *float64     `json:"sessionDurationPricePerMin"`
-	CongestionPricePerMin   *float64        `json:"congestionPricePerMin"`
-	Windows                 []electraWindow `json:"windows"`
+	EnergyPricePerKwh          *float64        `json:"energyPricePerKwh"`
+	SessionDurationPricePerMin *float64        `json:"sessionDurationPricePerMin"`
+	CongestionPricePerMin      *float64        `json:"congestionPricePerMin"`
+	Windows                    []electraWindow `json:"windows"`
 }
 
 type electraWindow struct {
@@ -45,7 +46,7 @@ type electraWindow struct {
 	EndTime   string `json:"endTime"`
 }
 
-// IngestElectra downloads stations.js, parses it, upserts source stations + tariffs, and links to IRVE.
+// IngestElectra downloads stations.js, upserts source stations + tariffs, and links to IRVE.
 func IngestElectra(
 	ctx context.Context,
 	stationRepo *repository.StationRepository,
@@ -67,7 +68,6 @@ func IngestElectra(
 		return fmt.Errorf("read Electra body: %w", err)
 	}
 
-	// Strip JS module wrapper: "export default [...];"
 	js := strings.TrimSpace(string(body))
 	js = strings.TrimPrefix(js, "export default ")
 	js = strings.TrimSuffix(js, ";")
@@ -81,7 +81,7 @@ func IngestElectra(
 
 	var processed, failed int
 	for _, es := range stations {
-		if err := processElectraStation(ctx, es, stationRepo, tariffRepo, linkRepo, logger, linkDistDeg); err != nil {
+		if err := processElectraStation(ctx, es, stationRepo, tariffRepo, linkRepo, linkDistDeg); err != nil {
 			logger.Warn("Process Electra station failed", zap.String("id", es.ID), zap.Error(err))
 			failed++
 			continue
@@ -99,7 +99,6 @@ func processElectraStation(
 	stationRepo *repository.StationRepository,
 	tariffRepo *repository.TariffRepository,
 	linkRepo *repository.LinkRepository,
-	logger *zap.Logger,
 	linkDistDeg float64,
 ) error {
 	country := es.Country
@@ -127,58 +126,37 @@ func processElectraStation(
 		return fmt.Errorf("upsert source station: %w", err)
 	}
 
-	// Correlate to nearest IRVE station
 	irveStation, err := stationRepo.FindNearest(ctx, es.Longitude, es.Latitude, linkDistDeg)
-	if err == nil && irveStation != nil {
-		// Delete old tariffs for this source/station pair before re-inserting
-		_ = tariffRepo.DeleteByStationAndSource(ctx, irveStation.ID, "electra")
-
-		// Insert AC tariffs
-		for _, pricing := range es.Pricings.AC {
-			t := buildElectraTariff(irveStation.ID, "ac", pricing)
-			if err := tariffRepo.Upsert(ctx, t); err != nil {
-				logger.Warn("Upsert AC tariff failed", zap.String("station_id", es.ID), zap.Error(err))
-			}
-		}
-		// Insert DC tariffs
-		for _, pricing := range es.Pricings.DC {
-			t := buildElectraTariff(irveStation.ID, "dc", pricing)
-			if err := tariffRepo.Upsert(ctx, t); err != nil {
-				logger.Warn("Upsert DC tariff failed", zap.String("station_id", es.ID), zap.Error(err))
-			}
-		}
-
-		link := &domain.StationLink{
-			StationID:       irveStation.ID,
-			SourceStationID: ssID,
-			Source:          "electra",
-			LinkQuality:     "by_geolocation",
-		}
-		if err := linkRepo.UpsertLink(ctx, link); err != nil {
-			logger.Warn("Upsert link failed", zap.String("station_id", es.ID), zap.Error(err))
-		}
+	if err != nil {
+		// No nearby IRVE station found — still saved the source station
+		return nil
 	}
 
-	return nil
+	_ = tariffRepo.DeleteByStationAndSource(ctx, irveStation.ID, "electra")
+
+	for _, pricing := range es.Pricings.AC {
+		_ = tariffRepo.Upsert(ctx, buildElectraTariff(irveStation.ID, "ac", pricing))
+	}
+	for _, pricing := range es.Pricings.DC {
+		_ = tariffRepo.Upsert(ctx, buildElectraTariff(irveStation.ID, "dc", pricing))
+	}
+
+	link := &domain.StationLink{
+		StationID:       irveStation.ID,
+		SourceStationID: ssID,
+		Source:          "electra",
+		LinkQuality:     "by_geolocation",
+	}
+	return linkRepo.UpsertLink(ctx, link)
 }
 
-func buildElectraTariff(stationID interface{ }, kind string, p electraPricing) *domain.StationTariff {
-	var stID interface{} = stationID
-
+func buildElectraTariff(stationID uuid.UUID, kind string, p electraPricing) *domain.StationTariff {
 	var energyCents, sessionCents, congestionCents *float64
 	if p.EnergyPricePerKwh != nil {
 		v := *p.EnergyPricePerKwh * 100
 		energyKwh := v
-		energyKwh = *p.EnergyPricePerKwh * 100
-		energyKwh = energyKwh // avoid unused
-		energyKwh = v
-		energyKwh = energyKwh
-		energyKwh = v
 		energyKwh = v
 		_ = energyKwh
-		energyKwh = v
-		energyKwh = v
-		energyKwh = v
 		energyKwh = v
 		energyCents = &v
 	}
@@ -191,11 +169,17 @@ func buildElectraTariff(stationID interface{ }, kind string, p electraPricing) *
 		congestionCents = &v
 	}
 
-	extraWindows, _ := json.Marshal(map[string]interface{}{"windows": p.Windows})
-
-	_ = stID
+	extraBytes, _ := json.Marshal(map[string]interface{}{"windows": p.Windows})
 
 	return &domain.StationTariff{
-		StationID:                  stationID.(interface{ }).(interface {}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(interface{}).(domain.Station).ID,
+		StationID:                  stationID,
+		Source:                     "electra",
+		Kind:                       kind,
+		Model:                      "electra_fixed",
+		Currency:                   "EUR",
+		EnergyPriceCentsPerKwh:     energyCents,
+		SessionPriceCentsPerMin:    sessionCents,
+		CongestionPriceCentsPerMin: congestionCents,
+		Extra:                      extraBytes,
 	}
 }
