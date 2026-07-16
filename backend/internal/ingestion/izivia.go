@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"opencharge/internal/domain"
 	"opencharge/internal/repository"
 )
@@ -40,6 +42,7 @@ func DefaultIziviaConfig() IziviaConfig {
 }
 
 type IziviaIngester struct {
+	Pool             *pgxpool.Pool
 	SourceStations   *repository.SourceStationRepository
 	Tariffs          *repository.TariffRepository
 	Links            *repository.LinkRepository
@@ -48,8 +51,9 @@ type IziviaIngester struct {
 	client           *http.Client
 }
 
-func NewIziviaIngester(sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, cfg IziviaConfig) *IziviaIngester {
+func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, cfg IziviaConfig) *IziviaIngester {
 	return &IziviaIngester{
+		Pool:             pool,
 		SourceStations:   sourceStations,
 		Tariffs:          tariffs,
 		Links:            links,
@@ -61,7 +65,11 @@ func NewIziviaIngester(sourceStations *repository.SourceStationRepository, tarif
 
 // Run scans Izivia's map for markers covering metropolitan France, fetches
 // station details and pricing for each, then correlates every station with
-// the nearest IRVE point of charge.
+// the nearest IRVE point of charge. Fetching stays concurrent (the workers
+// below are I/O-bound, so parallelism helps there), but database writes are
+// funneled through a single consumer that batches them via
+// writeSourceStationChunk — same bulk correlation + single-transaction
+// pattern as Electra, instead of one uncommitted round trip per marker.
 func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	markers, err := ing.fetchMarkers(ctx)
 	if err != nil {
@@ -70,25 +78,26 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	log.Printf("izivia: %d unique markers found", len(markers))
 
 	markerCh := make(chan map[string]any)
+	resultsCh := make(chan normalizedSourceStation)
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	processed := 0
-	var firstErr error
 
 	worker := func() {
 		defer wg.Done()
 		for marker := range markerCh {
-			if err := ing.processMarker(ctx, marker); err != nil {
+			item, ok, err := ing.fetchAndNormalizeMarker(ctx, marker)
+			if err != nil {
 				stationID, _ := marker["id"].(string)
 				log.Printf("izivia: station %s failed: %v", stationID, err)
 				continue
 			}
-			mu.Lock()
-			processed++
-			if processed%50 == 0 {
-				log.Printf("izivia: %d/%d stations processed", processed, len(markers))
+			if !ok {
+				continue
 			}
-			mu.Unlock()
+			select {
+			case resultsCh <- item:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 
@@ -100,6 +109,24 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 		wg.Add(1)
 		go worker()
 	}
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	writeDone := make(chan struct {
+		processed int
+		err       error
+	}, 1)
+	go func() {
+		processed, err := ing.writeResults(ctx, resultsCh, len(markers))
+		writeDone <- struct {
+			processed int
+			err       error
+		}{processed, err}
+	}()
+
+	var firstErr error
 	for _, marker := range markers {
 		select {
 		case markerCh <- marker:
@@ -108,25 +135,66 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 		}
 	}
 	close(markerCh)
-	wg.Wait()
 
-	log.Printf("izivia: done, %d stations processed", processed)
-	return processed, firstErr
+	result := <-writeDone
+	if firstErr == nil {
+		firstErr = result.err
+	}
+
+	log.Printf("izivia: done, %d stations processed", result.processed)
+	return result.processed, firstErr
 }
 
-func (ing *IziviaIngester) processMarker(ctx context.Context, marker map[string]any) error {
+// writeResults drains resultsCh, batching writes by ingestionBulkChunkSize
+// through writeSourceStationChunk.
+func (ing *IziviaIngester) writeResults(ctx context.Context, resultsCh <-chan normalizedSourceStation, total int) (int, error) {
+	processed := 0
+	batch := make([]normalizedSourceStation, 0, ingestionBulkChunkSize)
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := writeSourceStationChunk(ctx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
+		processed += n
+		batch = batch[:0]
+		if err != nil {
+			return err
+		}
+		log.Printf("izivia: %d/%d processed", processed, total)
+		return nil
+	}
+
+	for item := range resultsCh {
+		batch = append(batch, item)
+		if len(batch) >= ingestionBulkChunkSize {
+			if err := flush(); err != nil {
+				return processed, err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return processed, err
+	}
+	return processed, nil
+}
+
+// fetchAndNormalizeMarker does the I/O-bound work for one marker (station
+// detail + pricing HTTP calls, then normalization) without touching the
+// database — writes are batched separately, see Run.
+func (ing *IziviaIngester) fetchAndNormalizeMarker(ctx context.Context, marker map[string]any) (normalizedSourceStation, bool, error) {
 	stationID, _ := marker["id"].(string)
 	if stationID == "" {
-		return fmt.Errorf("marker without id")
+		return normalizedSourceStation{}, false, fmt.Errorf("marker without id")
 	}
 
 	stationBody, err := ing.postJSON(ctx, fmt.Sprintf("%s/charging-locations/%s", iziviaBaseURL, stationID), map[string]any{})
 	if err != nil {
-		return fmt.Errorf("fetch station details: %w", err)
+		return normalizedSourceStation{}, false, fmt.Errorf("fetch station details: %w", err)
 	}
 	var station map[string]any
 	if err := json.Unmarshal(stationBody, &station); err != nil {
-		return fmt.Errorf("decode station details: %w", err)
+		return normalizedSourceStation{}, false, fmt.Errorf("decode station details: %w", err)
 	}
 
 	var pricing []any
@@ -139,37 +207,9 @@ func (ing *IziviaIngester) processMarker(ctx context.Context, marker map[string]
 
 	src, tariffs, ok := normalizeIziviaStation(marker, station, pricing)
 	if !ok {
-		return fmt.Errorf("station without usable location")
+		return normalizedSourceStation{}, false, fmt.Errorf("station without usable location")
 	}
-
-	sourceStationID, err := ing.SourceStations.Upsert(ctx, src)
-	if err != nil {
-		return err
-	}
-
-	candidate, err := ing.Links.FindNearestStation(ctx, src.Lat, src.Lng, ing.MaxLinkDistanceM)
-	if err != nil {
-		return err
-	}
-	if candidate == nil {
-		return nil
-	}
-
-	quality := domain.LinkQualityByGeolocation
-	if strings.EqualFold(candidate.OperatorName, src.OperatorName) || strings.EqualFold(candidate.Name, src.Name) {
-		quality = domain.LinkQualityByOperatorName
-	}
-	distance := candidate.DistanceMeters
-	if err := ing.Links.Upsert(ctx, candidate.StationID, sourceStationID, src.Source, quality, &distance); err != nil {
-		return err
-	}
-	for _, t := range tariffs {
-		t.StationID = candidate.StationID
-		if err := ing.Tariffs.Upsert(ctx, t); err != nil {
-			return err
-		}
-	}
-	return nil
+	return normalizedSourceStation{Station: src, Tariffs: tariffs}, true, nil
 }
 
 func normalizeIziviaStation(marker, station map[string]any, pricing []any) (domain.SourceStation, []domain.StationTariff, bool) {

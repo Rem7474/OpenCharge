@@ -49,6 +49,52 @@ func TestLinkRepository_FindNearestStation(t *testing.T) {
 	}
 }
 
+func TestLinkRepository_FindNearestStations(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	linkRepo := NewLinkRepository(pool)
+
+	near := testStation("FRBULKN001", 45.9000, 6.1000)
+	near.OperatorName = "Izivia"
+	far := testStation("FRBULKN002", 46.5000, 6.9000)
+
+	if _, err := stationRepo.UpsertStation(ctx, near); err != nil {
+		t.Fatalf("UpsertStation near: %v", err)
+	}
+	if _, err := stationRepo.UpsertStation(ctx, far); err != nil {
+		t.Fatalf("UpsertStation far: %v", err)
+	}
+
+	points := []NearestStationQuery{
+		{Lat: 45.9001, Lng: 6.1000},  // index 0: close to "near"
+		{Lat: 10.0000, Lng: 10.0000}, // index 1: nowhere near anything
+	}
+	results, err := linkRepo.FindNearestStations(ctx, points, 150)
+	if err != nil {
+		t.Fatalf("FindNearestStations: %v", err)
+	}
+
+	candidate, ok := results[0]
+	if !ok {
+		t.Fatal("results[0] missing, want the nearby station")
+	}
+	if candidate.OperatorName != "Izivia" {
+		t.Errorf("results[0].OperatorName = %q, want Izivia", candidate.OperatorName)
+	}
+	if candidate.DistanceMeters <= 0 || candidate.DistanceMeters > 150 {
+		t.Errorf("results[0].DistanceMeters = %v, want a small positive value under 150", candidate.DistanceMeters)
+	}
+
+	if _, ok := results[1]; ok {
+		t.Errorf("results[1] = %+v, want absent (no station within range)", results[1])
+	}
+
+	if empty, err := linkRepo.FindNearestStations(ctx, nil, 150); err != nil || empty != nil {
+		t.Errorf("FindNearestStations(nil) = (%v, %v), want (nil, nil)", empty, err)
+	}
+}
+
 func TestLinkRepository_Upsert(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

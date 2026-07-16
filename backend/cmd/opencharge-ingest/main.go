@@ -58,7 +58,7 @@ func main() {
 		log.Printf("electra ingestion complete: %d stations", count)
 	}
 	runIzivia := func() {
-		ingester := ingestion.NewIziviaIngester(sourceStationRepo, tariffRepo, linkRepo, ingestion.DefaultIziviaConfig())
+		ingester := ingestion.NewIziviaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, ingestion.DefaultIziviaConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
 		count, err := ingester.Run(ctx)
 		if err != nil {

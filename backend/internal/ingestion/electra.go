@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"opencharge/internal/domain"
@@ -22,11 +21,6 @@ const DefaultElectraURL = "https://stations.go-electra.com/stations.js"
 // DefaultLinkMaxDistanceMeters is the default search radius used to
 // correlate an external source station with the nearest IRVE station.
 const DefaultLinkMaxDistanceMeters = 150.0
-
-// electraBulkChunkSize is the number of stations processed per database
-// transaction: batching many stations' writes (source station, link,
-// tariffs) under a single commit avoids paying one WAL fsync per station.
-const electraBulkChunkSize = 200
 
 type ElectraIngester struct {
 	Pool             *pgxpool.Pool
@@ -63,12 +57,22 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 	log.Printf("electra: %d stations downloaded", len(stations))
 
 	linked := 0
-	for i := 0; i < len(stations); i += electraBulkChunkSize {
-		end := i + electraBulkChunkSize
+	for i := 0; i < len(stations); i += ingestionBulkChunkSize {
+		end := i + ingestionBulkChunkSize
 		if end > len(stations) {
 			end = len(stations)
 		}
-		n, err := ing.processChunk(ctx, stations[i:end])
+
+		var items []normalizedSourceStation
+		for _, raw := range stations[i:end] {
+			sourceStation, stationTariffs, ok := normalizeElectraStation(raw)
+			if !ok {
+				continue
+			}
+			items = append(items, normalizedSourceStation{Station: sourceStation, Tariffs: stationTariffs})
+		}
+
+		n, err := writeSourceStationChunk(ctx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, items)
 		linked += n
 		if err != nil {
 			return linked, err
@@ -77,69 +81,6 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("electra: done, %d source stations processed", linked)
 	return linked, nil
-}
-
-// processChunk runs a batch of stations' source-station/link/tariff writes
-// inside a single transaction and commits once, instead of one autocommit
-// round trip per statement.
-func (ing *ElectraIngester) processChunk(ctx context.Context, rawStations []map[string]any) (int, error) {
-	tx, err := ing.Pool.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("begin electra chunk tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	sourceStations := ing.SourceStations.WithTx(tx)
-	tariffs := ing.Tariffs.WithTx(tx)
-	links := ing.Links.WithTx(tx)
-
-	processed := 0
-	for _, raw := range rawStations {
-		sourceStation, stationTariffs, ok := normalizeElectraStation(raw)
-		if !ok {
-			continue
-		}
-		sourceStationID, err := sourceStations.Upsert(ctx, sourceStation)
-		if err != nil {
-			return processed, err
-		}
-		if err := linkAndStoreTariffs(ctx, links, tariffs, sourceStation, sourceStationID, stationTariffs, ing.MaxLinkDistanceM); err != nil {
-			return processed, err
-		}
-		processed++
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit electra chunk tx: %w", err)
-	}
-	return processed, nil
-}
-
-func linkAndStoreTariffs(ctx context.Context, links *repository.LinkRepository, tariffs *repository.TariffRepository, src domain.SourceStation, sourceStationID uuid.UUID, stationTariffs []domain.StationTariff, maxLinkDistanceM float64) error {
-	candidate, err := links.FindNearestStation(ctx, src.Lat, src.Lng, maxLinkDistanceM)
-	if err != nil {
-		return err
-	}
-	if candidate == nil {
-		return nil
-	}
-
-	quality := domain.LinkQualityByGeolocation
-	if strings.EqualFold(candidate.OperatorName, src.OperatorName) {
-		quality = domain.LinkQualityByOperatorName
-	}
-	distance := candidate.DistanceMeters
-	if err := links.Upsert(ctx, candidate.StationID, sourceStationID, src.Source, quality, &distance); err != nil {
-		return err
-	}
-
-	for _, t := range stationTariffs {
-		t.StationID = candidate.StationID
-		if err := tariffs.Upsert(ctx, t); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (ing *ElectraIngester) fetch(ctx context.Context) ([]map[string]any, error) {
