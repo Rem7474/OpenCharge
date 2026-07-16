@@ -240,9 +240,17 @@ func (ing *FreshmileIngester) fetchAndNormalizeLocation(ctx context.Context, id 
 	if err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("fetch location details: %w", err)
 	}
-	var details map[string]any
-	if err := json.Unmarshal(body, &details); err != nil {
+	// Unlike map-locations (a bare {"features":[...]}), /locations/{id}
+	// wraps the actual location object in a "data" envelope.
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("decode location details: %w", err)
+	}
+	details := envelope.Data
+	if details == nil {
+		return normalizedSourceStation{}, false, fmt.Errorf("location details response missing \"data\" envelope")
 	}
 
 	src, ok := normalizeFreshmileStation(details)
