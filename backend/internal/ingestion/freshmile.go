@@ -39,6 +39,29 @@ const freshmileMaxSubdivisionDepth = 8
 // cluster geometry causes an explosion in sibling tiles.
 const freshmileMaxTilesVisited = 20000
 
+// freshmileMinBBoxDegrees is the minimum width/height a map-locations
+// query bbox is padded out to (~100m at French latitudes). Freshmile's API
+// returns a 500 for a zero-area bbox, which happens in practice when a
+// cluster's own reported bbox.sw/bbox.ne collapse to the same coordinate
+// on one axis (observed: several stations at the exact same longitude).
+const freshmileMinBBoxDegrees = 0.001
+
+// padDegenerateBBox widens bbox around its center on any axis narrower
+// than freshmileMinBBoxDegrees, leaving a normal-sized bbox untouched.
+func padDegenerateBBox(b freshmileBBox) freshmileBBox {
+	if b.MaxLng-b.MinLng < freshmileMinBBoxDegrees {
+		centerLng := (b.MinLng + b.MaxLng) / 2
+		b.MinLng = centerLng - freshmileMinBBoxDegrees/2
+		b.MaxLng = centerLng + freshmileMinBBoxDegrees/2
+	}
+	if b.MaxLat-b.MinLat < freshmileMinBBoxDegrees {
+		centerLat := (b.MinLat + b.MaxLat) / 2
+		b.MinLat = centerLat - freshmileMinBBoxDegrees/2
+		b.MaxLat = centerLat + freshmileMinBBoxDegrees/2
+	}
+	return b
+}
+
 // FreshmileConfig tunes the per-location detail-fetch worker pool.
 type FreshmileConfig struct {
 	Workers int
@@ -252,6 +275,14 @@ func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, e
 			return
 		}
 		visited++
+
+		// A cluster's own reported bbox can collapse to a single point on
+		// one axis (real data: e.g. several stations at the exact same
+		// longitude) — querying map-locations with a zero-area bbox gets a
+		// 500 from Freshmile's API, so always pad before querying,
+		// regardless of whether bbox came from the initial grid or a
+		// cluster subdivision.
+		bbox = padDegenerateBBox(bbox)
 
 		features, err := ing.fetchMapLocations(ctx, bbox)
 		if err != nil {

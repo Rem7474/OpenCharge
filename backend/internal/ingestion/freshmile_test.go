@@ -261,6 +261,33 @@ func TestFreshmileConnectorType(t *testing.T) {
 	}
 }
 
+func TestPadDegenerateBBox(t *testing.T) {
+	// Observed in the wild: a cluster's reported bbox.sw/bbox.ne collapse
+	// to the same longitude, producing a zero-width query bbox that
+	// Freshmile's API 500s on.
+	degenerate := freshmileBBox{MinLng: -1.579401008784771, MinLat: 43.313418, MaxLng: -1.579401008784771, MaxLat: 43.313419}
+	padded := padDegenerateBBox(degenerate)
+	// Allow for ordinary float64 rounding in the center +/- half-width
+	// arithmetic (e.g. 0.0009999999999998899 instead of exactly 0.001).
+	if padded.MaxLng-padded.MinLng < freshmileMinBBoxDegrees-1e-9 {
+		t.Errorf("padded width = %v, want ~>= %v", padded.MaxLng-padded.MinLng, freshmileMinBBoxDegrees)
+	}
+	if padded.MaxLng <= padded.MinLng {
+		t.Errorf("padded bbox still degenerate: %+v", padded)
+	}
+	wantCenterLng := -1.579401008784771
+	gotCenterLng := (padded.MinLng + padded.MaxLng) / 2
+	if gotCenterLng != wantCenterLng {
+		t.Errorf("padding shifted the center: got %v, want %v", gotCenterLng, wantCenterLng)
+	}
+
+	// A normal, already-valid bbox must be left untouched.
+	normal := freshmileBBox{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	if got := padDegenerateBBox(normal); got != normal {
+		t.Errorf("padDegenerateBBox(%+v) = %+v, want unchanged", normal, got)
+	}
+}
+
 func TestSubdivideBBox(t *testing.T) {
 	b := freshmileBBox{MinLng: 0, MinLat: 0, MaxLng: 2, MaxLat: 2}
 	subs := subdivideBBox(b)
