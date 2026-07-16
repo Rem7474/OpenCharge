@@ -22,6 +22,7 @@ FROM debian:bookworm-slim AS ingest
 RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         xvfb \
+        xauth \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 ENV TESLA_CHROME_PATH=/usr/bin/chromium
