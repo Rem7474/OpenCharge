@@ -450,13 +450,24 @@ func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshm
 // occasionally returning 504 Gateway Timeout) is retried before giving up
 // on that request. 4xx responses are never retried — they won't succeed
 // on a second try.
-const freshmileMaxRetries = 3
+//
+// A map-locations failure here isn't like a single location's detail
+// fetch failing (that just skips one station): scanLocationIDs drops the
+// whole tile/cluster branch and never revisits it, so a region can go
+// permanently missing from discovery. That, plus scanLocationIDs now
+// running freshmileScanWorkers requests concurrently (more simultaneous
+// load on the same gateway than the old sequential scan ever produced),
+// makes a short retry budget more likely to be exhausted by transient
+// 504s than it used to be — so this is deliberately more generous than a
+// single-request retry would normally need, with exponential backoff
+// instead of linear.
+const freshmileMaxRetries = 5
 
 func (ing *FreshmileIngester) getJSON(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= freshmileMaxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(attempt) * ing.retryBackoff
+			backoff := (1 << (attempt - 1)) * ing.retryBackoff
 			log.Printf("freshmile: retrying %s in %v (attempt %d/%d) after: %v", url, backoff, attempt+1, freshmileMaxRetries+1, lastErr)
 			select {
 			case <-time.After(backoff):
