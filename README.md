@@ -120,19 +120,27 @@ Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra, Izivia, Tesla et Freshmile sont corrélés.
 
-**Tesla nécessite Chromium.** `tesla.com/api/findus/*` est protégé par un
-bot-mitigation (Akamai) qui rejette toute requête HTTP classique quels que
-soient les en-têtes envoyés — un vrai moteur de navigateur est nécessaire.
-`backend/internal/ingestion/tesla.go` pilote donc Chromium headless via
+**Tesla nécessite Chromium — en mode "headed", pas headless.**
+`tesla.com/api/findus/*` est protégé par un bot-mitigation (Akamai) qui
+rejette toute requête HTTP classique quels que soient les en-têtes envoyés
+— un vrai moteur de navigateur est nécessaire. Mais Akamai détecte
+également Chrome lancé en `--headless` et le bloque de la même façon
+(vérifié empiriquement : `Access Denied`) ; il faut donc un Chrome
+"headed" classique, tourné vers un display (réel ou virtuel).
+`backend/internal/ingestion/tesla.go` pilote donc Chromium via
 [chromedp](https://github.com/chromedp/chromedp) plutôt que `net/http`
-pour cette source uniquement. En local, il faut un binaire Chrome/Chromium
-installé et accessible : soit dans le `PATH` (`google-chrome`, `chromium`,
-...), soit désigné explicitement via `-tesla-chrome-path` ou la variable
-`TESLA_CHROME_PATH`. L'image Docker `ingest`
-(`backend/Dockerfile`, cible `ingest`) installe Chromium et positionne déjà
-`TESLA_CHROME_PATH=/usr/bin/chromium` — c'est pour ça que cette image est
-nettement plus lourde que `api` (base `debian:bookworm-slim` + Chromium,
-au lieu de distroless).
+pour cette source uniquement, avec `headless=false`. En local sur un poste
+avec écran, il faut un binaire Chrome/Chromium installé et accessible :
+soit dans le `PATH` (`google-chrome`, `chromium`, ...), soit désigné
+explicitement via `-tesla-chrome-path` ou la variable `TESLA_CHROME_PATH`.
+Sur un serveur/CI sans display, il faut lancer la commande sous un display
+virtuel, ex. `xvfb-run -a go run ./cmd/opencharge-ingest -source tesla`.
+L'image Docker `ingest` (`backend/Dockerfile`, cible `ingest`) installe
+Chromium + `xvfb`, positionne `TESLA_CHROME_PATH=/usr/bin/chromium`, et son
+`ENTRYPOINT` est déjà enveloppé dans `xvfb-run` — rien de plus à faire
+côté Docker. C'est pour ça que cette image est nettement plus lourde que
+`api` (base `debian:bookworm-slim` + Chromium + xvfb, au lieu de
+distroless).
 
 ## Tests
 

@@ -41,9 +41,11 @@ func DefaultTeslaConfig() TeslaConfig {
 // rejects plain net/http requests outright (even with a full set of
 // browser-like headers — verified: still a 403 "Access Denied" edge page)
 // because it fingerprints the TLS/JS environment, not just headers. A real
-// browser is required, so this ingester drives headless Chromium via
-// chromedp instead of net/http for every fetch (both get-locations and
-// get-charger-details).
+// browser is required, so this ingester drives Chromium via chromedp
+// instead of net/http for every fetch (both get-locations and
+// get-charger-details). It also must run in "headed" mode (against a
+// virtual display, not --headless) — Akamai fingerprints headless Chrome
+// too and denies it just the same.
 type TeslaIngester struct {
 	Pool             *pgxpool.Pool
 	SourceStations   *repository.SourceStationRepository
@@ -103,8 +105,14 @@ func teslaDetailsURLFmtFor(locationsURL string) string {
 // connections as the concurrency unit.
 func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("disable-gpu", true),
+		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
+		// headless Chrome and serves an "Access Denied" page instead of
+		// JSON (confirmed empirically — --headless=true and --headless=new
+		// both get denied; the working Playwright prototype this was
+		// ported from used headless=False for the same reason). Run a real
+		// "headed" Chrome instead, pointed at a virtual display (Xvfb) in
+		// the ingest Docker image — see its entrypoint.
+		chromedp.Flag("headless", false),
 		// Most container runtimes (including this project's Docker image)
 		// run as root, where Chromium's sandbox refuses to start at all.
 		chromedp.Flag("no-sandbox", true),
