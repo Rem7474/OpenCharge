@@ -46,6 +46,21 @@ services:
     # No ports published: only reachable from other containers (the web
     # service reverse-proxies /api/* to it) — see nginx.conf.
 
+  ingest:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: ingest
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable
+    # No default command: pass -source (and any other flag) via
+    # `docker compose run --rm ingest -source tesla`. The image bakes in
+    # TESLA_CHROME_PATH, so no extra flag is needed for the tesla source.
+
   web:
     build:
       context: ./frontend/web
