@@ -159,6 +159,32 @@ func normalizeElectraStation(raw map[string]any) (domain.SourceStation, []domain
 	return src, normalizeElectraTariffs(raw["pricings"]), true
 }
 
+// electraPublicPriceCentsPerKWh is Electra's public tariff (no app), which
+// is a flat rate published on their site rather than something exposed by
+// the stations.js feed. It must be updated by hand if Electra changes it.
+const electraPublicPriceCentsPerKWh = 64.0
+
+// electraSubscriptionDiscountCentsPerKWh is the Electra Smart subscription
+// discount applied on top of the "app" (scraped) price, on every window.
+const electraSubscriptionDiscountCentsPerKWh = 20.0
+
+type electraWindow struct {
+	startTime, endTime string
+	priceCentsPerKWh   *float64
+}
+
+func (w electraWindow) toExtra() map[string]any {
+	m := map[string]any{"startTime": w.startTime, "endTime": w.endTime}
+	if w.priceCentsPerKWh != nil {
+		m["energyPriceCentsPerKwh"] = *w.priceCentsPerKWh
+	}
+	return m
+}
+
+// normalizeElectraTariffs turns Electra's per-connector pricing into three
+// StationTariff rows per kind (ac/dc): "public" (flat, no app), "app" (the
+// scraped price, which can vary by time window), and "subscription" (the
+// app price minus the Electra Smart discount, on every window).
 func normalizeElectraTariffs(value any) []domain.StationTariff {
 	pricingMap, ok := value.(map[string]any)
 	if !ok {
@@ -175,8 +201,8 @@ func normalizeElectraTariffs(value any) []domain.StationTariff {
 		currency := firstNonEmpty(stringValue(pricing["currency"]), "EUR")
 		windowsValue, _ := pricing["windows"].([]any)
 
-		var windows []map[string]any
-		var energyPrice, sessionPrice, congestionPrice *float64
+		var appWindows []electraWindow
+		var sessionPrice, congestionPrice *float64
 		for _, item := range windowsValue {
 			windowMap, ok := item.(map[string]any)
 			if !ok {
@@ -185,33 +211,64 @@ func normalizeElectraTariffs(value any) []domain.StationTariff {
 			price, _ := floatValue(windowMap["energy_price_cents_per_kwh"])
 			session, _ := floatValue(windowMap["session_duration_price_cents_per_min"])
 			congestion, _ := floatValue(windowMap["congestion_price_cents_per_min"])
-			if price != nil {
-				energyPrice = price
-			}
 			if session != nil {
 				sessionPrice = session
 			}
 			if congestion != nil {
 				congestionPrice = congestion
 			}
-			windows = append(windows, map[string]any{
-				"startTime": stringValue(windowMap["start_time"]),
-				"endTime":   stringValue(windowMap["end_time"]),
+			appWindows = append(appWindows, electraWindow{
+				startTime:        stringValue(windowMap["start_time"]),
+				endTime:          stringValue(windowMap["end_time"]),
+				priceCentsPerKWh: price,
 			})
 		}
 
-		tariffs = append(tariffs, domain.StationTariff{
-			Source:                     "electra",
-			Kind:                       kind,
-			Model:                      "electra_fixed",
-			Currency:                   currency,
-			EnergyPriceCentsPerKWh:     energyPrice,
-			SessionPriceCentsPerMin:    sessionPrice,
-			CongestionPriceCentsPerMin: congestionPrice,
-			Extra:                      map[string]any{"windows": windows},
-		})
+		publicPrice := electraPublicPriceCentsPerKWh
+		publicWindows := []electraWindow{{startTime: "00:00", endTime: "23:59", priceCentsPerKWh: &publicPrice}}
+
+		subscriptionWindows := make([]electraWindow, len(appWindows))
+		for i, w := range appWindows {
+			subscriptionWindows[i] = electraWindow{startTime: w.startTime, endTime: w.endTime, priceCentsPerKWh: subtractCents(w.priceCentsPerKWh, electraSubscriptionDiscountCentsPerKWh)}
+		}
+
+		base := domain.StationTariff{
+			Source: "electra", Kind: kind, Model: "electra_fixed", Currency: currency,
+			SessionPriceCentsPerMin: sessionPrice, CongestionPriceCentsPerMin: congestionPrice,
+		}
+		tariffs = append(tariffs,
+			withPlan(base, "public", publicWindows),
+			withPlan(base, "app", appWindows),
+			withPlan(base, "subscription", subscriptionWindows),
+		)
 	}
 	return tariffs
+}
+
+// withPlan attaches a plan's windows to a copy of base: the tariff's
+// top-level EnergyPriceCentsPerKWh becomes the cheapest window (a single
+// representative number for map/list display), while extra.windows keeps
+// the full per-window breakdown for the hourly price chart.
+func withPlan(base domain.StationTariff, plan string, windows []electraWindow) domain.StationTariff {
+	t := base
+	t.Plan = plan
+	extraWindows := make([]map[string]any, len(windows))
+	var prices []*float64
+	for i, w := range windows {
+		extraWindows[i] = w.toExtra()
+		prices = append(prices, w.priceCentsPerKWh)
+	}
+	t.EnergyPriceCentsPerKWh = minPrice(prices)
+	t.Extra = map[string]any{"windows": extraWindows}
+	return t
+}
+
+func subtractCents(price *float64, delta float64) *float64 {
+	if price == nil {
+		return nil
+	}
+	result := *price - delta
+	return &result
 }
 
 func electraKind(connectorKind string) string {

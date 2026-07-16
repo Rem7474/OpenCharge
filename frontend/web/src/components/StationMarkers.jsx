@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { fetchStationsInBBox } from "../api/stations.js";
-import { pickPriceCentsPerKWh, formatPrice } from "../utils/pricing.js";
+import { pickPriceCentsPerKWh, formatPrice, sourcePlanPairs } from "../utils/pricing.js";
 
 const MIN_ZOOM_TO_LOAD = 10;
 
@@ -33,7 +33,7 @@ export default function StationMarkers({ onSelect, selectedSources, priceMode, c
     abortRef.current = controller;
     setLoading(true);
     fetchStationsInBBox(boundsToBBox(map.getBounds()), {
-      sources: selectedSources,
+      sources: sourcePlanPairs(selectedSources),
       hasTariffs: true,
       signal: controller.signal,
     })
@@ -49,10 +49,11 @@ export default function StationMarkers({ onSelect, selectedSources, priceMode, c
     zoomend: () => load(map),
   });
 
+  const sourcesKey = sourcePlanPairs(selectedSources).join(",");
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSources.join(",")]);
+  }, [sourcesKey]);
 
   const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
 
@@ -62,7 +63,8 @@ export default function StationMarkers({ onSelect, selectedSources, priceMode, c
       {belowMinZoom && <div className="status-banner">Zoomez pour afficher les bornes</div>}
       {stations.map((station) => {
         const connectorType = station.connectors?.[0]?.kind;
-        const pricing = selectedSources.length > 0 ? station.selectedSourcesPricing : station.pricingSummary;
+        const hasSelection = Object.keys(selectedSources).length > 0;
+        const pricing = hasSelection ? station.selectedSourcesPricing : station.pricingSummary;
         const priceCents = pickPriceCentsPerKWh(pricing, connectorType);
         const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
 

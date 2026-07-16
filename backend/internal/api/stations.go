@@ -27,11 +27,12 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 // It never loads the whole dataset: bbox is mandatory, and the map/frontend
 // is expected to re-query on every viewport change.
 //
-// source accepts a comma-separated list of tariff sources (e.g.
-// "izivia,electra"). It never filters stations out of the response: it
-// only controls which sources selectedSourcesPricing is computed from, so
-// the map can gray out stations lacking a tariff from the selection
-// instead of hiding them.
+// source accepts a comma-separated list of "source:plan" pairs (e.g.
+// "izivia:standard,electra:subscription"); a bare source name (no ":plan")
+// defaults to the "standard" plan. It never filters stations out of the
+// response: it only controls which (source, plan) pairs
+// selectedSourcesPricing is computed from, so the map can gray out
+// stations lacking a tariff from the selection instead of hiding them.
 func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -61,7 +62,7 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 		MaxLng:   coords[2],
 		MaxLat:   coords[3],
 		Operator: q.Get("operator"),
-		Sources:  parseSources(q.Get("source")),
+		Sources:  parseSourcePlanPairs(q.Get("source")),
 	}
 	if v := q.Get("hasTariffs"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -94,17 +95,23 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
-// ListSources handles GET /sources: every tariff source currently ingested
-// (e.g. "izivia", "electra"), so the frontend can build its operator filter
-// dynamically instead of hardcoding the list.
+// ListSources handles GET /sources: every tariff source currently ingested,
+// each with its available price plans (e.g. "izivia" -> ["standard"],
+// "electra" -> ["app", "public", "subscription"]), so the frontend can
+// build its operator filter and plan selector dynamically instead of
+// hardcoding anything.
 func (h *StationsHandler) ListSources(w http.ResponseWriter, r *http.Request) {
-	sources, err := h.Tariffs.ListDistinctSources(r.Context())
+	sources, err := h.Tariffs.ListDistinctSourcesWithPlans(r.Context())
 	if err != nil {
 		log.Printf("api: list sources: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to list sources")
 		return
 	}
-	writeJSON(w, http.StatusOK, sources)
+	items := make([]sourcePlansDTO, 0, len(sources))
+	for _, s := range sources {
+		items = append(items, sourcePlansDTO{ID: s.Source, Plans: s.Plans})
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 // GetStation handles GET /stations/{id} where id is "irve:<id_pdc_itinerance>".
@@ -161,20 +168,25 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// parseSources splits a comma-separated "source" query param (e.g.
-// "izivia,electra") into a clean slice, dropping empty entries and
-// whitespace. An empty input returns nil.
-func parseSources(raw string) []string {
+// parseSourcePlanPairs splits a comma-separated "source" query param (e.g.
+// "izivia,electra:subscription") into normalized "source:plan" pairs,
+// defaulting a bare source name to the standard plan. Dropping empty
+// entries and whitespace. An empty input returns nil.
+func parseSourcePlanPairs(raw string) []string {
 	if raw == "" {
 		return nil
 	}
 	parts := strings.Split(raw, ",")
-	sources := make([]string, 0, len(parts))
+	pairs := make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		if p != "" {
-			sources = append(sources, p)
+		if p == "" {
+			continue
 		}
+		if !strings.Contains(p, ":") {
+			p = p + ":" + domain.TariffPlanStandard
+		}
+		pairs = append(pairs, p)
 	}
-	return sources
+	return pairs
 }

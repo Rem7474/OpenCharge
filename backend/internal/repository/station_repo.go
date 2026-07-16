@@ -96,12 +96,14 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	// SelectedSourcesPricing never filters the result set (a station
 	// without a tariff from f.Sources must still be returned, so the map
 	// can gray it out instead of hiding it) — it's purely an extra
-	// aggregate computed alongside the global min price.
+	// aggregate computed alongside the global min price. f.Sources holds
+	// "source:plan" pairs (e.g. "electra:subscription"), matched against
+	// the tariff's own source/plan joined the same way.
 	args = append(args, f.Sources)
 	sourcesParamIdx := len(args)
 	query := stationListSelectPrefix + fmt.Sprintf(`,
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'ac' AND t.source = ANY($%d::text[])),
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'dc' AND t.source = ANY($%d::text[]))`, sourcesParamIdx, sourcesParamIdx)
+		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'ac' AND (t.source || ':' || t.plan) = ANY($%d::text[])),
+		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'dc' AND (t.source || ':' || t.plan) = ANY($%d::text[]))`, sourcesParamIdx, sourcesParamIdx)
 	query += stationListFrom + `
 		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 

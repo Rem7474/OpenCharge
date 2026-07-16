@@ -244,13 +244,14 @@ func TestStationRepository_ListByBBox_SelectedSourcesPricing(t *testing.T) {
 		}
 	}
 
-	// Selecting "electra" must never drop the izivia-only station (grayed
-	// out on the map, not hidden) but only the electra station gets a
-	// SelectedSourcesPricing price.
-	bbox.Sources = []string{"electra"}
+	// Selecting "electra:standard" must never drop the izivia-only station
+	// (grayed out on the map, not hidden) but only the electra station gets
+	// a SelectedSourcesPricing price. The repository deals in opaque
+	// "source:plan" pairs; pairing them up is the API handler's job.
+	bbox.Sources = []string{"electra:standard"}
 	results, err = stationRepo.ListByBBox(ctx, bbox)
 	if err != nil {
-		t.Fatalf("ListByBBox sources=electra: %v", err)
+		t.Fatalf("ListByBBox sources=electra:standard: %v", err)
 	}
 	if len(results) != 2 {
 		t.Fatalf("got %d stations with Sources=[electra], want 2 (never filtered out)", len(results))
@@ -275,5 +276,20 @@ func TestStationRepository_ListByBBox_SelectedSourcesPricing(t *testing.T) {
 	}
 	if electra.SelectedSourcesPricing.DCMinCentsPerKWh == nil || *electra.SelectedSourcesPricing.DCMinCentsPerKWh != 48.0 {
 		t.Errorf("electra station: DCMinCentsPerKWh = %v, want 48.0", electra.SelectedSourcesPricing.DCMinCentsPerKWh)
+	}
+
+	// Selecting a plan the station doesn't have a tariff for ("subscription"
+	// vs the "standard" plan actually stored) must not match: the matching
+	// is plan-aware, not just source-aware.
+	bbox.Sources = []string{"electra:subscription"}
+	results, err = stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox sources=electra:subscription: %v", err)
+	}
+	for _, r := range results {
+		if r.Station.IRVEIDPDC == "FRSRC0002" && r.SelectedSourcesPricing != nil &&
+			(r.SelectedSourcesPricing.ACMinCentsPerKWh != nil || r.SelectedSourcesPricing.DCMinCentsPerKWh != nil) {
+			t.Errorf("electra station with sources=electra:subscription = %+v, want no price (only the standard plan is stored)", r.SelectedSourcesPricing)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import { PRICE_MODE_PER_KWH, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
 export default function FilterBar({
   selectedSources,
   onToggleSource,
+  onSelectPlan,
   priceMode,
   onChangePriceMode,
   chargeKWh,
@@ -13,7 +14,7 @@ export default function FilterBar({
     <div className="filter-bar">
       <div className="filter-group">
         <span className="filter-label">Réseaux</span>
-        <OperatorFilter selectedSources={selectedSources} onToggleSource={onToggleSource} />
+        <OperatorFilter selectedSources={selectedSources} onToggleSource={onToggleSource} onSelectPlan={onSelectPlan} />
       </div>
 
       <div className="filter-group">

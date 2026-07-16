@@ -97,8 +97,14 @@ type stationDetailDTO struct {
 	AccessType string         `json:"accessType,omitempty"`
 }
 
+type sourcePlansDTO struct {
+	ID    string   `json:"id"`
+	Plans []string `json:"plans"`
+}
+
 type tariffDTO struct {
 	Source                     string         `json:"source"`
+	Plan                       string         `json:"plan"`
 	Kind                       string         `json:"kind"`
 	Model                      string         `json:"model"`
 	Currency                   string         `json:"currency"`
@@ -146,6 +152,7 @@ func toTariffDTO(t domain.StationTariff) tariffDTO {
 	}
 	return tariffDTO{
 		Source:                     t.Source,
+		Plan:                       t.Plan,
 		Kind:                       t.Kind,
 		Model:                      t.Model,
 		Currency:                   t.Currency,

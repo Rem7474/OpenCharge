@@ -182,13 +182,18 @@ func TestListSources(t *testing.T) {
 	station := seedStation(t, h, "FRAPI0005", 45.90, 6.10)
 
 	price := 40.0
-	for _, source := range []string{"electra", "izivia"} {
-		err := h.Tariffs.Upsert(context.Background(), domain.StationTariff{
-			StationID: station.ID, Source: source, Kind: domain.TariffKindAC,
-			Model: "test", Currency: "EUR", EnergyPriceCentsPerKWh: &price,
-		})
-		if err != nil {
-			t.Fatalf("seed tariff %s: %v", source, err)
+	seeds := []domain.StationTariff{
+		{Source: "electra", Plan: "app", Kind: domain.TariffKindAC},
+		{Source: "electra", Plan: "public", Kind: domain.TariffKindAC},
+		{Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindMixed},
+	}
+	for _, tariff := range seeds {
+		tariff.StationID = station.ID
+		tariff.Model = "test"
+		tariff.Currency = "EUR"
+		tariff.EnergyPriceCentsPerKWh = &price
+		if err := h.Tariffs.Upsert(context.Background(), tariff); err != nil {
+			t.Fatalf("seed tariff %s/%s: %v", tariff.Source, tariff.Plan, err)
 		}
 	}
 
@@ -200,11 +205,20 @@ func TestListSources(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var sources []string
+	var sources []struct {
+		ID    string   `json:"id"`
+		Plans []string `json:"plans"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(sources) != 2 || sources[0] != "electra" || sources[1] != "izivia" {
-		t.Errorf("sources = %v, want [electra izivia]", sources)
+	if len(sources) != 2 {
+		t.Fatalf("got %d sources, want 2: %+v", len(sources), sources)
+	}
+	if sources[0].ID != "electra" || len(sources[0].Plans) != 2 || sources[0].Plans[0] != "app" || sources[0].Plans[1] != "public" {
+		t.Errorf("sources[0] = %+v, want electra with plans [app public]", sources[0])
+	}
+	if sources[1].ID != "izivia" || len(sources[1].Plans) != 1 || sources[1].Plans[0] != "standard" {
+		t.Errorf("sources[1] = %+v, want izivia with plans [standard]", sources[1])
 	}
 }

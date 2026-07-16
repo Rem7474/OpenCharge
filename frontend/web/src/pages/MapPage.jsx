@@ -10,14 +10,25 @@ const DEFAULT_CHARGE_KWH = 50;
 
 export default function MapPage() {
   const [selectedStationId, setSelectedStationId] = useState(null);
-  const [selectedSources, setSelectedSources] = useState([]);
+  // { sourceId: planId }, e.g. { electra: "subscription", izivia: "standard" }.
+  const [selectedSources, setSelectedSources] = useState({});
   const [priceMode, setPriceMode] = useState(PRICE_MODE_PER_KWH);
   const [chargeKWh, setChargeKWh] = useState(DEFAULT_CHARGE_KWH);
 
-  const toggleSource = (sourceId) => {
-    setSelectedSources((prev) =>
-      prev.includes(sourceId) ? prev.filter((s) => s !== sourceId) : [...prev, sourceId]
-    );
+  const toggleSource = (source, wasChecked) => {
+    setSelectedSources((prev) => {
+      const next = { ...prev };
+      if (wasChecked) {
+        delete next[source.id];
+      } else {
+        next[source.id] = source.plans[0];
+      }
+      return next;
+    });
+  };
+
+  const selectPlan = (sourceId, planId) => {
+    setSelectedSources((prev) => ({ ...prev, [sourceId]: planId }));
   };
 
   return (
@@ -25,6 +36,7 @@ export default function MapPage() {
       <FilterBar
         selectedSources={selectedSources}
         onToggleSource={toggleSource}
+        onSelectPlan={selectPlan}
         priceMode={priceMode}
         onChangePriceMode={setPriceMode}
         chargeKWh={chargeKWh}

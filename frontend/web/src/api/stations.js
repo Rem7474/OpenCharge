@@ -4,10 +4,12 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
  * Fetch stations intersecting a map viewport. bbox is mandatory: the map
  * never loads the whole IRVE dataset, only what's currently visible.
  *
- * `sources` (array of tariff source ids, e.g. ["izivia", "electra"]) never
+ * `sources` (array of "source:plan" pairs, e.g. ["izivia:standard",
+ * "electra:subscription"] — see utils/pricing.js#sourcePlanPairs) never
  * filters stations out server-side: it only asks the API to compute
- * `selectedSourcesPricing` for those sources, so stations without a tariff
- * from the selection can still be shown, just without a price.
+ * `selectedSourcesPricing` for those (source, plan) pairs, so stations
+ * without a tariff from the selection can still be shown, just without a
+ * price.
  */
 export async function fetchStationsInBBox(bbox, { operator, hasTariffs, sources, limit, signal } = {}) {
   const params = new URLSearchParams();

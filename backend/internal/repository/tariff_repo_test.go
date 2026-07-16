@@ -89,18 +89,18 @@ func TestTariffRepository_UpsertAndListByStation(t *testing.T) {
 	}
 }
 
-func TestTariffRepository_ListDistinctSources(t *testing.T) {
+func TestTariffRepository_ListDistinctSourcesWithPlans(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()
 	stationRepo := NewStationRepository(pool)
 	tariffRepo := NewTariffRepository(pool)
 
-	empty, err := tariffRepo.ListDistinctSources(ctx)
+	empty, err := tariffRepo.ListDistinctSourcesWithPlans(ctx)
 	if err != nil {
-		t.Fatalf("ListDistinctSources (empty): %v", err)
+		t.Fatalf("ListDistinctSourcesWithPlans (empty): %v", err)
 	}
 	if len(empty) != 0 {
-		t.Errorf("ListDistinctSources on an empty table = %v, want []", empty)
+		t.Errorf("ListDistinctSourcesWithPlans on an empty table = %v, want []", empty)
 	}
 
 	stationID, err := stationRepo.UpsertStation(ctx, testStation("FRSOURCES1", 45.9, 6.1))
@@ -108,21 +108,34 @@ func TestTariffRepository_ListDistinctSources(t *testing.T) {
 		t.Fatalf("UpsertStation: %v", err)
 	}
 	price := 40.0
-	for _, source := range []string{"electra", "izivia", "electra"} {
-		if err := tariffRepo.Upsert(ctx, domain.StationTariff{
-			StationID: stationID, Source: source, Kind: domain.TariffKindAC,
-			Model: "test", Currency: "EUR", EnergyPriceCentsPerKWh: &price,
-		}); err != nil {
-			t.Fatalf("Upsert %s: %v", source, err)
+	tariffs := []domain.StationTariff{
+		{Source: "electra", Plan: "app", Kind: domain.TariffKindAC},
+		{Source: "electra", Plan: "public", Kind: domain.TariffKindAC},
+		{Source: "electra", Plan: "app", Kind: domain.TariffKindDC}, // same source+plan, different kind: no new plan entry
+		{Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindMixed},
+	}
+	for _, tariff := range tariffs {
+		tariff.StationID = stationID
+		tariff.Model = "test"
+		tariff.Currency = "EUR"
+		tariff.EnergyPriceCentsPerKWh = &price
+		if err := tariffRepo.Upsert(ctx, tariff); err != nil {
+			t.Fatalf("Upsert %s/%s: %v", tariff.Source, tariff.Plan, err)
 		}
 	}
 
-	sources, err := tariffRepo.ListDistinctSources(ctx)
+	sources, err := tariffRepo.ListDistinctSourcesWithPlans(ctx)
 	if err != nil {
-		t.Fatalf("ListDistinctSources: %v", err)
+		t.Fatalf("ListDistinctSourcesWithPlans: %v", err)
 	}
-	if len(sources) != 2 || sources[0] != "electra" || sources[1] != "izivia" {
-		t.Errorf("ListDistinctSources = %v, want [electra izivia] (deduped, sorted)", sources)
+	if len(sources) != 2 {
+		t.Fatalf("got %d sources, want 2: %+v", len(sources), sources)
+	}
+	if sources[0].Source != "electra" || len(sources[0].Plans) != 2 || sources[0].Plans[0] != "app" || sources[0].Plans[1] != "public" {
+		t.Errorf("sources[0] = %+v, want electra with plans [app public]", sources[0])
+	}
+	if sources[1].Source != "izivia" || len(sources[1].Plans) != 1 || sources[1].Plans[0] != "standard" {
+		t.Errorf("sources[1] = %+v, want izivia with plans [standard]", sources[1])
 	}
 }
 

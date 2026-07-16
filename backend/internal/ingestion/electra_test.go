@@ -44,18 +44,77 @@ func TestNormalizeElectraStation(t *testing.T) {
 		t.Errorf("AddressCountry = %q, want FR", src.AddressCountry)
 	}
 
-	if len(tariffs) != 1 {
-		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	// One connector kind (dc_combo) now yields 3 plans: public, app, subscription.
+	if len(tariffs) != 3 {
+		t.Fatalf("got %d tariffs, want 3 (public/app/subscription)", len(tariffs))
 	}
-	tariff := tariffs[0]
-	if tariff.Kind != domain.TariffKindDC {
-		t.Errorf("Kind = %q, want dc", tariff.Kind)
+	byPlan := map[string]domain.StationTariff{}
+	for _, tariff := range tariffs {
+		if tariff.Kind != domain.TariffKindDC {
+			t.Errorf("tariff %s: Kind = %q, want dc", tariff.Plan, tariff.Kind)
+		}
+		if tariff.CongestionPriceCentsPerMin == nil || *tariff.CongestionPriceCentsPerMin != 12.0 {
+			t.Errorf("tariff %s: CongestionPriceCentsPerMin = %v, want 12.0", tariff.Plan, tariff.CongestionPriceCentsPerMin)
+		}
+		byPlan[tariff.Plan] = tariff
 	}
-	if tariff.EnergyPriceCentsPerKWh == nil || *tariff.EnergyPriceCentsPerKWh != 48.0 {
-		t.Errorf("EnergyPriceCentsPerKWh = %v, want 48.0", tariff.EnergyPriceCentsPerKWh)
+
+	public, ok := byPlan["public"]
+	if !ok {
+		t.Fatal("missing public plan tariff")
 	}
-	if tariff.CongestionPriceCentsPerMin == nil || *tariff.CongestionPriceCentsPerMin != 12.0 {
-		t.Errorf("CongestionPriceCentsPerMin = %v, want 12.0", tariff.CongestionPriceCentsPerMin)
+	if public.EnergyPriceCentsPerKWh == nil || *public.EnergyPriceCentsPerKWh != electraPublicPriceCentsPerKWh {
+		t.Errorf("public.EnergyPriceCentsPerKWh = %v, want %v", public.EnergyPriceCentsPerKWh, electraPublicPriceCentsPerKWh)
+	}
+
+	app, ok := byPlan["app"]
+	if !ok {
+		t.Fatal("missing app plan tariff")
+	}
+	if app.EnergyPriceCentsPerKWh == nil || *app.EnergyPriceCentsPerKWh != 48.0 {
+		t.Errorf("app.EnergyPriceCentsPerKWh = %v, want 48.0 (the scraped price)", app.EnergyPriceCentsPerKWh)
+	}
+	appWindows, _ := app.Extra["windows"].([]map[string]any)
+	if len(appWindows) != 1 || appWindows[0]["energyPriceCentsPerKwh"] != 48.0 {
+		t.Errorf("app.Extra[windows] = %+v, want a single window at 48.0", app.Extra["windows"])
+	}
+
+	subscription, ok := byPlan["subscription"]
+	if !ok {
+		t.Fatal("missing subscription plan tariff")
+	}
+	if subscription.EnergyPriceCentsPerKWh == nil || *subscription.EnergyPriceCentsPerKWh != 28.0 {
+		t.Errorf("subscription.EnergyPriceCentsPerKWh = %v, want 28.0 (48.0 - 20cts)", subscription.EnergyPriceCentsPerKWh)
+	}
+}
+
+func TestNormalizeElectraTariffsMultiWindow(t *testing.T) {
+	pricing := map[string]any{
+		"dc_combo": map[string]any{
+			"currency": "EUR",
+			"windows": []any{
+				map[string]any{"start_time": "00:00", "end_time": "07:00", "energy_price_cents_per_kwh": 35.0},
+				map[string]any{"start_time": "07:00", "end_time": "23:59", "energy_price_cents_per_kwh": 55.0},
+			},
+		},
+	}
+
+	tariffs := normalizeElectraTariffs(pricing)
+	var app domain.StationTariff
+	for _, t := range tariffs {
+		if t.Plan == "app" {
+			app = t
+		}
+	}
+	if app.EnergyPriceCentsPerKWh == nil || *app.EnergyPriceCentsPerKWh != 35.0 {
+		t.Errorf("app.EnergyPriceCentsPerKWh = %v, want 35.0 (cheapest window)", app.EnergyPriceCentsPerKWh)
+	}
+	windows, _ := app.Extra["windows"].([]map[string]any)
+	if len(windows) != 2 {
+		t.Fatalf("got %d windows, want 2", len(windows))
+	}
+	if windows[0]["energyPriceCentsPerKwh"] != 35.0 || windows[1]["energyPriceCentsPerKwh"] != 55.0 {
+		t.Errorf("windows = %+v, want per-window prices preserved", windows)
 	}
 }
 

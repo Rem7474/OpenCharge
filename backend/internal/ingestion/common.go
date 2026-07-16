@@ -92,3 +92,17 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// minPrice returns the smallest non-nil value, or nil if all are nil.
+func minPrice(values []*float64) *float64 {
+	var best *float64
+	for _, v := range values {
+		if v == nil {
+			continue
+		}
+		if best == nil || *v < *best {
+			best = v
+		}
+	}
+	return best
+}

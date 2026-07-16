@@ -12,12 +12,20 @@ const (
 	TariffKindMixed = "mixed"
 )
 
-// StationTariff is a normalized tariff attached to an IRVE station,
-// coming from a given source (electra, izivia, irve_text, ...).
+// TariffPlanStandard is the default price tier for sources with a single
+// pricing scheme (Izivia, IRVE text, ...). Sources with several tiers based
+// on how the user pays (e.g. Electra's public/app/subscription) use their
+// own plan ids instead.
+const TariffPlanStandard = "standard"
+
+// StationTariff is a normalized tariff attached to an IRVE station, coming
+// from a given source (electra, izivia, irve_text, ...) and price plan
+// (e.g. "standard", or "public"/"app"/"subscription" for Electra).
 type StationTariff struct {
 	ID                         uuid.UUID
 	StationID                  uuid.UUID
 	Source                     string
+	Plan                       string
 	Kind                       string
 	Model                      string
 	Currency                   string
@@ -31,4 +39,11 @@ type StationTariff struct {
 	Extra                      map[string]any
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
+}
+
+// SourcePlans lists the price plans available for a tariff source, e.g.
+// {Source: "electra", Plans: ["app", "public", "subscription"]}.
+type SourcePlans struct {
+	Source string
+	Plans  []string
 }

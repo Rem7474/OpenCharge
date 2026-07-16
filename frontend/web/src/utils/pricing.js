@@ -28,6 +28,21 @@ export function pickPriceCentsPerKWh(pricingSummary, connectorType) {
   return pricingSummary.ac_min_cents_per_kwh ?? pricingSummary.dc_min_cents_per_kwh ?? null;
 }
 
+/**
+ * Turn a { sourceId: planId } selection map into the "source:plan" pairs
+ * the API's `source` query param expects (see backend GET /stations docs).
+ */
+export function sourcePlanPairs(selectedSources) {
+  return Object.entries(selectedSources).map(([source, plan]) => `${source}:${plan}`);
+}
+
+/** A tariff's windows are only worth charting when the price actually
+ * varies across the day; a single window is just the flat price. */
+export function hasHourlyPricing(tariff) {
+  const windows = tariff?.extra?.windows;
+  return Array.isArray(windows) && windows.length > 1;
+}
+
 export const PRICE_MODE_PER_KWH = "per_kwh";
 export const PRICE_MODE_RECHARGE = "recharge";
 

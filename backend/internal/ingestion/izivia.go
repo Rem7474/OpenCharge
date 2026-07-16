@@ -243,6 +243,7 @@ func normalizeIziviaTariffs(pricing []any) []domain.StationTariff {
 			}
 			return []domain.StationTariff{{
 				Source:                 "izivia",
+				Plan:                   domain.TariffPlanStandard,
 				Kind:                   domain.TariffKindMixed,
 				Model:                  "izivia_text",
 				Currency:               "EUR",

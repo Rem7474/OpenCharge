@@ -40,11 +40,27 @@ opencharge/
   qualité de lien (`exact`, `by_geolocation`, `by_operator+name`, `manual`)
   et la distance en mètres.
 - `station_tariffs` : tarifs normalisés attachés à une station IRVE, un par
-  `(station, source, kind)`.
+  `(station, source, kind, plan)`.
 
 La corrélation se fait via PostGIS (`ST_DWithin` / opérateur KNN `<->`) :
 pour chaque station externe, on cherche la station IRVE la plus proche dans
 un rayon configurable (150 m par défaut).
+
+### Paliers tarifaires (`plan`)
+
+Une source peut exposer plusieurs prix pour la même station selon le moyen
+de paiement (ex. Electra : `public` sans l'appli, `app` avec l'appli,
+`subscription` avec l'abonnement Smart). Les sources à palier unique
+(Izivia, ...) utilisent le plan `standard`. Règle Electra actuellement
+implémentée (`backend/internal/ingestion/electra.go`) :
+- `public` : tarif fixe 0,64 €/kWh (constante non scrapée, à mettre à jour
+  à la main si Electra change ce prix) ;
+- `app` : le prix scrapé tel quel, éventuellement variable par plage horaire ;
+- `subscription` : le prix `app`, chaque plage horaire réduite de 20 cts/kWh.
+
+Chaque tarif porte aussi `extra.windows`, la liste de ses plages horaires
+avec leur propre prix (`{"startTime","endTime","energyPriceCentsPerKwh"}`) —
+c'est cette donnée qui alimente le graphique horaire du frontend.
 
 ## Lancer l'environnement
 
@@ -103,11 +119,12 @@ go run ./cmd/opencharge-api
 Query params : `bbox=minLng,minLat,maxLng,maxLat` (obligatoire),
 `operator`, `hasTariffs`, `source`, `limit`, `offset`.
 
-`source` accepte une liste séparée par des virgules (ex.
-`source=izivia,electra`). **Il ne filtre jamais les stations** : il contrôle
-uniquement pour quelles sources `selectedSourcesPricing` est calculé, afin
-que la carte puisse griser une station sans tarif pour la sélection au lieu
-de la masquer.
+`source` accepte une liste de paires `source:plan` séparées par des virgules
+(ex. `source=izivia:standard,electra:subscription`) ; une source sans `:plan`
+est traitée comme `standard`. **Il ne filtre jamais les stations** : il
+contrôle uniquement pour quelles paires (source, plan) `selectedSourcesPricing`
+est calculé, afin que la carte puisse griser une station sans tarif pour la
+sélection au lieu de la masquer.
 
 ```json
 [
@@ -142,10 +159,20 @@ n'est nécessaire ici.
 
 ### `GET /sources`
 
-Retourne la liste des sources tarifaires actuellement ingérées, ex.
-`["electra", "izivia"]`. Le frontend construit son filtre d'opérateurs à
-partir de cet endpoint : aucune liste n'est codée en dur côté client, une
-nouvelle source apparaît automatiquement dès qu'elle est ingérée.
+Retourne chaque source tarifaire actuellement ingérée avec ses paliers
+disponibles, ex. :
+
+```json
+[
+  { "id": "electra", "plans": ["app", "public", "subscription"] },
+  { "id": "izivia", "plans": ["standard"] }
+]
+```
+
+Le frontend construit son filtre d'opérateurs (et le sélecteur de palier
+quand une source en a plusieurs) à partir de cet endpoint : aucune liste
+n'est codée en dur côté client, une nouvelle source ou un nouveau palier
+apparaît automatiquement dès qu'il est ingéré.
 
 ## Frontend
 
@@ -167,15 +194,22 @@ npm run dev
     ingérée apparaît automatiquement). Sélection multiple : le prix affiché
     sur un marqueur est le moins cher parmi les sources cochées. Aucune
     sélection = comportement par défaut (prix le moins cher toutes sources
-    confondues).
+    confondues). Quand une source a plusieurs paliers tarifaires (ex.
+    Electra : sans l'appli / avec l'appli / abonné), un petit sélecteur
+    apparaît sous son libellé pour choisir celui qui s'applique à
+    l'utilisateur — entièrement piloté par `GET /sources`, aucun palier
+    codé en dur.
   - **Mode de prix** : bascule entre €/kWh et prix pour une recharge d'un
     nombre de kWh configurable (calcul client, aucun appel réseau
     supplémentaire au changement de mode).
   - Une station sans tarif pour la sélection reste visible sur la carte,
     grisée sans prix (jamais masquée).
-  - Clic sur une station : panneau de détail avec le prix par source
-    sélectionnée, le meilleur prix toutes sources en comparaison si
-    différent, et la liste complète des tarifs pour audit.
+  - Clic sur une station : panneau de détail avec le prix par source et
+    palier sélectionnés, le meilleur prix toutes sources en comparaison si
+    différent, et la liste complète des tarifs pour audit. Un tarif dont
+    le prix varie dans la journée (plusieurs plages horaires) s'affiche
+    sous forme de petit graphique en barres prix/heure plutôt qu'un prix
+    unique.
 - **À propos (`/about`)** : sources de données, méthodologie de
   corrélation, limites de fiabilité des prix affichés.
 
