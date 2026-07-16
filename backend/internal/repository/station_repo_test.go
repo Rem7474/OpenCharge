@@ -242,6 +242,59 @@ func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	}
 }
 
+func TestStationRepository_ListByBBox_MixedKindFeedsBothACAndDC(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	// A single-price source (Izivia free text with no power figure) stores a
+	// "mixed" tariff. It must surface as BOTH the AC and DC minimum so the map
+	// can price the marker regardless of the station's own connector kind —
+	// this is the regression that grayed out Izivia stations even though their
+	// tariff showed in the detail view.
+	station := testStation("FRMIXED001", 45.90, 6.10)
+	id, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+	price := 39.1
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: id, Source: "izivia", Kind: domain.TariffKindMixed,
+		Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: &price,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	ps := results[0].PricingSummary
+	if ps.ACMinCentsPerKWh == nil || *ps.ACMinCentsPerKWh != 39.1 {
+		t.Errorf("ACMinCentsPerKWh = %v, want 39.1 (mixed tariff must feed AC)", ps.ACMinCentsPerKWh)
+	}
+	if ps.DCMinCentsPerKWh == nil || *ps.DCMinCentsPerKWh != 39.1 {
+		t.Errorf("DCMinCentsPerKWh = %v, want 39.1 (mixed tariff must feed DC)", ps.DCMinCentsPerKWh)
+	}
+
+	// And it must feed SelectedSourcesPricing the same way when its
+	// source:plan pair is selected.
+	bbox.Sources = []string{"izivia:standard"}
+	results, err = stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox with sources: %v", err)
+	}
+	sp := results[0].SelectedSourcesPricing
+	if sp == nil || sp.ACMinCentsPerKWh == nil || *sp.ACMinCentsPerKWh != 39.1 || sp.DCMinCentsPerKWh == nil || *sp.DCMinCentsPerKWh != 39.1 {
+		t.Errorf("SelectedSourcesPricing = %+v, want AC=DC=39.1 for selected mixed izivia tariff", sp)
+	}
+}
+
 func TestStationRepository_ListByBBox_SelectedSourcesPricing(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()
