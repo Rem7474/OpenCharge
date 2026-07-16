@@ -76,6 +76,54 @@ func TestStationRepository_UpsertAndGet(t *testing.T) {
 	}
 }
 
+func TestStationRepository_BulkUpsertStations(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	repo := NewStationRepository(pool)
+
+	stations := []domain.Station{
+		testStation("FRBULK0001", 45.90, 6.10),
+		testStation("FRBULK0002", 45.91, 6.11),
+		testStation("FRBULK0003", 45.92, 6.12),
+	}
+	if err := repo.BulkUpsertStations(ctx, stations); err != nil {
+		t.Fatalf("BulkUpsertStations: %v", err)
+	}
+
+	for _, s := range stations {
+		got, err := repo.GetByIRVEID(ctx, s.IRVEIDPDC)
+		if err != nil {
+			t.Fatalf("GetByIRVEID(%s): %v", s.IRVEIDPDC, err)
+		}
+		if got == nil {
+			t.Fatalf("GetByIRVEID(%s) = nil, want the bulk-upserted station", s.IRVEIDPDC)
+		}
+	}
+
+	// Re-upserting the same rows (e.g. a re-ingestion run) must update in
+	// place, not create duplicates or error out.
+	renamed := stations
+	renamed[0].Name = "Renamed via bulk upsert"
+	if err := repo.BulkUpsertStations(ctx, renamed); err != nil {
+		t.Fatalf("BulkUpsertStations (update): %v", err)
+	}
+	got, err := repo.GetByIRVEID(ctx, "FRBULK0001")
+	if err != nil {
+		t.Fatalf("GetByIRVEID after update: %v", err)
+	}
+	if got.Name != "Renamed via bulk upsert" {
+		t.Errorf("Name = %q, want %q", got.Name, "Renamed via bulk upsert")
+	}
+}
+
+func TestStationRepository_BulkUpsertStations_Empty(t *testing.T) {
+	pool := setupTestPool(t)
+	repo := NewStationRepository(pool)
+	if err := repo.BulkUpsertStations(context.Background(), nil); err != nil {
+		t.Errorf("BulkUpsertStations(nil) = %v, want no error", err)
+	}
+}
+
 func TestStationRepository_GetByIRVEID_NotFound(t *testing.T) {
 	pool := setupTestPool(t)
 	repo := NewStationRepository(pool)

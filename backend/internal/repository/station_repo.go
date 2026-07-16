@@ -81,6 +81,7 @@ const stationListSelectPrefix = `
 const stationListFrom = `
 	FROM stations s
 	LEFT JOIN station_tariffs t ON t.station_id = s.id`
+
 // BulkUpsertStations upserts a slice of IRVE stations in a single transaction.
 func (r *StationRepository) BulkUpsertStations(ctx context.Context, stations []domain.Station) error {
 	tx, err := r.pool.Begin(ctx)
@@ -133,6 +134,7 @@ func (r *StationRepository) BulkUpsertStations(ctx context.Context, stations []d
 
 	return tx.Commit(ctx)
 }
+
 // ListByBBox returns stations intersecting the given bounding box, with an
 // aggregated tariff summary per station. It never scans the whole table:
 // callers must always provide a bbox.
