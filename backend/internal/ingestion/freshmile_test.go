@@ -234,8 +234,8 @@ func TestNormalizeFreshmileTariffs(t *testing.T) {
 	if !ok {
 		t.Fatal("missing plan free-charging")
 	}
-	if free.EnergyPriceCentsPerKWh != nil {
-		t.Errorf("free.EnergyPriceCentsPerKWh = %v, want nil (is_free)", free.EnergyPriceCentsPerKWh)
+	if free.EnergyPriceCentsPerKWh == nil || *free.EnergyPriceCentsPerKWh != 0 {
+		t.Errorf("free.EnergyPriceCentsPerKWh = %v, want 0 (is_free is a real 0 €/kWh price)", free.EnergyPriceCentsPerKWh)
 	}
 	if free.Extra["is_free"] != true {
 		t.Errorf("free.Extra[is_free] = %v, want true", free.Extra["is_free"])

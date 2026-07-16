@@ -632,6 +632,12 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 
 	if parseBooleanLoose(stringValue(tariffRaw["is_free"])) {
 		extra["is_free"] = true
+		// A free tariff is a real 0 €/kWh price, not an unknown one: set it
+		// explicitly so it feeds the AC/DC minimums (and shows as "0,00 €")
+		// instead of being indistinguishable from a tariff whose price
+		// couldn't be parsed (left nil below).
+		zero := 0.0
+		t.EnergyPriceCentsPerKWh = &zero
 		return t
 	}
 
