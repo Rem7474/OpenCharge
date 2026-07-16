@@ -120,6 +120,20 @@ Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra, Izivia, Tesla et Freshmile sont corrélés.
 
+**Tesla nécessite Chromium.** `tesla.com/api/findus/*` est protégé par un
+bot-mitigation (Akamai) qui rejette toute requête HTTP classique quels que
+soient les en-têtes envoyés — un vrai moteur de navigateur est nécessaire.
+`backend/internal/ingestion/tesla.go` pilote donc Chromium headless via
+[chromedp](https://github.com/chromedp/chromedp) plutôt que `net/http`
+pour cette source uniquement. En local, il faut un binaire Chrome/Chromium
+installé et accessible : soit dans le `PATH` (`google-chrome`, `chromium`,
+...), soit désigné explicitement via `-tesla-chrome-path` ou la variable
+`TESLA_CHROME_PATH`. L'image Docker `ingest`
+(`backend/Dockerfile`, cible `ingest`) installe Chromium et positionne déjà
+`TESLA_CHROME_PATH=/usr/bin/chromium` — c'est pour ça que cette image est
+nettement plus lourde que `api` (base `debian:bookworm-slim` + Chromium,
+au lieu de distroless).
+
 ## Tests
 
 ```bash

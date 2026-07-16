@@ -18,6 +18,7 @@ func main() {
 		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
 		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
+		teslaChrome  = flag.String("tesla-chrome-path", getEnv("TESLA_CHROME_PATH", ""), "path to the Chromium/Chrome binary used to fetch tesla.com (empty = chromedp's own PATH lookup)")
 		freshmileURL = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
 		linkMaxM     = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
 		timeout      = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
@@ -71,6 +72,7 @@ func main() {
 	runTesla := func() {
 		ingester := ingestion.NewTeslaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *teslaURL, ingestion.DefaultTeslaConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
+		ingester.ChromeExecPath = *teslaChrome
 		count, err := ingester.Run(ctx)
 		if err != nil {
 			log.Fatalf("tesla ingestion failed: %v", err)
