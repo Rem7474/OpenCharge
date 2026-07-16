@@ -39,6 +39,13 @@ const freshmileMaxSubdivisionDepth = 8
 // cluster geometry causes an explosion in sibling tiles.
 const freshmileMaxTilesVisited = 20000
 
+// freshmileProgressLogInterval controls how often fetchAllLocationIDs logs
+// progress while it scans — the discovery phase is a long, purely
+// sequential run of map-locations calls with no other visible activity,
+// so without periodic logging a slow-but-healthy run is indistinguishable
+// from a hang.
+const freshmileProgressLogInterval = 200
+
 // freshmileMinBBoxDegrees is the minimum width/height a map-locations
 // query bbox is padded out to (~100m at French latitudes). Freshmile's API
 // returns a 500 for a zero-area bbox, which happens in practice when a
@@ -285,6 +292,10 @@ func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, e
 		// regardless of whether bbox came from the initial grid or a
 		// cluster subdivision.
 		bbox = padDegenerateBBox(bbox)
+
+		if visited == 1 || visited%freshmileProgressLogInterval == 0 {
+			log.Printf("freshmile: scanning map-locations, %d tiles visited so far, %d locations found", visited, len(ids))
+		}
 
 		features, err := ing.fetchMapLocations(ctx, bbox)
 		if err != nil {
