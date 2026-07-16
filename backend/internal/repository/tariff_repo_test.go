@@ -89,6 +89,43 @@ func TestTariffRepository_UpsertAndListByStation(t *testing.T) {
 	}
 }
 
+func TestTariffRepository_ListDistinctSources(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	empty, err := tariffRepo.ListDistinctSources(ctx)
+	if err != nil {
+		t.Fatalf("ListDistinctSources (empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("ListDistinctSources on an empty table = %v, want []", empty)
+	}
+
+	stationID, err := stationRepo.UpsertStation(ctx, testStation("FRSOURCES1", 45.9, 6.1))
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+	price := 40.0
+	for _, source := range []string{"electra", "izivia", "electra"} {
+		if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+			StationID: stationID, Source: source, Kind: domain.TariffKindAC,
+			Model: "test", Currency: "EUR", EnergyPriceCentsPerKWh: &price,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", source, err)
+		}
+	}
+
+	sources, err := tariffRepo.ListDistinctSources(ctx)
+	if err != nil {
+		t.Fatalf("ListDistinctSources: %v", err)
+	}
+	if len(sources) != 2 || sources[0] != "electra" || sources[1] != "izivia" {
+		t.Errorf("ListDistinctSources = %v, want [electra izivia] (deduped, sorted)", sources)
+	}
+}
+
 func TestTariffRepository_ListByStation_Empty(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

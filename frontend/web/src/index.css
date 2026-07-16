@@ -1,6 +1,14 @@
 :root {
   color-scheme: light dark;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --color-bg: #ffffff;
+  --color-text: #1a1a1a;
+  --color-border: #e2e2e2;
+  --color-muted: #666666;
+  --color-accent: #1a7f37;
+  --color-accent-mid: #d97706;
+  --color-accent-high: #b91c1c;
+  --color-gray: #9a9a9a;
 }
 
 * {
@@ -14,10 +22,54 @@ body,
   margin: 0;
 }
 
-.app-layout {
+body {
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+a {
+  color: inherit;
+}
+
+.app-shell {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   width: 100vw;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  /* Clears the iOS notch/status bar when running inside the Capacitor shell. */
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--color-border);
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.app-header .brand {
+  font-weight: 700;
+  font-size: 16px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.app-header nav {
+  font-size: 13px;
+}
+
+.app-header nav a {
+  text-decoration: none;
+  color: var(--color-muted);
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 
 .map-container {
@@ -31,12 +83,12 @@ body,
 }
 
 .sidebar {
-  width: 360px;
-  max-width: 40vw;
+  width: 380px;
+  max-width: 42vw;
   overflow-y: auto;
-  border-left: 1px solid #ddd;
+  border-left: 1px solid var(--color-border);
   padding: 16px;
-  background: #fff;
+  background: var(--color-bg);
 }
 
 .status-banner {
@@ -52,8 +104,199 @@ body,
   font-size: 13px;
 }
 
+.close-btn {
+  float: right;
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-size: 16px;
+}
+
+.about-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+
+.about-page h2 {
+  margin-top: 1.5em;
+}
+
+/* --- Filter bar --- */
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+  flex-wrap: wrap;
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filter-group .filter-label {
+  font-size: 12px;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.operator-filter {
+  position: relative;
+}
+
+.operator-filter-toggle {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  background: none;
+  color: var(--color-text);
+  min-width: 160px;
+  text-align: left;
+}
+
+.operator-filter-toggle[aria-expanded="true"] {
+  border-color: var(--color-accent);
+}
+
+.operator-filter-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1100;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  width: 240px;
+  padding: 8px;
+}
+
+.operator-filter-search {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.operator-filter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.operator-filter-list li {
+  padding: 2px 0;
+}
+
+.operator-filter-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 4px;
+  border-radius: 4px;
+}
+
+.operator-filter-list label:hover {
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.operator-filter-empty {
+  font-size: 13px;
+  color: var(--color-muted);
+  padding: 4px;
+}
+
+.price-mode-toggle {
+  display: flex;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.price-mode-toggle button {
+  border: none;
+  background: none;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.price-mode-toggle button[aria-pressed="true"] {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.kwh-input {
+  width: 64px;
+  padding: 3px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* --- Station marker price label --- */
+
+.price-marker {
+  background: #fff;
+  border: 2px solid var(--color-accent);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.price-marker.no-price {
+  border-color: var(--color-gray);
+  color: var(--color-muted);
+}
+
+/* --- Station detail --- */
+
+.station-price-block {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.station-price-block.best-overall {
+  border-color: var(--color-accent);
+  background: rgba(26, 127, 55, 0.06);
+}
+
+.station-price-block .source-name {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
+.station-price-block .price {
+  font-size: 18px;
+  font-weight: 700;
+}
+
 .tariff-row {
-  border: 1px solid #e2e2e2;
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 10px;
   margin-bottom: 10px;
@@ -63,24 +306,42 @@ body,
   font-weight: 600;
   text-transform: uppercase;
   font-size: 11px;
-  color: #666;
+  color: var(--color-muted);
 }
 
 .tariff-row .price {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
 }
 
 .tariff-row .raw-text {
   font-size: 12px;
-  color: #555;
+  color: var(--color-muted);
   margin-top: 4px;
 }
 
-.close-btn {
-  float: right;
-  cursor: pointer;
-  border: none;
-  background: none;
-  font-size: 16px;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #16181c;
+    --color-text: #f0f0f0;
+    --color-border: #33363b;
+    --color-muted: #9a9a9a;
+  }
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    max-width: 100%;
+    max-height: 60vh;
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+    border-radius: 16px 16px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 16px);
+  }
 }

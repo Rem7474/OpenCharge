@@ -6,6 +6,7 @@ on:
     tags: ["v*.*.*"]
     paths:
       - "backend/**"
+      - "frontend/web/**"
       - ".github/workflows/docker-publish.yml"
 
 permissions:
@@ -21,7 +22,16 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [api, ingest]
+        include:
+          - name: api
+            context: backend
+            target: api
+          - name: ingest
+            context: backend
+            target: ingest
+          - name: web
+            context: frontend/web
+            target: runtime
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +48,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_BASE }}-${{ matrix.target }}
+          images: ${{ env.IMAGE_BASE }}-${{ matrix.name }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -48,7 +58,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: backend
+          context: ${{ matrix.context }}
           target: ${{ matrix.target }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}

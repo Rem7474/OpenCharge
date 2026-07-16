@@ -16,6 +16,7 @@ func newRouter(h *StationsHandler) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/stations", h.ListStations)
 	r.Get("/stations/{id}", h.GetStation)
+	r.Get("/sources", h.ListSources)
 	return r
 }
 
@@ -116,6 +117,23 @@ func TestGetStation_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetStation_HandlesPercentEncodedColon(t *testing.T) {
+	h := setupHandler(t)
+	seedStation(t, h, "FRAPI0004", 45.90, 6.10)
+	router := newRouter(h)
+
+	// Real browser clients build this URL via encodeURIComponent("irve:FRAPI0004"),
+	// which percent-encodes the colon; chi does not decode route params, so
+	// the handler must do it itself.
+	req := httptest.NewRequest(http.MethodGet, "/stations/irve%3AFRAPI0004", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetStation_ReturnsStationWithTariffs(t *testing.T) {
 	h := setupHandler(t)
 	station := seedStation(t, h, "FRAPI0003", 45.90, 6.10)
@@ -156,5 +174,37 @@ func TestGetStation_ReturnsStationWithTariffs(t *testing.T) {
 	}
 	if resp.Tariffs[0].Source != "izivia" || resp.Tariffs[0].RawText != "0,45€/kWh" {
 		t.Errorf("unexpected tariff: %+v", resp.Tariffs[0])
+	}
+}
+
+func TestListSources(t *testing.T) {
+	h := setupHandler(t)
+	station := seedStation(t, h, "FRAPI0005", 45.90, 6.10)
+
+	price := 40.0
+	for _, source := range []string{"electra", "izivia"} {
+		err := h.Tariffs.Upsert(context.Background(), domain.StationTariff{
+			StationID: station.ID, Source: source, Kind: domain.TariffKindAC,
+			Model: "test", Currency: "EUR", EnergyPriceCentsPerKWh: &price,
+		})
+		if err != nil {
+			t.Fatalf("seed tariff %s: %v", source, err)
+		}
+	}
+
+	router := newRouter(h)
+	req := httptest.NewRequest(http.MethodGet, "/sources", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var sources []string
+	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(sources) != 2 || sources[0] != "electra" || sources[1] != "izivia" {
+		t.Errorf("sources = %v, want [electra izivia]", sources)
 	}
 }

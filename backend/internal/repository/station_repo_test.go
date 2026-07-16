@@ -146,7 +146,7 @@ func TestStationRepository_ListByBBox(t *testing.T) {
 	}
 }
 
-func TestStationRepository_ListByBBox_HasTariffsAndSource(t *testing.T) {
+func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()
 	stationRepo := NewStationRepository(pool)
@@ -192,13 +192,88 @@ func TestStationRepository_ListByBBox_HasTariffsAndSource(t *testing.T) {
 	if len(results[0].TariffSources) != 1 || results[0].TariffSources[0] != "izivia" {
 		t.Errorf("TariffSources = %v, want [izivia]", results[0].TariffSources)
 	}
+}
 
-	bbox.Source = "electra"
+func TestStationRepository_ListByBBox_SelectedSourcesPricing(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	withIzivia := testStation("FRSRC0001", 45.90, 6.10)
+	withElectra := testStation("FRSRC0002", 45.91, 6.11)
+
+	idIzivia, err := stationRepo.UpsertStation(ctx, withIzivia)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+	idElectra, err := stationRepo.UpsertStation(ctx, withElectra)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	iziviaPrice := 45.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: idIzivia, Source: "izivia", Kind: domain.TariffKindMixed,
+		Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: &iziviaPrice,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert izivia: %v", err)
+	}
+	electraPrice := 48.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: idElectra, Source: "electra", Kind: domain.TariffKindDC,
+		Model: "electra_fixed", Currency: "EUR", EnergyPriceCentsPerKWh: &electraPrice,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert electra: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+
+	// Without a Sources filter, SelectedSourcesPricing must stay nil — it's
+	// an opt-in field, not always computed.
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox no sources: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d stations, want 2", len(results))
+	}
+	for _, r := range results {
+		if r.SelectedSourcesPricing != nil {
+			t.Errorf("station %s: SelectedSourcesPricing = %+v, want nil without a Sources filter", r.Station.IRVEIDPDC, r.SelectedSourcesPricing)
+		}
+	}
+
+	// Selecting "electra" must never drop the izivia-only station (grayed
+	// out on the map, not hidden) but only the electra station gets a
+	// SelectedSourcesPricing price.
+	bbox.Sources = []string{"electra"}
 	results, err = stationRepo.ListByBBox(ctx, bbox)
 	if err != nil {
-		t.Fatalf("ListByBBox source filter: %v", err)
+		t.Fatalf("ListByBBox sources=electra: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("ListByBBox source=electra = %+v, want none (only izivia tariff exists)", results)
+	if len(results) != 2 {
+		t.Fatalf("got %d stations with Sources=[electra], want 2 (never filtered out)", len(results))
+	}
+
+	bySourceStation := map[string]domain.StationSummary{}
+	for _, r := range results {
+		bySourceStation[r.Station.IRVEIDPDC] = r
+	}
+
+	izivia := bySourceStation["FRSRC0001"]
+	if izivia.SelectedSourcesPricing == nil {
+		t.Fatal("izivia station: SelectedSourcesPricing = nil, want a non-nil (empty) pricing struct")
+	}
+	if izivia.SelectedSourcesPricing.ACMinCentsPerKWh != nil || izivia.SelectedSourcesPricing.DCMinCentsPerKWh != nil {
+		t.Errorf("izivia station: SelectedSourcesPricing = %+v, want both nil (no electra tariff here)", izivia.SelectedSourcesPricing)
+	}
+
+	electra := bySourceStation["FRSRC0002"]
+	if electra.SelectedSourcesPricing == nil {
+		t.Fatal("electra station: SelectedSourcesPricing = nil, want a populated pricing struct")
+	}
+	if electra.SelectedSourcesPricing.DCMinCentsPerKWh == nil || *electra.SelectedSourcesPricing.DCMinCentsPerKWh != 48.0 {
+		t.Errorf("electra station: DCMinCentsPerKWh = %v, want 48.0", electra.SelectedSourcesPricing.DCMinCentsPerKWh)
 	}
 }

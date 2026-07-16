@@ -32,11 +32,18 @@ type Station struct {
 }
 
 // StationFilter narrows a bbox query for GET /stations.
+//
+// Sources selects which tariff sources SelectedSourcesPricing is computed
+// from (e.g. the user picked "izivia" and "electra" as their reference
+// networks). It never excludes stations from the result: a station with no
+// tariff from any of Sources still comes back, just without a
+// SelectedSourcesPricing price, so the map can show it grayed out instead
+// of hiding it.
 type StationFilter struct {
 	MinLng, MinLat, MaxLng, MaxLat float64
 	Operator                       string
 	HasTariffs                     *bool
-	Source                         string
+	Sources                        []string
 	Limit                          int
 	Offset                         int
 }
@@ -56,8 +63,13 @@ type StationSummary struct {
 	HasTariffs     bool
 	TariffSources  []string
 	PricingSummary PricingSummary
+	// SelectedSourcesPricing is nil unless StationFilter.Sources was
+	// non-empty; it holds the cheapest price among just those sources.
+	SelectedSourcesPricing *PricingSummary
 }
 
+// PricingSummary holds the cheapest AC/DC price for a station, either
+// across every known source or restricted to a caller-selected subset.
 type PricingSummary struct {
 	ACMinCentsPerKWh *float64
 	DCMinCentsPerKWh *float64

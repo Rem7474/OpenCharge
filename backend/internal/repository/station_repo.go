@@ -68,7 +68,7 @@ func (r *StationRepository) UpsertStation(ctx context.Context, s domain.Station)
 	return id, nil
 }
 
-const stationListSelect = `
+const stationListSelectPrefix = `
 	SELECT
 		s.id, s.irve_id_station, s.irve_id_pdc, s.operator_name, s.amenageur, s.enseigne, s.name,
 		s.address_street, s.address_postal_code, s.address_city, s.address_country_code,
@@ -76,7 +76,9 @@ const stationListSelect = `
 		s.metadata, s.created_at, s.updated_at,
 		COALESCE(array_agg(DISTINCT t.source) FILTER (WHERE t.source IS NOT NULL), '{}'),
 		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'ac'),
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'dc')
+		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'dc')`
+
+const stationListFrom = `
 	FROM stations s
 	LEFT JOIN station_tariffs t ON t.station_id = s.id`
 
@@ -89,9 +91,19 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 		limit = 500
 	}
 
-	query := stationListSelect + `
-		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 	args := []any{f.MinLng, f.MinLat, f.MaxLng, f.MaxLat}
+
+	// SelectedSourcesPricing never filters the result set (a station
+	// without a tariff from f.Sources must still be returned, so the map
+	// can gray it out instead of hiding it) — it's purely an extra
+	// aggregate computed alongside the global min price.
+	args = append(args, f.Sources)
+	sourcesParamIdx := len(args)
+	query := stationListSelectPrefix + fmt.Sprintf(`,
+		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'ac' AND t.source = ANY($%d::text[])),
+		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind = 'dc' AND t.source = ANY($%d::text[]))`, sourcesParamIdx, sourcesParamIdx)
+	query += stationListFrom + `
+		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 
 	if f.Operator != "" {
 		args = append(args, f.Operator)
@@ -104,14 +116,6 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	if f.HasTariffs != nil && *f.HasTariffs {
 		query += ` HAVING COUNT(t.id) > 0`
 	}
-	if f.Source != "" {
-		args = append(args, f.Source)
-		if f.HasTariffs != nil && *f.HasTariffs {
-			query += fmt.Sprintf(" AND $%d = ANY(array_agg(DISTINCT t.source) FILTER (WHERE t.source IS NOT NULL))", len(args))
-		} else {
-			query += fmt.Sprintf(" HAVING $%d = ANY(array_agg(DISTINCT t.source) FILTER (WHERE t.source IS NOT NULL))", len(args))
-		}
-	}
 
 	args = append(args, limit, f.Offset)
 	query += fmt.Sprintf(" ORDER BY s.id LIMIT $%d OFFSET $%d", len(args)-1, len(args))
@@ -122,9 +126,10 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	}
 	defer rows.Close()
 
+	hasSourcesFilter := len(f.Sources) > 0
 	var results []domain.StationSummary
 	for rows.Next() {
-		summary, err := scanStationSummary(rows)
+		summary, err := scanStationSummary(rows, hasSourcesFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -159,18 +164,18 @@ func (r *StationRepository) GetByIRVEID(ctx context.Context, irveID string) (*do
 	return &s, nil
 }
 
-func scanStationSummary(rows pgx.Rows) (domain.StationSummary, error) {
+func scanStationSummary(rows pgx.Rows, hasSourcesFilter bool) (domain.StationSummary, error) {
 	var s domain.Station
 	var metadata []byte
 	var tariffSources []string
-	var acMin, dcMin *float64
+	var acMin, dcMin, selectedAcMin, selectedDcMin *float64
 
 	err := rows.Scan(
 		&s.ID, &s.IRVEIDStation, &s.IRVEIDPDC, &s.OperatorName, &s.Amenageur, &s.Enseigne, &s.Name,
 		&s.AddressStreet, &s.AddressPostal, &s.AddressCity, &s.AddressCountry,
 		&s.Lat, &s.Lng, &s.PowerKW, &s.ConnectorType, &s.AccessType, &s.Is24_7,
 		&metadata, &s.CreatedAt, &s.UpdatedAt,
-		&tariffSources, &acMin, &dcMin,
+		&tariffSources, &acMin, &dcMin, &selectedAcMin, &selectedDcMin,
 	)
 	if err != nil {
 		return domain.StationSummary{}, fmt.Errorf("scan station summary: %w", err)
@@ -186,7 +191,7 @@ func scanStationSummary(rows pgx.Rows) (domain.StationSummary, error) {
 		})
 	}
 
-	return domain.StationSummary{
+	summary := domain.StationSummary{
 		Station:       s,
 		Connectors:    connectors,
 		HasTariffs:    len(tariffSources) > 0,
@@ -195,5 +200,12 @@ func scanStationSummary(rows pgx.Rows) (domain.StationSummary, error) {
 			ACMinCentsPerKWh: acMin,
 			DCMinCentsPerKWh: dcMin,
 		},
-	}, nil
+	}
+	if hasSourcesFilter {
+		summary.SelectedSourcesPricing = &domain.PricingSummary{
+			ACMinCentsPerKWh: selectedAcMin,
+			DCMinCentsPerKWh: selectedDcMin,
+		}
+	}
+	return summary, nil
 }

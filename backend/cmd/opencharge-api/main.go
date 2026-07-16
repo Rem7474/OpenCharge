@@ -52,6 +52,7 @@ func main() {
 	})
 	router.Get("/stations", stationsHandler.ListStations)
 	router.Get("/stations/{id}", stationsHandler.GetStation)
+	router.Get("/sources", stationsHandler.ListSources)
 
 	server := &http.Server{
 		Addr:              addr,

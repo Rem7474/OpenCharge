@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,12 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 // ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&limit=&offset=
 // It never loads the whole dataset: bbox is mandatory, and the map/frontend
 // is expected to re-query on every viewport change.
+//
+// source accepts a comma-separated list of tariff sources (e.g.
+// "izivia,electra"). It never filters stations out of the response: it
+// only controls which sources selectedSourcesPricing is computed from, so
+// the map can gray out stations lacking a tariff from the selection
+// instead of hiding them.
 func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -54,7 +61,7 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 		MaxLng:   coords[2],
 		MaxLat:   coords[3],
 		Operator: q.Get("operator"),
-		Source:   q.Get("source"),
+		Sources:  parseSources(q.Get("source")),
 	}
 	if v := q.Get("hasTariffs"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -87,9 +94,28 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+// ListSources handles GET /sources: every tariff source currently ingested
+// (e.g. "izivia", "electra"), so the frontend can build its operator filter
+// dynamically instead of hardcoding the list.
+func (h *StationsHandler) ListSources(w http.ResponseWriter, r *http.Request) {
+	sources, err := h.Tariffs.ListDistinctSources(r.Context())
+	if err != nil {
+		log.Printf("api: list sources: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to list sources")
+		return
+	}
+	writeJSON(w, http.StatusOK, sources)
+}
+
 // GetStation handles GET /stations/{id} where id is "irve:<id_pdc_itinerance>".
 func (h *StationsHandler) GetStation(w http.ResponseWriter, r *http.Request) {
 	rawID := chi.URLParam(r, "id")
+	// chi does not percent-decode route params, and clients correctly
+	// encode the ":" in "irve:<id>" (e.g. via encodeURIComponent), so
+	// decode before matching the "irve:" prefix.
+	if decoded, err := url.PathUnescape(rawID); err == nil {
+		rawID = decoded
+	}
 	irveID := strings.TrimPrefix(rawID, "irve:")
 	if irveID == "" {
 		writeError(w, http.StatusBadRequest, "missing station id")
@@ -133,4 +159,22 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// parseSources splits a comma-separated "source" query param (e.g.
+// "izivia,electra") into a clean slice, dropping empty entries and
+// whitespace. An empty input returns nil.
+func parseSources(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	sources := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			sources = append(sources, p)
+		}
+	}
+	return sources
 }

@@ -1,5 +1,24 @@
 import { useEffect, useState } from "react";
 import { fetchStationDetails } from "../api/stations.js";
+import { connectorPriceKind, formatPrice } from "../utils/pricing.js";
+import { formatSourceLabel } from "../utils/format.js";
+
+// Pick, among a source's tariffs, the one matching the station's own
+// connector kind (falling back to any tariff from that source).
+function bestTariffForSource(tariffs, source, connectorKind) {
+  const candidates = tariffs.filter((t) => t.source === source && t.energy_price_cents_per_kwh != null);
+  if (candidates.length === 0) return null;
+  const matching = connectorKind ? candidates.find((t) => t.kind === connectorKind) : null;
+  return matching ?? candidates[0];
+}
+
+function cheapestTariff(tariffs, connectorKind) {
+  const candidates = tariffs.filter((t) => t.energy_price_cents_per_kwh != null);
+  if (candidates.length === 0) return null;
+  const pool = connectorKind ? candidates.filter((t) => t.kind === connectorKind) : candidates;
+  const from = pool.length > 0 ? pool : candidates;
+  return from.reduce((min, t) => (t.energy_price_cents_per_kwh < min.energy_price_cents_per_kwh ? t : min));
+}
 
 function TariffRow({ tariff }) {
   return (
@@ -8,13 +27,9 @@ function TariffRow({ tariff }) {
         {tariff.source} · {tariff.kind}
       </div>
       {tariff.energy_price_cents_per_kwh != null && (
-        <div className="price">
-          {(tariff.energy_price_cents_per_kwh / 100).toFixed(2)} € / kWh
-        </div>
+        <div className="price">{(tariff.energy_price_cents_per_kwh / 100).toFixed(2)} € / kWh</div>
       )}
-      {tariff.service_fee_percent != null && (
-        <div>Frais de service : {tariff.service_fee_percent}%</div>
-      )}
+      {tariff.service_fee_percent != null && <div>Frais de service : {tariff.service_fee_percent}%</div>}
       {tariff.session_price_cents_per_min != null && (
         <div>{(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min</div>
       )}
@@ -23,7 +38,7 @@ function TariffRow({ tariff }) {
   );
 }
 
-export default function StationDetails({ stationId, onClose }) {
+export default function StationDetails({ stationId, onClose, selectedSources, priceMode, chargeKWh }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
 
@@ -41,6 +56,23 @@ export default function StationDetails({ stationId, onClose }) {
   }, [stationId]);
 
   if (!stationId) return null;
+
+  const connectorKind = data ? connectorPriceKind(data.station.connectors?.[0]?.kind) : null;
+  const selectedTariffs = data
+    ? selectedSources
+        .map((source) => ({ source, tariff: bestTariffForSource(data.tariffs, source, connectorKind) }))
+        .filter((entry) => entry.tariff != null)
+    : [];
+  const cheapestSelected =
+    selectedTariffs.length > 0
+      ? selectedTariffs.reduce((min, e) =>
+          e.tariff.energy_price_cents_per_kwh < min.tariff.energy_price_cents_per_kwh ? e : min
+        )
+      : null;
+  const overallBest = data ? cheapestTariff(data.tariffs, connectorKind) : null;
+  const overallBeatsSelection =
+    overallBest &&
+    (!cheapestSelected || overallBest.energy_price_cents_per_kwh < cheapestSelected.tariff.energy_price_cents_per_kwh);
 
   return (
     <div className="sidebar">
@@ -67,9 +99,29 @@ export default function StationDetails({ stationId, onClose }) {
               .map((c) => `${c.kind}${c.maxPowerKw ? ` ${c.maxPowerKw}kW` : ""}`)
               .join(", ") || "inconnu"}
           </p>
-          <p>Accès : {data.station.accessType || "inconnu"} · 24/7 : {data.station.is24_7 ? "oui" : "non"}</p>
+          <p>
+            Accès : {data.station.accessType || "inconnu"} · 24/7 : {data.station.is24_7 ? "oui" : "non"}
+          </p>
 
-          <h3>Tarifs</h3>
+          <h3>Prix</h3>
+          {selectedTariffs.length === 0 && selectedSources.length > 0 && (
+            <p>Aucun tarif connu à cette station pour les réseaux sélectionnés.</p>
+          )}
+          {selectedTariffs.map(({ source, tariff }) => (
+            <div className="station-price-block" key={source}>
+              <div className="source-name">{formatSourceLabel(source)}</div>
+              <div className="price">{formatPrice(tariff.energy_price_cents_per_kwh, priceMode, chargeKWh)}</div>
+            </div>
+          ))}
+          {overallBest && overallBeatsSelection && (
+            <div className="station-price-block best-overall">
+              <div className="source-name">Meilleur prix toutes sources · {formatSourceLabel(overallBest.source)}</div>
+              <div className="price">{formatPrice(overallBest.energy_price_cents_per_kwh, priceMode, chargeKWh)}</div>
+            </div>
+          )}
+          {!overallBest && selectedSources.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
+
+          <h3>Tous les tarifs</h3>
           {data.tariffs.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
           {data.tariffs.map((t, i) => (
             <TariffRow tariff={t} key={i} />

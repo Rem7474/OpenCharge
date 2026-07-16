@@ -56,6 +56,27 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 	return nil
 }
 
+// ListDistinctSources returns every tariff source currently ingested (e.g.
+// "izivia", "electra"), so the frontend can build its operator filter from
+// what actually exists instead of a hardcoded list.
+func (r *TariffRepository) ListDistinctSources(ctx context.Context) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT source FROM station_tariffs ORDER BY source`)
+	if err != nil {
+		return nil, fmt.Errorf("list distinct tariff sources: %w", err)
+	}
+	defer rows.Close()
+
+	sources := []string{}
+	for rows.Next() {
+		var source string
+		if err := rows.Scan(&source); err != nil {
+			return nil, fmt.Errorf("scan tariff source: %w", err)
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
 // ListByStation returns all tariffs attached to an IRVE station.
 func (r *TariffRepository) ListByStation(ctx context.Context, stationID uuid.UUID) ([]domain.StationTariff, error) {
 	const query = `

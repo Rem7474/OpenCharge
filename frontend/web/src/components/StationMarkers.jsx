@@ -1,30 +1,30 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleMarker, Popup, useMapEvents } from "react-leaflet";
+import { Marker, Popup, useMapEvents } from "react-leaflet";
+import L from "leaflet";
 import { fetchStationsInBBox } from "../api/stations.js";
+import { pickPriceCentsPerKWh, formatPrice } from "../utils/pricing.js";
+
+const MIN_ZOOM_TO_LOAD = 10;
 
 function boundsToBBox(bounds) {
-  return [
-    bounds.getWest(),
-    bounds.getSouth(),
-    bounds.getEast(),
-    bounds.getNorth(),
-  ];
+  return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
 }
 
-function markerColor(station) {
-  if (!station.hasTariffs) return "#999";
-  return "#1a7f37";
+function priceIcon(label, hasPrice) {
+  return L.divIcon({
+    className: "",
+    html: `<div class="price-marker${hasPrice ? "" : " no-price"}">${label}</div>`,
+    iconSize: null,
+  });
 }
 
-export default function StationMarkers({ onSelect, filters }) {
+export default function StationMarkers({ onSelect, selectedSources, priceMode, chargeKWh }) {
   const [stations, setStations] = useState([]);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef(null);
 
   const load = (map) => {
-    if (map.getZoom() < 10) {
-      // Below this zoom the viewport covers too much of France: ask the
-      // user to zoom in instead of loading thousands of markers at once.
+    if (map.getZoom() < MIN_ZOOM_TO_LOAD) {
       setStations([]);
       return;
     }
@@ -33,7 +33,8 @@ export default function StationMarkers({ onSelect, filters }) {
     abortRef.current = controller;
     setLoading(true);
     fetchStationsInBBox(boundsToBBox(map.getBounds()), {
-      ...filters,
+      sources: selectedSources,
+      hasTariffs: true,
       signal: controller.signal,
     })
       .then((data) => setStations(data ?? []))
@@ -51,31 +52,37 @@ export default function StationMarkers({ onSelect, filters }) {
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.operator, filters.hasTariffs, filters.source]);
+  }, [selectedSources.join(",")]);
+
+  const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
 
   return (
     <>
       {loading && <div className="status-banner">Chargement des bornes…</div>}
-      {map.getZoom() < 10 && (
-        <div className="status-banner">Zoomez pour afficher les bornes</div>
-      )}
-      {stations.map((station) => (
-        <CircleMarker
-          key={station.id}
-          center={[station.location.lat, station.location.lng]}
-          radius={6}
-          pathOptions={{ color: markerColor(station), fillOpacity: 0.8 }}
-          eventHandlers={{ click: () => onSelect(station.id) }}
-        >
-          <Popup>
-            <strong>{station.name || "Station"}</strong>
-            <br />
-            {station.operator}
-            <br />
-            {station.hasTariffs ? "Tarifs disponibles" : "Pas de tarif connu"}
-          </Popup>
-        </CircleMarker>
-      ))}
+      {belowMinZoom && <div className="status-banner">Zoomez pour afficher les bornes</div>}
+      {stations.map((station) => {
+        const connectorType = station.connectors?.[0]?.kind;
+        const pricing = selectedSources.length > 0 ? station.selectedSourcesPricing : station.pricingSummary;
+        const priceCents = pickPriceCentsPerKWh(pricing, connectorType);
+        const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
+
+        return (
+          <Marker
+            key={station.id}
+            position={[station.location.lat, station.location.lng]}
+            icon={priceIcon(label, priceCents != null)}
+            eventHandlers={{ click: () => onSelect(station.id) }}
+          >
+            <Popup>
+              <strong>{station.name || "Station"}</strong>
+              <br />
+              {station.operator}
+              <br />
+              {priceCents != null ? label : "Pas de tarif pour la sélection"}
+            </Popup>
+          </Marker>
+        );
+      })}
     </>
   );
 }

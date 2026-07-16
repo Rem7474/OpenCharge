@@ -38,6 +38,11 @@ type stationListItemDTO struct {
 	HasTariffs     bool              `json:"hasTariffs"`
 	TariffSources  []string          `json:"tariffSources"`
 	PricingSummary pricingSummaryDTO `json:"pricingSummary"`
+	// SelectedSourcesPricing is only present when the request's `source`
+	// query param was non-empty: the cheapest price among just those
+	// sources, so the map can price/gray markers against the operators
+	// the user picked rather than the global cheapest.
+	SelectedSourcesPricing *pricingSummaryDTO `json:"selectedSourcesPricing,omitempty"`
 }
 
 func toStationListItemDTO(s domain.StationSummary) stationListItemDTO {
@@ -68,7 +73,15 @@ func toStationListItemDTO(s domain.StationSummary) stationListItemDTO {
 			ACMinCentsPerKWh: s.PricingSummary.ACMinCentsPerKWh,
 			DCMinCentsPerKWh: s.PricingSummary.DCMinCentsPerKWh,
 		},
+		SelectedSourcesPricing: toPricingSummaryDTO(s.SelectedSourcesPricing),
 	}
+}
+
+func toPricingSummaryDTO(p *domain.PricingSummary) *pricingSummaryDTO {
+	if p == nil {
+		return nil
+	}
+	return &pricingSummaryDTO{ACMinCentsPerKWh: p.ACMinCentsPerKWh, DCMinCentsPerKWh: p.DCMinCentsPerKWh}
 }
 
 type stationDetailDTO struct {
