@@ -127,7 +127,7 @@ func normalizeIRVEFeature(f geoJSONFeature) (domain.Station, bool) {
 	}
 
 	station := domain.Station{
-		IRVEIDPDc:      pdcID,
+		IRVEIDPDC:      pdcID,
 		OperatorName:   get("nom_operateur"),
 		Amenageur:      get("nom_amenageur"),
 		Enseigne:       get("nom_enseigne"),
