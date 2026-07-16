@@ -6,17 +6,24 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"opencharge/internal/domain"
 )
 
 type SourceStationRepository struct {
-	pool *pgxpool.Pool
+	db dbtx
 }
 
 func NewSourceStationRepository(pool *pgxpool.Pool) *SourceStationRepository {
-	return &SourceStationRepository{pool: pool}
+	return &SourceStationRepository{db: pool}
+}
+
+// WithTx returns a SourceStationRepository whose statements run inside tx
+// instead of picking a connection from the pool per call.
+func (r *SourceStationRepository) WithTx(tx pgx.Tx) *SourceStationRepository {
+	return &SourceStationRepository{db: tx}
 }
 
 // Upsert inserts or updates a station from an external source, keyed by
@@ -49,7 +56,7 @@ func (r *SourceStationRepository) Upsert(ctx context.Context, s domain.SourceSta
 		RETURNING id`
 
 	var id uuid.UUID
-	err = r.pool.QueryRow(ctx, query,
+	err = r.db.QueryRow(ctx, query,
 		s.Source, s.SourceStationID, s.Name, s.OperatorName,
 		s.AddressStreet, s.AddressPostal, s.AddressCity, s.AddressCountry,
 		s.Lng, s.Lat, raw,

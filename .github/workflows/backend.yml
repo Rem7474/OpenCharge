@@ -33,13 +33,11 @@ jobs:
             exit 1
           fi
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           working-directory: backend
-          # Pinned instead of "latest": golangci-lint-action's "latest" has
-          # resolved to v1.64.8 (built with go1.24), which refuses to lint a
-          # module whose go.mod targets go1.25. v2.5.0 is confirmed to
-          # support go1.25.
+          # golangci-lint v2 (needed for go1.25 support) requires
+          # golangci-lint-action v7 — v6 hard-rejects any v2.x version string.
           version: v2.5.0
 
   test:

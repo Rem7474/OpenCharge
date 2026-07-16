@@ -49,7 +49,7 @@ func main() {
 		log.Printf("irve ingestion complete: %d stations", count)
 	}
 	runElectra := func() {
-		ingester := ingestion.NewElectraIngester(sourceStationRepo, tariffRepo, linkRepo, *electraURL)
+		ingester := ingestion.NewElectraIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *electraURL)
 		ingester.MaxLinkDistanceM = *linkMaxM
 		count, err := ingester.Run(ctx)
 		if err != nil {

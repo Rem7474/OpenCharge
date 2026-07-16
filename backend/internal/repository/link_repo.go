@@ -10,11 +10,17 @@ import (
 )
 
 type LinkRepository struct {
-	pool *pgxpool.Pool
+	db dbtx
 }
 
 func NewLinkRepository(pool *pgxpool.Pool) *LinkRepository {
-	return &LinkRepository{pool: pool}
+	return &LinkRepository{db: pool}
+}
+
+// WithTx returns a LinkRepository whose statements run inside tx instead of
+// picking a connection from the pool per call.
+func (r *LinkRepository) WithTx(tx pgx.Tx) *LinkRepository {
+	return &LinkRepository{db: tx}
 }
 
 // NearestStationCandidate is the closest IRVE station to a source station,
@@ -38,7 +44,7 @@ func (r *LinkRepository) FindNearestStation(ctx context.Context, lat, lng, maxDi
 		LIMIT 1`
 
 	var c NearestStationCandidate
-	err := r.pool.QueryRow(ctx, query, lng, lat, maxDistanceMeters).Scan(&c.StationID, &c.OperatorName, &c.Name, &c.DistanceMeters)
+	err := r.db.QueryRow(ctx, query, lng, lat, maxDistanceMeters).Scan(&c.StationID, &c.OperatorName, &c.Name, &c.DistanceMeters)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -58,7 +64,7 @@ func (r *LinkRepository) Upsert(ctx context.Context, stationID, sourceStationID 
 			link_quality = EXCLUDED.link_quality,
 			distance_meters = EXCLUDED.distance_meters`
 
-	if _, err := r.pool.Exec(ctx, query, stationID, sourceStationID, source, linkQuality, distanceMeters); err != nil {
+	if _, err := r.db.Exec(ctx, query, stationID, sourceStationID, source, linkQuality, distanceMeters); err != nil {
 		return fmt.Errorf("upsert station link: %w", err)
 	}
 	return nil

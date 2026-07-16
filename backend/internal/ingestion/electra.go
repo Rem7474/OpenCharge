@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"opencharge/internal/domain"
 	"opencharge/internal/repository"
@@ -22,7 +23,13 @@ const DefaultElectraURL = "https://stations.go-electra.com/stations.js"
 // correlate an external source station with the nearest IRVE station.
 const DefaultLinkMaxDistanceMeters = 150.0
 
+// electraBulkChunkSize is the number of stations processed per database
+// transaction: batching many stations' writes (source station, link,
+// tariffs) under a single commit avoids paying one WAL fsync per station.
+const electraBulkChunkSize = 200
+
 type ElectraIngester struct {
+	Pool             *pgxpool.Pool
 	SourceStations   *repository.SourceStationRepository
 	Tariffs          *repository.TariffRepository
 	Links            *repository.LinkRepository
@@ -31,11 +38,12 @@ type ElectraIngester struct {
 	client           *http.Client
 }
 
-func NewElectraIngester(sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, url string) *ElectraIngester {
+func NewElectraIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, url string) *ElectraIngester {
 	if url == "" {
 		url = DefaultElectraURL
 	}
 	return &ElectraIngester{
+		Pool:             pool,
 		SourceStations:   sourceStations,
 		Tariffs:          tariffs,
 		Links:            links,
@@ -55,27 +63,60 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 	log.Printf("electra: %d stations downloaded", len(stations))
 
 	linked := 0
-	for _, raw := range stations {
-		sourceStation, tariffs, ok := normalizeElectraStation(raw)
-		if !ok {
-			continue
+	for i := 0; i < len(stations); i += electraBulkChunkSize {
+		end := i + electraBulkChunkSize
+		if end > len(stations) {
+			end = len(stations)
 		}
-		sourceStationID, err := ing.SourceStations.Upsert(ctx, sourceStation)
+		n, err := ing.processChunk(ctx, stations[i:end])
+		linked += n
 		if err != nil {
 			return linked, err
 		}
-
-		if err := ing.linkAndStoreTariffs(ctx, sourceStation, sourceStationID, tariffs); err != nil {
-			return linked, err
-		}
-		linked++
+		log.Printf("electra: %d/%d processed", linked, len(stations))
 	}
 	log.Printf("electra: done, %d source stations processed", linked)
 	return linked, nil
 }
 
-func (ing *ElectraIngester) linkAndStoreTariffs(ctx context.Context, src domain.SourceStation, sourceStationID uuid.UUID, tariffs []domain.StationTariff) error {
-	candidate, err := ing.Links.FindNearestStation(ctx, src.Lat, src.Lng, ing.MaxLinkDistanceM)
+// processChunk runs a batch of stations' source-station/link/tariff writes
+// inside a single transaction and commits once, instead of one autocommit
+// round trip per statement.
+func (ing *ElectraIngester) processChunk(ctx context.Context, rawStations []map[string]any) (int, error) {
+	tx, err := ing.Pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin electra chunk tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	sourceStations := ing.SourceStations.WithTx(tx)
+	tariffs := ing.Tariffs.WithTx(tx)
+	links := ing.Links.WithTx(tx)
+
+	processed := 0
+	for _, raw := range rawStations {
+		sourceStation, stationTariffs, ok := normalizeElectraStation(raw)
+		if !ok {
+			continue
+		}
+		sourceStationID, err := sourceStations.Upsert(ctx, sourceStation)
+		if err != nil {
+			return processed, err
+		}
+		if err := linkAndStoreTariffs(ctx, links, tariffs, sourceStation, sourceStationID, stationTariffs, ing.MaxLinkDistanceM); err != nil {
+			return processed, err
+		}
+		processed++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit electra chunk tx: %w", err)
+	}
+	return processed, nil
+}
+
+func linkAndStoreTariffs(ctx context.Context, links *repository.LinkRepository, tariffs *repository.TariffRepository, src domain.SourceStation, sourceStationID uuid.UUID, stationTariffs []domain.StationTariff, maxLinkDistanceM float64) error {
+	candidate, err := links.FindNearestStation(ctx, src.Lat, src.Lng, maxLinkDistanceM)
 	if err != nil {
 		return err
 	}
@@ -88,13 +129,13 @@ func (ing *ElectraIngester) linkAndStoreTariffs(ctx context.Context, src domain.
 		quality = domain.LinkQualityByOperatorName
 	}
 	distance := candidate.DistanceMeters
-	if err := ing.Links.Upsert(ctx, candidate.StationID, sourceStationID, src.Source, quality, &distance); err != nil {
+	if err := links.Upsert(ctx, candidate.StationID, sourceStationID, src.Source, quality, &distance); err != nil {
 		return err
 	}
 
-	for _, t := range tariffs {
+	for _, t := range stationTariffs {
 		t.StationID = candidate.StationID
-		if err := ing.Tariffs.Upsert(ctx, t); err != nil {
+		if err := tariffs.Upsert(ctx, t); err != nil {
 			return err
 		}
 	}
@@ -169,14 +210,22 @@ const electraPublicPriceCentsPerKWh = 64.0
 const electraSubscriptionDiscountCentsPerKWh = 20.0
 
 type electraWindow struct {
-	startTime, endTime string
-	priceCentsPerKWh   *float64
+	startTime, endTime         string
+	priceCentsPerKWh           *float64
+	sessionPriceCentsPerMin    *float64
+	congestionPriceCentsPerMin *float64
 }
 
 func (w electraWindow) toExtra() map[string]any {
 	m := map[string]any{"startTime": w.startTime, "endTime": w.endTime}
 	if w.priceCentsPerKWh != nil {
 		m["energyPriceCentsPerKwh"] = *w.priceCentsPerKWh
+	}
+	if w.sessionPriceCentsPerMin != nil {
+		m["sessionPriceCentsPerMin"] = *w.sessionPriceCentsPerMin
+	}
+	if w.congestionPriceCentsPerMin != nil {
+		m["congestionPriceCentsPerMin"] = *w.congestionPriceCentsPerMin
 	}
 	return m
 }
@@ -186,6 +235,10 @@ func (w electraWindow) toExtra() map[string]any {
 // scraped price, which can vary by time window), and "subscription" (the
 // app price minus the Electra Smart discount, on every window).
 func normalizeElectraTariffs(value any) []domain.StationTariff {
+	return normalizeElectraTariffsAt(value, time.Now())
+}
+
+func normalizeElectraTariffsAt(value any, now time.Time) []domain.StationTariff {
 	pricingMap, ok := value.(map[string]any)
 	if !ok {
 		return nil
@@ -201,8 +254,10 @@ func normalizeElectraTariffs(value any) []domain.StationTariff {
 		currency := firstNonEmpty(stringValue(pricing["currency"]), "EUR")
 		windowsValue, _ := pricing["windows"].([]any)
 
+		// Each window keeps its own price/session/congestion figures — they
+		// must not be collapsed into a single "last window wins" value,
+		// since a station can have different pricing per time-of-day.
 		var appWindows []electraWindow
-		var sessionPrice, congestionPrice *float64
 		for _, item := range windowsValue {
 			windowMap, ok := item.(map[string]any)
 			if !ok {
@@ -211,56 +266,98 @@ func normalizeElectraTariffs(value any) []domain.StationTariff {
 			price, _ := floatValue(windowMap["energy_price_cents_per_kwh"])
 			session, _ := floatValue(windowMap["session_duration_price_cents_per_min"])
 			congestion, _ := floatValue(windowMap["congestion_price_cents_per_min"])
-			if session != nil {
-				sessionPrice = session
-			}
-			if congestion != nil {
-				congestionPrice = congestion
-			}
 			appWindows = append(appWindows, electraWindow{
-				startTime:        stringValue(windowMap["start_time"]),
-				endTime:          stringValue(windowMap["end_time"]),
-				priceCentsPerKWh: price,
+				startTime:                  stringValue(windowMap["start_time"]),
+				endTime:                    stringValue(windowMap["end_time"]),
+				priceCentsPerKWh:           price,
+				sessionPriceCentsPerMin:    session,
+				congestionPriceCentsPerMin: congestion,
 			})
 		}
 
+		// The public tier has no scraped price of its own (fixed constant),
+		// but session/congestion fees are physical, time-based charges that
+		// still apply without the app — borrow them from whichever app
+		// window is active right now.
 		publicPrice := electraPublicPriceCentsPerKWh
-		publicWindows := []electraWindow{{startTime: "00:00", endTime: "23:59", priceCentsPerKWh: &publicPrice}}
+		publicWindow := electraWindow{startTime: "00:00", endTime: "23:59", priceCentsPerKWh: &publicPrice}
+		if currentApp := currentWindow(appWindows, now); currentApp != nil {
+			publicWindow.sessionPriceCentsPerMin = currentApp.sessionPriceCentsPerMin
+			publicWindow.congestionPriceCentsPerMin = currentApp.congestionPriceCentsPerMin
+		}
+		publicWindows := []electraWindow{publicWindow}
 
 		subscriptionWindows := make([]electraWindow, len(appWindows))
 		for i, w := range appWindows {
-			subscriptionWindows[i] = electraWindow{startTime: w.startTime, endTime: w.endTime, priceCentsPerKWh: subtractCents(w.priceCentsPerKWh, electraSubscriptionDiscountCentsPerKWh)}
+			subscriptionWindows[i] = electraWindow{
+				startTime:                  w.startTime,
+				endTime:                    w.endTime,
+				priceCentsPerKWh:           subtractCents(w.priceCentsPerKWh, electraSubscriptionDiscountCentsPerKWh),
+				sessionPriceCentsPerMin:    w.sessionPriceCentsPerMin,
+				congestionPriceCentsPerMin: w.congestionPriceCentsPerMin,
+			}
 		}
 
-		base := domain.StationTariff{
-			Source: "electra", Kind: kind, Model: "electra_fixed", Currency: currency,
-			SessionPriceCentsPerMin: sessionPrice, CongestionPriceCentsPerMin: congestionPrice,
-		}
+		base := domain.StationTariff{Source: "electra", Kind: kind, Model: "electra_fixed", Currency: currency}
 		tariffs = append(tariffs,
-			withPlan(base, "public", publicWindows),
-			withPlan(base, "app", appWindows),
-			withPlan(base, "subscription", subscriptionWindows),
+			withPlan(base, "public", publicWindows, now),
+			withPlan(base, "app", appWindows, now),
+			withPlan(base, "subscription", subscriptionWindows, now),
 		)
 	}
 	return tariffs
 }
 
 // withPlan attaches a plan's windows to a copy of base: the tariff's
-// top-level EnergyPriceCentsPerKWh becomes the cheapest window (a single
-// representative number for map/list display), while extra.windows keeps
-// the full per-window breakdown for the hourly price chart.
-func withPlan(base domain.StationTariff, plan string, windows []electraWindow) domain.StationTariff {
+// top-level EnergyPriceCentsPerKWh/SessionPriceCentsPerMin/
+// CongestionPriceCentsPerMin reflect whichever window covers the current
+// time of day (a single representative number for map/list display and
+// sorting), while extra.windows keeps the full per-window breakdown for the
+// hourly price chart.
+func withPlan(base domain.StationTariff, plan string, windows []electraWindow, now time.Time) domain.StationTariff {
 	t := base
 	t.Plan = plan
 	extraWindows := make([]map[string]any, len(windows))
-	var prices []*float64
 	for i, w := range windows {
 		extraWindows[i] = w.toExtra()
-		prices = append(prices, w.priceCentsPerKWh)
 	}
-	t.EnergyPriceCentsPerKWh = minPrice(prices)
 	t.Extra = map[string]any{"windows": extraWindows}
+
+	if current := currentWindow(windows, now); current != nil {
+		t.EnergyPriceCentsPerKWh = current.priceCentsPerKWh
+		t.SessionPriceCentsPerMin = current.sessionPriceCentsPerMin
+		t.CongestionPriceCentsPerMin = current.congestionPriceCentsPerMin
+	}
 	return t
+}
+
+// currentWindow returns the window covering at's time of day (HH:MM,
+// half-open [start, end)), or the first window if none matches (e.g.
+// malformed/missing time strings) so a representative price is still
+// available.
+func currentWindow(windows []electraWindow, at time.Time) *electraWindow {
+	if len(windows) == 0 {
+		return nil
+	}
+	hm := at.Format("15:04")
+	for i := range windows {
+		if timeInWindow(hm, windows[i].startTime, windows[i].endTime) {
+			return &windows[i]
+		}
+	}
+	return &windows[0]
+}
+
+// timeInWindow reports whether hm ("HH:MM") falls in [start, end), handling
+// windows that wrap past midnight (e.g. 22:00-06:00).
+func timeInWindow(hm, start, end string) bool {
+	if start == "" || end == "" {
+		return false
+	}
+	if start <= end {
+		return hm >= start && hm < end
+	}
+	return hm >= start || hm < end
 }
 
 func subtractCents(price *float64, delta float64) *float64 {

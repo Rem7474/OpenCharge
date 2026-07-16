@@ -3,15 +3,15 @@ services:
     image: postgis/postgis:16-3.4
     restart: unless-stopped
     environment:
-      POSTGRES_USER: opencharge
-      POSTGRES_PASSWORD: opencharge
-      POSTGRES_DB: opencharge
+      POSTGRES_USER: ${POSTGRES_USER:-opencharge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opencharge}
+      POSTGRES_DB: ${POSTGRES_DB:-opencharge}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - opencharge-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U opencharge -d opencharge"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opencharge} -d ${POSTGRES_DB:-opencharge}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -26,7 +26,7 @@ services:
     command:
       [
         "-path", "/migrations",
-        "-database", "postgres://opencharge:opencharge@db:5432/opencharge?sslmode=disable",
+        "-database", "postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable",
         "up",
       ]
 
@@ -40,23 +40,23 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://opencharge:opencharge@db:5432/opencharge?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable
       LISTEN_ADDR: ":8080"
-      CORS_ORIGIN: "*"
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
     ports:
-      - "8080:8080"
+      - "${API_PORT:-8080}:8080"
 
   web:
     build:
       context: ./frontend/web
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: "http://localhost:8080"
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:${API_PORT:-8080}}
     restart: unless-stopped
     depends_on:
       - api
     ports:
-      - "5173:80"
+      - "${WEB_PORT:-5173}:80"
 
 volumes:
   opencharge-db-data:

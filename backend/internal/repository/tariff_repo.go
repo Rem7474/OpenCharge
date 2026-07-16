@@ -6,17 +6,24 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"opencharge/internal/domain"
 )
 
 type TariffRepository struct {
-	pool *pgxpool.Pool
+	db dbtx
 }
 
 func NewTariffRepository(pool *pgxpool.Pool) *TariffRepository {
-	return &TariffRepository{pool: pool}
+	return &TariffRepository{db: pool}
+}
+
+// WithTx returns a TariffRepository whose statements run inside tx instead
+// of picking a connection from the pool per call.
+func (r *TariffRepository) WithTx(tx pgx.Tx) *TariffRepository {
+	return &TariffRepository{db: tx}
 }
 
 // Upsert inserts or refreshes a tariff for (station, source, kind, plan).
@@ -49,7 +56,7 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 			extra = EXCLUDED.extra,
 			updated_at = now()`
 
-	_, err = r.pool.Exec(ctx, query,
+	_, err = r.db.Exec(ctx, query,
 		t.StationID, t.Source, plan, t.Kind, t.Model, t.Currency,
 		t.EnergyPriceCentsPerKWh, t.SessionPriceCentsPerMin, t.CongestionPriceCentsPerMin,
 		t.ServiceFeePercent, t.ValidFrom, t.ValidTo, t.RawText, extra,
@@ -66,7 +73,7 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 // operator filter and plan selector from what actually exists instead of a
 // hardcoded list.
 func (r *TariffRepository) ListDistinctSourcesWithPlans(ctx context.Context) ([]domain.SourcePlans, error) {
-	rows, err := r.pool.Query(ctx, `SELECT DISTINCT source, plan FROM station_tariffs ORDER BY source, plan`)
+	rows, err := r.db.Query(ctx, `SELECT DISTINCT source, plan FROM station_tariffs ORDER BY source, plan`)
 	if err != nil {
 		return nil, fmt.Errorf("list distinct tariff sources: %w", err)
 	}
@@ -98,7 +105,7 @@ func (r *TariffRepository) ListByStation(ctx context.Context, stationID uuid.UUI
 			service_fee_percent, valid_from, valid_to, raw_text, extra, created_at, updated_at
 		FROM station_tariffs WHERE station_id = $1 ORDER BY source, plan, kind`
 
-	rows, err := r.pool.Query(ctx, query, stationID)
+	rows, err := r.db.Query(ctx, query, stationID)
 	if err != nil {
 		return nil, fmt.Errorf("list tariffs for station %s: %w", stationID, err)
 	}
