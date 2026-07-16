@@ -18,6 +18,13 @@ func TestParsePriceText(t *testing.T) {
 		{"per-minute price, 'la minute' wording", "0,08 € la minute", nil, ptr(8.0), nil},
 		{"fee before price wording", "frais de service : 10%", nil, nil, ptr(10.0)},
 		{"empty", "", nil, nil, nil},
+		{
+			"skips a leading zero price, takes the first non-zero one",
+			"0.00 €/kWh\nFrais de service : 15%\n0,391€/kWh Une fois la charge terminée : 15 min à 0,0€/min puis 0,23€/min (Dont 15% de frais de service)",
+			ptr(39.1), ptr(23.0), ptr(15.0),
+		},
+		{"only a zero price present", "0.00 €/kWh", nil, nil, nil},
+		{"only a zero per-minute price present", "0,0€/min", nil, nil, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

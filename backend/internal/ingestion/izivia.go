@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -278,9 +280,36 @@ func normalizeIziviaStation(marker, station map[string]any, pricing []any) (doma
 	return src, normalizeIziviaTariffs(pricing), true
 }
 
+// iziviaPowerPattern extracts a connector's power rating (e.g. "24kW" in
+// "Connecteurs : CCS 24kW") from Izivia's free-text pricing description.
+var iziviaPowerPattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*kW`)
+
+// inferIziviaKind derives a tariff's Kind (ac/dc) from the power rating
+// mentioned in its pricing text, since Izivia's public API doesn't expose
+// connector kind as a structured field. Above 22kW (the ceiling for
+// three-phase AC charging) is treated as DC; at or below is AC. When no
+// power figure is found in the text, Kind falls back to Mixed rather than
+// guessing — that tariff just won't feed the AC/DC map aggregates, same
+// as before this change.
+func inferIziviaKind(text string) string {
+	match := iziviaPowerPattern.FindStringSubmatch(text)
+	if len(match) != 2 {
+		return domain.TariffKindMixed
+	}
+	power, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
+	if err != nil {
+		return domain.TariffKindMixed
+	}
+	if power > 22 {
+		return domain.TariffKindDC
+	}
+	return domain.TariffKindAC
+}
+
 // normalizeIziviaTariffs turns Izivia's free-text pricing entries into
-// StationTariff rows. Izivia pricing isn't split cleanly by connector kind
-// in the public API, so every parsed price is stored as "mixed".
+// StationTariff rows, inferring Kind (ac/dc) from any power rating
+// mentioned in the text (see inferIziviaKind) — falling back to "mixed"
+// when the text gives no power figure to go on.
 func normalizeIziviaTariffs(pricing []any) []domain.StationTariff {
 	for _, item := range pricing {
 		entry, ok := item.(map[string]any)
@@ -308,7 +337,7 @@ func normalizeIziviaTariffs(pricing []any) []domain.StationTariff {
 			return []domain.StationTariff{{
 				Source:                  "izivia",
 				Plan:                    domain.TariffPlanStandard,
-				Kind:                    domain.TariffKindMixed,
+				Kind:                    inferIziviaKind(rawText),
 				Model:                   "izivia_text",
 				Currency:                "EUR",
 				EnergyPriceCentsPerKWh:  price,

@@ -77,8 +77,8 @@ func parsePriceText(text string) (energyCentsPerKWh, sessionCentsPerMin, service
 	if strings.TrimSpace(text) == "" {
 		return nil, nil, nil
 	}
-	energyCentsPerKWh = matchEuroCents(pricePerKWhPattern, text)
-	sessionCentsPerMin = matchEuroCents(pricePerMinutePattern, text)
+	energyCentsPerKWh = matchEuroCentsFirstNonZero(pricePerKWhPattern, text)
+	sessionCentsPerMin = matchEuroCentsFirstNonZero(pricePerMinutePattern, text)
 	if match := serviceFeePattern.FindStringSubmatch(text); match != nil {
 		raw := firstNonEmpty(match[1], match[2])
 		if parsed, err := strconv.ParseFloat(strings.ReplaceAll(raw, ",", "."), 64); err == nil {
@@ -88,20 +88,27 @@ func parsePriceText(text string) (energyCentsPerKWh, sessionCentsPerMin, service
 	return energyCentsPerKWh, sessionCentsPerMin, serviceFeePercent
 }
 
-// matchEuroCents runs pattern against text and converts its first capture
-// group (a euro amount using either "." or "," as decimal separator) to
-// cents.
-func matchEuroCents(pattern *regexp.Regexp, text string) *float64 {
-	match := pattern.FindStringSubmatch(text)
-	if len(match) < 2 {
-		return nil
+// matchEuroCentsFirstNonZero scans all of pattern's matches in text and
+// converts the first one that isn't zero to cents. Some Izivia pricing
+// text lists a bogus/placeholder "0.00 €/kWh" before the real price (e.g.
+// "0.00 €/kWh ... 0,391€/kWh ..."), or "0,0€/min" for an idle-fee grace
+// period before the real per-minute rate — taking the first match
+// unconditionally would silently report a free tariff instead of skipping
+// to the actual price. A text with only zero prices is treated the same
+// as one with no price at all: nil, not 0.
+func matchEuroCentsFirstNonZero(pattern *regexp.Regexp, text string) *float64 {
+	for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
+		if err != nil || parsed == 0 {
+			continue
+		}
+		cents := parsed * 100
+		return &cents
 	}
-	parsed, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
-	if err != nil {
-		return nil
-	}
-	cents := parsed * 100
-	return &cents
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {
