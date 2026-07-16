@@ -37,8 +37,28 @@ type IziviaConfig struct {
 	Zoom     int
 }
 
+// DefaultIziviaConfig: Workers=40 because every marker costs two sequential
+// HTTP round trips (station detail, then pricing) and the source has tens
+// of thousands of markers — this is a pure I/O-bound fan-out to a single
+// host, so it needs a much larger pool than a CPU-bound worker count. It
+// only pays off paired with newIziviaHTTPClient's raised per-host
+// connection limits below; without that, Go's default transport caps
+// concurrent connections to one host at 2 regardless of goroutine count.
 func DefaultIziviaConfig() IziviaConfig {
-	return IziviaConfig{Workers: 12, GridStep: 2.0, Zoom: 7}
+	return IziviaConfig{Workers: 40, GridStep: 2.0, Zoom: 7}
+}
+
+// newIziviaHTTPClient returns a client whose transport allows enough
+// concurrent connections to fronts-map.izivia.com to actually make worker
+// concurrency effective. http.DefaultTransport's MaxIdleConnsPerHost is 2:
+// with a single-host fan-out like this ingester's, that silently
+// serializes most requests behind repeated TCP/TLS handshakes no matter
+// how many goroutines are launched.
+func newIziviaHTTPClient(maxConnsPerHost int) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = maxConnsPerHost
+	transport.MaxConnsPerHost = 0 // unlimited in-flight; idle pool is what mattered
+	return &http.Client{Timeout: 20 * time.Second, Transport: transport}
 }
 
 type IziviaIngester struct {
@@ -52,6 +72,10 @@ type IziviaIngester struct {
 }
 
 func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, cfg IziviaConfig) *IziviaIngester {
+	workers := cfg.Workers
+	if workers <= 0 {
+		workers = 40
+	}
 	return &IziviaIngester{
 		Pool:             pool,
 		SourceStations:   sourceStations,
@@ -59,7 +83,7 @@ func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStat
 		Links:            links,
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
-		client:           &http.Client{Timeout: 20 * time.Second},
+		client:           newIziviaHTTPClient(workers),
 	}
 }
 
@@ -103,7 +127,7 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 
 	workers := ing.Config.Workers
 	if workers <= 0 {
-		workers = 12
+		workers = 40
 	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -346,19 +370,61 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 		}
 	}
 
+	// The grid scan is a small, fixed number of squares (tens, not
+	// thousands), but each is its own HTTP round trip: fan it out with a
+	// bounded pool instead of one request at a time.
+	squareCh := make(chan iziviaSquare)
+	resultsCh := make(chan []map[string]any)
+	var wg sync.WaitGroup
+
+	scanWorkers := ing.Config.Workers
+	if scanWorkers <= 0 {
+		scanWorkers = 40
+	}
+	if scanWorkers > len(squares) {
+		scanWorkers = len(squares)
+	}
+	for i := 0; i < scanWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for square := range squareCh {
+				payload := map[string]any{"square": square, "filters": map[string]any{}}
+				body, err := ing.postJSON(ctx, iziviaBaseURL+"/map/markers", payload)
+				if err != nil {
+					log.Printf("izivia: markers square failed: %v", err)
+					continue
+				}
+				var markers []map[string]any
+				if err := json.Unmarshal(body, &markers); err != nil {
+					continue
+				}
+				select {
+				case resultsCh <- markers:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+	go func() {
+		defer close(squareCh)
+		for _, square := range squares {
+			select {
+			case squareCh <- square:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	all := make([]map[string]any, 0)
 	seen := map[string]struct{}{}
-	for i, square := range squares {
-		payload := map[string]any{"square": square, "filters": map[string]any{}}
-		body, err := ing.postJSON(ctx, iziviaBaseURL+"/map/markers", payload)
-		if err != nil {
-			log.Printf("izivia: markers square %d/%d failed: %v", i+1, len(squares), err)
-			continue
-		}
-		var markers []map[string]any
-		if err := json.Unmarshal(body, &markers); err != nil {
-			continue
-		}
+	for markers := range resultsCh {
 		for _, marker := range markers {
 			id, _ := marker["id"].(string)
 			if id == "" {
