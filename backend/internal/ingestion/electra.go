@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	_ "time/tzdata" // embed the IANA database: the distroless runtime image ships no /usr/share/zoneinfo
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -17,6 +18,25 @@ import (
 )
 
 const DefaultElectraURL = "https://stations.go-electra.com/stations.js"
+
+// electraLocation is the timezone Electra's scraped HH:MM window
+// boundaries are assumed to be in (a French network). The container this
+// runs in has no system timezone data and defaults to UTC, so "now" must
+// be explicitly converted here rather than relying on the host/container
+// clock's zone — otherwise the "current window" price picked near a
+// boundary would be off by 1-2h (CET/CEST).
+var electraLocation = mustLoadElectraLocation()
+
+func mustLoadElectraLocation() *time.Location {
+	loc, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		// Should be unreachable with time/tzdata embedded; fall back to UTC
+		// rather than panic; a stale mapping is better than a crashed run.
+		log.Printf("electra: failed to load Europe/Paris timezone, falling back to UTC: %v", err)
+		return time.UTC
+	}
+	return loc
+}
 
 // DefaultLinkMaxDistanceMeters is the default search radius used to
 // correlate an external source station with the nearest IRVE station.
@@ -176,7 +196,7 @@ func (w electraWindow) toExtra() map[string]any {
 // scraped price, which can vary by time window), and "subscription" (the
 // app price minus the Electra Smart discount, on every window).
 func normalizeElectraTariffs(value any) []domain.StationTariff {
-	return normalizeElectraTariffsAt(value, time.Now())
+	return normalizeElectraTariffsAt(value, time.Now().In(electraLocation))
 }
 
 func normalizeElectraTariffsAt(value any, now time.Time) []domain.StationTariff {
