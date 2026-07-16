@@ -3,3 +3,11 @@
 *.db-wal
 *.csv
 *.jsonl
+
+# frontend
+frontend/web/node_modules/
+frontend/web/dist/
+
+# backend
+backend/opencharge-api
+backend/opencharge-ingest

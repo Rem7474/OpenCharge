@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: opencharge
+      POSTGRES_PASSWORD: opencharge
+      POSTGRES_DB: opencharge
+    ports:
+      - "5432:5432"
+    volumes:
+      - opencharge-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opencharge -d opencharge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend/db/migrations:/migrations
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://opencharge:opencharge@db:5432/opencharge?sslmode=disable",
+        "up",
+      ]
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://opencharge:opencharge@db:5432/opencharge?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      CORS_ORIGIN: "*"
+    ports:
+      - "8080:8080"
+
+volumes:
+  opencharge-db-data:

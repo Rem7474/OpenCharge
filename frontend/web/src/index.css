@@ -1,0 +1,86 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.map-container {
+  flex: 1;
+  position: relative;
+}
+
+.map-container .leaflet-container {
+  height: 100%;
+  width: 100%;
+}
+
+.sidebar {
+  width: 360px;
+  max-width: 40vw;
+  overflow-y: auto;
+  border-left: 1px solid #ddd;
+  padding: 16px;
+  background: #fff;
+}
+
+.status-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: rgba(20, 20, 20, 0.85);
+  color: #fff;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+.tariff-row {
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.tariff-row .source {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: #666;
+}
+
+.tariff-row .price {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.tariff-row .raw-text {
+  font-size: 12px;
+  color: #555;
+  margin-top: 4px;
+}
+
+.close-btn {
+  float: right;
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-size: 16px;
+}
