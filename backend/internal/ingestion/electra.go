@@ -111,7 +111,7 @@ func (ing *ElectraIngester) fetch(ctx context.Context) ([]map[string]any, error)
 	if err != nil {
 		return nil, fmt.Errorf("download electra stations: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		return nil, fmt.Errorf("electra http %d: %s", resp.StatusCode, string(body))

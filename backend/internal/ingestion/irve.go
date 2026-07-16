@@ -60,7 +60,7 @@ func (ing *IRVEIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("download irve dataset: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		return 0, fmt.Errorf("irve http %d: %s", resp.StatusCode, string(body))

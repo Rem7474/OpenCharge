@@ -23,20 +23,6 @@ func stringValue(value any) string {
 	}
 }
 
-func boolValue(value any) bool {
-	switch typed := value.(type) {
-	case bool:
-		return typed
-	case string:
-		parsed, _ := strconv.ParseBool(strings.TrimSpace(typed))
-		return parsed
-	case float64:
-		return typed != 0
-	default:
-		return false
-	}
-}
-
 func floatValue(value any) (*float64, bool) {
 	switch typed := value.(type) {
 	case float64:
@@ -105,12 +91,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func divideByThousand(value *float64) *float64 {
-	if value == nil {
-		return nil
-	}
-	result := *value / 1000.0
-	return &result
 }

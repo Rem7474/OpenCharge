@@ -345,7 +345,7 @@ func (ing *IziviaIngester) postJSON(ctx context.Context, url string, payload map
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		return nil, fmt.Errorf("izivia http %d: %s", resp.StatusCode, string(data))
@@ -365,7 +365,7 @@ func (ing *IziviaIngester) getJSON(ctx context.Context, url string) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		return nil, fmt.Errorf("izivia http %d: %s", resp.StatusCode, string(data))
