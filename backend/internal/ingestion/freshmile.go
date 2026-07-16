@@ -80,6 +80,7 @@ type FreshmileIngester struct {
 	Config           FreshmileConfig
 	MaxLinkDistanceM float64
 	client           *http.Client
+	retryBackoff     time.Duration // unexported: overridden by tests to keep them fast
 }
 
 func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, baseURL string, cfg FreshmileConfig) *FreshmileIngester {
@@ -101,6 +102,7 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
 		client:           &http.Client{Timeout: 60 * time.Second, Transport: transport},
+		retryBackoff:     2 * time.Second,
 	}
 }
 
@@ -378,24 +380,65 @@ func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshm
 	return collection.Features, nil
 }
 
+// freshmileMaxRetries is how many times a transient failure (network error
+// or 5xx, e.g. the Azure Application Gateway fronting Freshmile's API
+// occasionally returning 504 Gateway Timeout) is retried before giving up
+// on that request. 4xx responses are never retried — they won't succeed
+// on a second try.
+const freshmileMaxRetries = 3
+
 func (ing *FreshmileIngester) getJSON(ctx context.Context, url string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt <= freshmileMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * ing.retryBackoff
+			log.Printf("freshmile: retrying %s in %v (attempt %d/%d) after: %v", url, backoff, attempt+1, freshmileMaxRetries+1, lastErr)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		body, status, err := ing.doGet(ctx, url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		// status == 0 means no HTTP response at all (network/timeout
+		// error) — treat that as transient too, same as a 5xx.
+		if status != 0 && status < 500 {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+// doGet performs a single GET, always including the full URL in any
+// returned error so a failure is directly reproducible (e.g. via curl)
+// without having to reconstruct it from a bbox or id logged separately.
+func (ing *FreshmileIngester) doGet(ctx context.Context, url string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("build request for %s: %w", url, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 	resp, err := ing.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("freshmile request to %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		return nil, fmt.Errorf("freshmile http %d: %s", resp.StatusCode, string(data))
+		return nil, resp.StatusCode, fmt.Errorf("freshmile http %d for %s: %s", resp.StatusCode, url, string(data))
 	}
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("freshmile read body from %s: %w", url, err)
+	}
+	return body, resp.StatusCode, nil
 }
 
 func normalizeFreshmileStation(details map[string]any) (domain.SourceStation, bool) {

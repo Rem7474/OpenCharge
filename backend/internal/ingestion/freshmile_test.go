@@ -1,7 +1,14 @@
 package ingestion
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"opencharge/internal/domain"
 )
@@ -342,5 +349,84 @@ func TestFreshmileClusterBBox(t *testing.T) {
 func TestFreshmileClusterBBoxMissing(t *testing.T) {
 	if _, ok := freshmileClusterBBox(map[string]any{}); ok {
 		t.Error("freshmileClusterBBox returned ok=true for properties without bbox")
+	}
+}
+
+func newTestFreshmileIngester(baseURL string) *FreshmileIngester {
+	ing := NewFreshmileIngester(nil, nil, nil, nil, baseURL, FreshmileConfig{})
+	ing.retryBackoff = time.Millisecond // keep retry tests fast
+	return ing
+}
+
+func TestGetJSONRetriesOn5xxThenSucceeds(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = fmt.Fprint(w, "<html>504 Gateway Time-out</html>")
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"ok": true}`)
+	}))
+	defer srv.Close()
+
+	ing := newTestFreshmileIngester(srv.URL)
+	body, err := ing.getJSON(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("getJSON: %v", err)
+	}
+	if string(body) != `{"ok": true}` {
+		t.Errorf("body = %q, want ok:true", body)
+	}
+	if got := atomic.LoadInt32(&requests); got != 3 {
+		t.Errorf("requests = %d, want 3 (2 failures + 1 success)", got)
+	}
+}
+
+func TestGetJSONDoesNotRetryOn4xx(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, "not found")
+	}))
+	defer srv.Close()
+
+	ing := newTestFreshmileIngester(srv.URL)
+	_, err := ing.getJSON(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("getJSON = nil error, want an error for a 404")
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error %q does not contain the status code", err.Error())
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("requests = %d, want 1 (4xx must not be retried)", got)
+	}
+}
+
+func TestGetJSONGivesUpAfterMaxRetries(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, "bad gateway")
+	}))
+	defer srv.Close()
+
+	ing := newTestFreshmileIngester(srv.URL)
+	_, err := ing.getJSON(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("getJSON = nil error, want an error after exhausting retries")
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
+	}
+	if got := atomic.LoadInt32(&requests); got != freshmileMaxRetries+1 {
+		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, freshmileMaxRetries+1, freshmileMaxRetries)
 	}
 }
