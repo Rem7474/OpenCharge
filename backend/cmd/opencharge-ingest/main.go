@@ -14,16 +14,17 @@ import (
 func main() {
 	var (
 		dsn        = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source     = flag.String("source", "", "source to ingest: irve, electra, izivia, or all")
+		source     = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, or all")
 		irveURL    = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
+		teslaURL   = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
 		linkMaxM   = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
 		timeout    = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
 	)
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, or all")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -66,6 +67,15 @@ func main() {
 		}
 		log.Printf("izivia ingestion complete: %d stations", count)
 	}
+	runTesla := func() {
+		ingester := ingestion.NewTeslaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *teslaURL, ingestion.DefaultTeslaConfig())
+		ingester.MaxLinkDistanceM = *linkMaxM
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("tesla ingestion failed: %v", err)
+		}
+		log.Printf("tesla ingestion complete: %d stations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -74,14 +84,17 @@ func main() {
 		runElectra()
 	case "izivia":
 		runIzivia()
+	case "tesla":
+		runTesla()
 	case "all":
-		// IRVE first: it's the canonical referential that electra/izivia
-		// correlate against.
+		// IRVE first: it's the canonical referential that electra/izivia/
+		// tesla correlate against.
 		runIRVE()
 		runElectra()
 		runIzivia()
+		runTesla()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, or all", *source)
 	}
 }
 

@@ -17,12 +17,12 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
       repository/           # accès PostgreSQL/PostGIS (pgx)
-      ingestion/             # import + normalisation IRVE/Electra/Izivia + corrélation
+      ingestion/             # import + normalisation IRVE/Electra/Izivia/Tesla + corrélation
     db/migrations/          # migrations SQL (golang-migrate)
   frontend/
     web/                     # React + Leaflet, carte pilotée par bbox
@@ -58,6 +58,14 @@ implémentée (`backend/internal/ingestion/electra.go`) :
 - `app` : le prix scrapé tel quel, éventuellement variable par plage horaire ;
 - `subscription` : le prix `app`, chaque plage horaire réduite de 20 cts/kWh.
 
+Tesla (`backend/internal/ingestion/tesla.go`) expose jusqu'à 4 paliers par
+Supercharger, un par combinaison véhicule/abonnement issue de ses
+`effectivePricebooks` : `tesla_member`, `tesla_public`,
+`non_tesla_member`, `non_tesla_public`. Un éventuel frais de stationnement
+(`feeType: "PARKING"`) pour la même combinaison alimente
+`congestion_price_cents_per_min` du tarif correspondant plutôt que de
+créer une ligne séparée.
+
 Chaque tarif porte aussi `extra.windows`, la liste de ses plages horaires
 avec leur propre prix (`{"startTime","endTime","energyPriceCentsPerKwh"}`) —
 c'est cette donnée qui alimente le graphique horaire du frontend.
@@ -91,14 +99,15 @@ cd backend
 go run ./cmd/opencharge-ingest -source irve      # référentiel IRVE (GeoJSON)
 go run ./cmd/opencharge-ingest -source electra   # stations + tarifs Electra, corrélation
 go run ./cmd/opencharge-ingest -source izivia    # stations + tarifs Izivia, corrélation
-go run ./cmd/opencharge-ingest -source all       # les trois, dans cet ordre
+go run ./cmd/opencharge-ingest -source tesla     # Superchargers Tesla, corrélation
+go run ./cmd/opencharge-ingest -source all       # les quatre, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
-`-electra-url`, `-link-max-distance-m`.
+`-electra-url`, `-tesla-url`, `-link-max-distance-m`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra et Izivia sont corrélés.
+lequel Electra, Izivia et Tesla sont corrélés.
 
 ## Tests
 
@@ -267,3 +276,5 @@ Xcode en local — hors périmètre de ce dépôt/CI pour l'instant.
 - Electra : `https://stations.go-electra.com/stations.js`
 - Izivia : API front `https://fronts-map.izivia.com/api` (markers, détails,
   tarifs), scannée par grille sur la métropole
+- Tesla : API front `https://www.tesla.com/api/findus/*` (liste des sites,
+  détails/tarifs par Supercharger)
