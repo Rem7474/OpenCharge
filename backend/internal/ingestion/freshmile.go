@@ -199,16 +199,23 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 		if len(batch) == 0 {
 			return nil
 		}
-		// Deliberately not ctx: if ctx is what's ending the run (SIGINT,
-		// -timeout), a write started right at that moment would be
-		// canceled along with everything else and this — possibly the
-		// only — chance to persist the batch already sitting in memory
-		// would be lost. Give it its own bounded grace period instead, so
-		// a shutdown stops fetching new work immediately but still
-		// commits what's already been collected.
-		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), freshmileFlushGraceTimeout)
-		defer cancel()
-		n, err := writeSourceStationChunk(flushCtx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
+		// Normally just ctx, same budget as any other write in a healthy
+		// run. Only once ctx has actually ended (SIGINT, -timeout) do we
+		// switch to a write decoupled from it with its own bounded grace
+		// period — otherwise this last batch, sitting fully collected in
+		// memory, would be canceled along with everything else and lost,
+		// which is exactly what this whole flush-on-shutdown path exists
+		// to avoid. Applying that grace period unconditionally instead
+		// would silently cap every single flush at
+		// freshmileFlushGraceTimeout regardless of ctx's real deadline,
+		// canceling legitimate slow writes on a perfectly healthy run.
+		writeCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			writeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), freshmileFlushGraceTimeout)
+			defer cancel()
+		}
+		n, err := writeSourceStationChunk(writeCtx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
 		processed += n
 		batch = batch[:0]
 		if err != nil {
