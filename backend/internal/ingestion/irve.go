@@ -15,8 +15,6 @@ import (
 	"opencharge/internal/repository"
 )
 
-// DefaultIRVEURL is the Etalab-consolidated IRVE dataset in GeoJSON,
-// republished by transport.data.gouv.fr / hydra.
 const DefaultIRVEURL = "https://hydra.s3.rbx.io.cloud.ovh.net/geojson/eb76d20a-8501-400e-b336-d85724de5435.geojson"
 
 type geoJSONFeatureCollection struct {
@@ -33,8 +31,6 @@ type geoJSONGeometry struct {
 	Coordinates []float64 `json:"coordinates"`
 }
 
-// IRVEIngester downloads the IRVE GeoJSON dataset and upserts every point
-// of charge into the stations table (the canonical referential).
 type IRVEIngester struct {
 	Stations *repository.StationRepository
 	URL      string
@@ -48,8 +44,8 @@ func NewIRVEIngester(stations *repository.StationRepository, url string) *IRVEIn
 	return &IRVEIngester{Stations: stations, URL: url, client: &http.Client{Timeout: 5 * time.Minute}}
 }
 
-// Run downloads the dataset and upserts every feature. It returns the
-// number of points of charge processed.
+const irveBulkChunkSize = 500
+
 func (ing *IRVEIngester) Run(ctx context.Context) (int, error) {
 	log.Printf("irve: downloading %s", ing.URL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ing.URL, nil)
@@ -72,20 +68,31 @@ func (ing *IRVEIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("irve: %d features downloaded", len(collection.Features))
 
-	count := 0
+	// Normalize all features first
+	var stations []domain.Station
 	for _, feature := range collection.Features {
 		station, ok := normalizeIRVEFeature(feature)
 		if !ok {
 			continue
 		}
-		if _, err := ing.Stations.UpsertStation(ctx, station); err != nil {
-			return count, err
-		}
-		count++
-		if count%5000 == 0 {
-			log.Printf("irve: %d/%d upserted", count, len(collection.Features))
-		}
+		stations = append(stations, station)
 	}
+
+	// Bulk upsert in chunks
+	count := 0
+	for i := 0; i < len(stations); i += irveBulkChunkSize {
+		end := i + irveBulkChunkSize
+		if end > len(stations) {
+			end = len(stations)
+		}
+		chunk := stations[i:end]
+		if err := ing.Stations.BulkUpsertStations(ctx, chunk); err != nil {
+			return count, fmt.Errorf("bulk upsert chunk %d-%d: %w", i, end, err)
+		}
+		count += len(chunk)
+		log.Printf("irve: %d/%d upserted", count, len(stations))
+	}
+
 	log.Printf("irve: done, %d stations upserted", count)
 	return count, nil
 }
@@ -120,7 +127,7 @@ func normalizeIRVEFeature(f geoJSONFeature) (domain.Station, bool) {
 	}
 
 	station := domain.Station{
-		IRVEIDPDC:      pdcID,
+		IRVEIDPDc:      pdcID,
 		OperatorName:   get("nom_operateur"),
 		Amenageur:      get("nom_amenageur"),
 		Enseigne:       get("nom_enseigne"),
