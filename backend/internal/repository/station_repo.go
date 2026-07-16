@@ -81,7 +81,58 @@ const stationListSelectPrefix = `
 const stationListFrom = `
 	FROM stations s
 	LEFT JOIN station_tariffs t ON t.station_id = s.id`
+// BulkUpsertStations upserts a slice of IRVE stations in a single transaction.
+func (r *StationRepository) BulkUpsertStations(ctx context.Context, stations []domain.Station) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin bulk upsert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
+	const query = `
+		INSERT INTO stations (
+			irve_id_station, irve_id_pdc, operator_name, amenageur, enseigne, name,
+			address_street, address_postal_code, address_city, address_country_code,
+			location, power_kw, connector_type, access_type, is_24_7, metadata, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			ST_SetSRID(ST_MakePoint($11, $12), 4326), $13, $14, $15, $16, $17, now()
+		)
+		ON CONFLICT (irve_id_pdc) DO UPDATE SET
+			irve_id_station = EXCLUDED.irve_id_station,
+			operator_name = EXCLUDED.operator_name,
+			amenageur = EXCLUDED.amenageur,
+			enseigne = EXCLUDED.enseigne,
+			name = EXCLUDED.name,
+			address_street = EXCLUDED.address_street,
+			address_postal_code = EXCLUDED.address_postal_code,
+			address_city = EXCLUDED.address_city,
+			address_country_code = EXCLUDED.address_country_code,
+			location = EXCLUDED.location,
+			power_kw = EXCLUDED.power_kw,
+			connector_type = EXCLUDED.connector_type,
+			access_type = EXCLUDED.access_type,
+			is_24_7 = EXCLUDED.is_24_7,
+			metadata = EXCLUDED.metadata,
+			updated_at = now()`
+
+	for _, s := range stations {
+		metadata, err := json.Marshal(s.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal metadata for %s: %w", s.IRVEIDPDC, err)
+		}
+		_, err = tx.Exec(ctx, query,
+			s.IRVEIDStation, s.IRVEIDPDC, s.OperatorName, s.Amenageur, s.Enseigne, s.Name,
+			s.AddressStreet, s.AddressPostal, s.AddressCity, s.AddressCountry,
+			s.Lng, s.Lat, s.PowerKW, s.ConnectorType, s.AccessType, s.Is24_7, metadata,
+		)
+		if err != nil {
+			return fmt.Errorf("exec upsert %s: %w", s.IRVEIDPDC, err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
 // ListByBBox returns stations intersecting the given bounding box, with an
 // aggregated tariff summary per station. It never scans the whole table:
 // callers must always provide a bbox.
