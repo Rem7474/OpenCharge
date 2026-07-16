@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,6 +39,17 @@ const freshmileMaxSubdivisionDepth = 8
 // map-locations calls in one Run, independent of depth, in case pathological
 // cluster geometry causes an explosion in sibling tiles.
 const freshmileMaxTilesVisited = 20000
+
+// freshmileScanWorkers bounds how many map-locations requests the
+// discovery scan (fetchAllLocationIDs) has in flight at once. The scan is
+// a tree of tile/cluster-subdivision fetches, not a flat list, so it's
+// parallelized with a semaphore-bounded recursive fan-out rather than a
+// simple worker-pool-over-a-channel like the detail-fetch phase.
+const freshmileScanWorkers = 16
+
+// freshmileFlushGraceTimeout bounds how long a batch write is allowed to
+// take after ctx has already ended the run — see writeResults.
+const freshmileFlushGraceTimeout = 30 * time.Second
 
 // freshmileProgressLogInterval controls how often fetchAllLocationIDs logs
 // progress while it scans — the discovery phase is a long, purely
@@ -99,7 +111,7 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 		workers = 8
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConnsPerHost = workers
+	transport.MaxIdleConnsPerHost = max(workers, freshmileScanWorkers)
 	return &FreshmileIngester{
 		Pool:             pool,
 		SourceStations:   sourceStations,
@@ -113,26 +125,31 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 	}
 }
 
-// Run discovers every unique Freshmile location (recursively resolving map
-// clusters down to individual points), fetches each one's details/tariffs
-// concurrently, then correlates every station with the nearest IRVE point
-// of charge. Detail fetches use the same fetch/normalize-then-batch-write
-// split as Izivia/Tesla: workers stay concurrent for the I/O-bound part,
-// writes are funneled through a single consumer batching via
-// writeSourceStationChunk.
+// Run discovers Freshmile locations (recursively resolving map clusters
+// down to individual points) and fetches/writes them in a single streaming
+// pipeline, rather than discovering the whole of France before fetching
+// anything: the discovery scan feeds location IDs onto idCh as it finds
+// them, detail-fetch workers consume idCh concurrently, and a single
+// writer batches results onto the database via writeSourceStationChunk as
+// they arrive. That way a run stopped partway through (ctx canceled,
+// timeout hit) keeps whatever's already been written instead of losing
+// everything — discovery alone used to take the vast majority of a run's
+// wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
-	ids, err := ing.fetchAllLocationIDs(ctx)
-	if err != nil {
-		return 0, err
-	}
-	log.Printf("freshmile: %d unique locations to fetch", len(ids))
-
-	idCh := make(chan int)
+	idCh := make(chan int, 100)
 	resultsCh := make(chan normalizedSourceStation)
-	var wg sync.WaitGroup
 
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	go func() {
+		defer scanWG.Done()
+		defer close(idCh)
+		ing.scanLocationIDs(ctx, idCh)
+	}()
+
+	var workerWG sync.WaitGroup
 	worker := func() {
-		defer wg.Done()
+		defer workerWG.Done()
 		for id := range idCh {
 			item, ok, err := ing.fetchAndNormalizeLocation(ctx, id)
 			if err != nil {
@@ -155,48 +172,26 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 		workers = 8
 	}
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
+		workerWG.Add(1)
 		go worker()
 	}
 	go func() {
-		wg.Wait()
+		workerWG.Wait()
 		close(resultsCh)
 	}()
 
-	writeDone := make(chan struct {
-		processed int
-		err       error
-	}, 1)
-	go func() {
-		processed, err := ing.writeResults(ctx, resultsCh, len(ids))
-		writeDone <- struct {
-			processed int
-			err       error
-		}{processed, err}
-	}()
+	processed, err := ing.writeResults(ctx, resultsCh)
+	scanWG.Wait()
 
-	var firstErr error
-	for _, id := range ids {
-		select {
-		case idCh <- id:
-		case <-ctx.Done():
-			firstErr = ctx.Err()
-		}
-	}
-	close(idCh)
-
-	result := <-writeDone
-	if firstErr == nil {
-		firstErr = result.err
-	}
-
-	log.Printf("freshmile: done, %d locations processed", result.processed)
-	return result.processed, firstErr
+	log.Printf("freshmile: done, %d locations processed", processed)
+	return processed, err
 }
 
 // writeResults drains resultsCh, batching writes by ingestionBulkChunkSize
-// through writeSourceStationChunk.
-func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan normalizedSourceStation, total int) (int, error) {
+// through writeSourceStationChunk. The total location count isn't known
+// upfront (discovery and fetching now run concurrently), so progress is
+// logged as a running count rather than "x/y".
+func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan normalizedSourceStation) (int, error) {
 	processed := 0
 	batch := make([]normalizedSourceStation, 0, ingestionBulkChunkSize)
 
@@ -204,13 +199,22 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 		if len(batch) == 0 {
 			return nil
 		}
-		n, err := writeSourceStationChunk(ctx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
+		// Deliberately not ctx: if ctx is what's ending the run (SIGINT,
+		// -timeout), a write started right at that moment would be
+		// canceled along with everything else and this — possibly the
+		// only — chance to persist the batch already sitting in memory
+		// would be lost. Give it its own bounded grace period instead, so
+		// a shutdown stops fetching new work immediately but still
+		// commits what's already been collected.
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), freshmileFlushGraceTimeout)
+		defer cancel()
+		n, err := writeSourceStationChunk(flushCtx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
 		processed += n
 		batch = batch[:0]
 		if err != nil {
 			return err
 		}
-		log.Printf("freshmile: %d/%d processed", processed, total)
+		log.Printf("freshmile: %d processed so far", processed)
 		return nil
 	}
 
@@ -253,14 +257,22 @@ type freshmileBBox struct {
 	MinLng, MinLat, MaxLng, MaxLat float64
 }
 
-// fetchAllLocationIDs scans map-locations across metropolitan France,
-// starting from a coarse grid of tiles. Any feature that's a cluster
-// (location_count > 1) is resolved by recursively subdividing its own
-// bbox — never fetched via /locations directly — until only unique points
-// remain or freshmileMaxSubdivisionDepth is hit, in which case that
-// (persistently clustered) branch is dropped rather than recursed into
-// forever. Network errors on one tile are logged and skipped, not fatal.
-func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, error) {
+// scanLocationIDs scans map-locations across metropolitan France, starting
+// from a coarse grid of tiles, and sends each newly-discovered unique
+// location ID onto idCh as it's found (closing idCh is the caller's job,
+// once this returns). Any feature that's a cluster (location_count > 1) is
+// resolved by recursively subdividing its own bbox — never fetched via
+// /locations directly — until only unique points remain or
+// freshmileMaxSubdivisionDepth is hit, in which case that (persistently
+// clustered) branch is dropped rather than recursed into forever. Network
+// errors on one tile are logged and skipped, not fatal.
+//
+// The scan tree is fanned out across goroutines (bounded by
+// freshmileScanWorkers via a semaphore) rather than walked sequentially:
+// discovery used to take the vast majority of a run's wall-clock time
+// while producing nothing durable, so both scanning itself and (via
+// idCh) the detail-fetch/write phase that consumes it now overlap.
+func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- int) {
 	const step = 2.0
 	minLng, maxLng := -5.5, 9.8
 	minLat, maxLat := 41.0, 51.5
@@ -275,15 +287,25 @@ func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, e
 		}
 	}
 
-	ids := map[int]struct{}{}
-	visited := 0
+	var (
+		mu   sync.Mutex
+		seen = map[int]struct{}{}
+	)
+	var visited int64
+	sem := make(chan struct{}, freshmileScanWorkers)
+	var wg sync.WaitGroup
 
 	var scan func(bbox freshmileBBox, depth int)
 	scan = func(bbox freshmileBBox, depth int) {
-		if ctx.Err() != nil || visited >= freshmileMaxTilesVisited {
+		defer wg.Done()
+		if ctx.Err() != nil || atomic.LoadInt64(&visited) >= freshmileMaxTilesVisited {
 			return
 		}
-		visited++
+
+		sem <- struct{}{}
+		defer func() { <-sem }()
+
+		n := atomic.AddInt64(&visited, 1)
 
 		// A cluster's own reported bbox can collapse to a single point on
 		// one axis (real data: e.g. several stations at the exact same
@@ -293,8 +315,11 @@ func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, e
 		// cluster subdivision.
 		bbox = padDegenerateBBox(bbox)
 
-		if visited == 1 || visited%freshmileProgressLogInterval == 0 {
-			log.Printf("freshmile: scanning map-locations, %d tiles visited so far, %d locations found", visited, len(ids))
+		if n == 1 || n%freshmileProgressLogInterval == 0 {
+			mu.Lock()
+			found := len(seen)
+			mu.Unlock()
+			log.Printf("freshmile: scanning map-locations, %d tiles visited so far, %d locations found", n, found)
 		}
 
 		features, err := ing.fetchMapLocations(ctx, bbox)
@@ -312,8 +337,22 @@ func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, e
 				continue
 			}
 			if *count <= 1 {
-				if locID, ok := floatValue(props["location_id"]); ok && locID != nil {
-					ids[int(*locID)] = struct{}{}
+				locID, ok := floatValue(props["location_id"])
+				if !ok || locID == nil {
+					continue
+				}
+				id := int(*locID)
+				mu.Lock()
+				_, dup := seen[id]
+				if !dup {
+					seen[id] = struct{}{}
+				}
+				mu.Unlock()
+				if !dup {
+					select {
+					case idCh <- id:
+					case <-ctx.Done():
+					}
 				}
 				continue
 			}
@@ -325,21 +364,19 @@ func (ing *FreshmileIngester) fetchAllLocationIDs(ctx context.Context) ([]int, e
 				continue
 			}
 			for _, sub := range subdivideBBox(clusterBBox) {
-				scan(sub, depth+1)
+				wg.Add(1)
+				go scan(sub, depth+1)
 			}
 		}
 	}
 
 	for _, tile := range initial {
-		scan(tile, 0)
+		wg.Add(1)
+		go scan(tile, 0)
 	}
+	wg.Wait()
 
-	result := make([]int, 0, len(ids))
-	for id := range ids {
-		result = append(result, id)
-	}
-	log.Printf("freshmile: %d unique locations discovered across %d map-locations tiles visited", len(result), visited)
-	return result, nil
+	log.Printf("freshmile: discovery done, %d unique locations across %d map-locations tiles visited", len(seen), atomic.LoadInt64(&visited))
 }
 
 // freshmileClusterBBox reads properties.bbox.{sw,ne} off a cluster feature.

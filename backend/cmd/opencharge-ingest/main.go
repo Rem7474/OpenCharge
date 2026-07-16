@@ -5,6 +5,8 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"opencharge/internal/ingestion"
@@ -29,7 +31,14 @@ func main() {
 		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, or all")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
+	// the process immediately) lets a Ctrl+C or `docker stop` mid-run flush
+	// whatever's already been fetched instead of losing it: ingesters that
+	// stream fetch+write (see FreshmileIngester.Run) write what they have
+	// as soon as ctx is done rather than only at the very end.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
 	pool, err := repository.Open(ctx, *dsn)

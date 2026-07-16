@@ -120,6 +120,17 @@ Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra, Izivia, Tesla et Freshmile sont corrélés.
 
+**Freshmile scanne toute la France puis récupère le détail de chaque site
+— découverte et récupération/écriture tournent en pipeline, pas en deux
+phases séparées.** Le scan des tuiles `map-locations` (avec subdivision
+récursive des clusters) est parallélisé sur 16 requêtes concurrentes, et
+chaque emplacement découvert est immédiatement envoyé aux workers de
+détail (8 par défaut, `FreshmileConfig.Workers`) puis écrit en base par
+paquets de 200 au fur et à mesure — sans attendre la fin du scan complet.
+Un arrêt en cours de route (Ctrl+C, `docker stop`, ou le flag `-timeout`)
+n'efface donc pas le travail déjà fait : ce qui a été récupéré avant
+l'arrêt reste écrit en base, et le run suivant repart pour compléter.
+
 **Tesla nécessite Chromium — en mode "headed", pas headless.**
 `tesla.com/api/findus/*` est protégé par un bot-mitigation (Akamai) qui
 rejette toute requête HTTP classique quels que soient les en-têtes envoyés
