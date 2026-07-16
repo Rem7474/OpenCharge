@@ -25,6 +25,21 @@ const DefaultTeslaLocationsURL = "https://www.tesla.com/api/findus/get-locations
 
 const teslaDetailsURLFmt = "https://www.tesla.com/api/findus/get-charger-details?locationSlug=%s"
 
+// teslaHeaders mirrors a real browser hitting tesla.com/findus: Akamai's
+// edge bot mitigation (the "errors.edgesuite.net" 403 page) rejects
+// requests missing these — a bare User-Agent isn't enough on its own.
+var teslaHeaders = map[string]string{
+	"Accept":                    "application/json",
+	"Accept-Language":           "en-US,en;q=0.9",
+	"Referer":                   "https://www.tesla.com/findus",
+	"DNT":                       "1",
+	"Upgrade-Insecure-Requests": "1",
+	"Sec-Ch-Ua":                 `"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"`,
+	"Sec-Ch-Ua-Mobile":          "?0",
+	"Sec-Ch-Ua-Platform":        `"Windows"`,
+	"User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+}
+
 // TeslaConfig tunes the per-slug detail-fetch worker pool.
 type TeslaConfig struct {
 	Workers int
@@ -263,8 +278,9 @@ func (ing *TeslaIngester) getJSON(ctx context.Context, url string) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	for k, v := range teslaHeaders {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := ing.client.Do(req)
 	if err != nil {
