@@ -25,6 +25,21 @@ export default function OperatorFilter({ selectedSources, onToggleSource, onSele
     return () => controller.abort();
   }, []);
 
+  // Re-fetch every time the dropdown opens: an ingestion run can add a new
+  // source (or a new plan on an existing one) at any point during a long
+  // browsing session, and the initial mount-time fetch above would
+  // otherwise never reflect that until a full page reload.
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    fetchSources({ signal: controller.signal })
+      .then((sources) => setAllSources(sources ?? []))
+      .catch((err) => {
+        if (err.name !== "AbortError") console.error(err);
+      });
+    return () => controller.abort();
+  }, [open]);
+
   useEffect(() => {
     function handleClickOutside(e) {
       if (containerRef.current && !containerRef.current.contains(e.target)) {
