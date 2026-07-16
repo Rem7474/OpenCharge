@@ -631,8 +631,9 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 // either currency-symbol ordering — French puts the amount first ("0,70 €
 // / kWh entamé."), English puts € first ("€ 0.70 / started kWh.") — via two
 // alternative capture groups; the amount can use either a comma or dot
-// decimal separator.
-var freshmilePricePattern = regexp.MustCompile(`(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*/\s*(?:started\s+)?kWh`)
+// decimal separator. The separator between amount and "kWh" also varies:
+// "/" ("0,70 € / kWh"), or the word "par"/"per" ("0,25 € par kWh entamé").
+var freshmilePricePattern = regexp.MustCompile(`(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*(?:/|par|per)\s*(?:started\s+)?kWh`)
 
 // freshmilePriceFromDescription extracts a €/kWh price (in cents) from a
 // Freshmile tariff's description field. Two shapes have been observed in

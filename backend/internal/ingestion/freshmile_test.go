@@ -93,6 +93,20 @@ func TestFreshmilePriceFromDescription(t *testing.T) {
 			wantLang:  "",
 		},
 		{
+			name:      `plain text with "par" separator (production format)`,
+			raw:       "Le prix dépend de l'énergie délivrée\n0,60 € par kWh entamé",
+			wantOK:    true,
+			wantCents: 60.0,
+			wantLang:  "",
+		},
+		{
+			name:      `plain text with "par" separator, more text after the price`,
+			raw:       "Le prix dépend de l'énergie délivrée et du temps de branchement\n0,25 € par kWh entamé et 0,025 € par minute\nLa tarification continue tant que le véhicule reste branché",
+			wantOK:    true,
+			wantCents: 25.0,
+			wantLang:  "",
+		},
+		{
 			name:   "not valid json and no price pattern in it either",
 			raw:    "Tarif sur demande",
 			wantOK: false,
