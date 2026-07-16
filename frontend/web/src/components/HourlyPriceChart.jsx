@@ -10,6 +10,14 @@ function toMinutes(time) {
   return (h || 0) * 60 + (m || 0);
 }
 
+function minutesToTime(min) {
+  const h = Math.floor(min / 60)
+    .toString()
+    .padStart(2, "0");
+  const m = (min % 60).toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
 /**
  * Small inline bar chart: one bar per pricing window, width proportional
  * to its duration in the day, height/label proportional to its price.
@@ -27,15 +35,22 @@ export default function HourlyPriceChart({ tariff, priceMode, chargeKWh }) {
   const maxPrice = Math.max(...prices);
   const priceRange = maxPrice - minPrice || 1;
 
-  const bars = priced.map((w) => {
+  const bars = priced.flatMap((w) => {
     const startMin = toMinutes(w.startTime);
-    let endMin = toMinutes(w.endTime);
-    if (endMin <= startMin) endMin = 24 * 60; // "23:59"-style end of day
-    const x = (startMin / 1440) * CHART_WIDTH;
-    const width = Math.max(((endMin - startMin) / 1440) * CHART_WIDTH - BAR_GAP, 1);
-    const heightRatio = MIN_BAR_HEIGHT / CHART_HEIGHT + (1 - MIN_BAR_HEIGHT / CHART_HEIGHT) * ((w.energyPriceCentsPerKwh - minPrice) / priceRange);
-    const height = heightRatio * CHART_HEIGHT;
-    return { ...w, x, width, height };
+    const endMin = toMinutes(w.endTime);
+    // A window that wraps past midnight (e.g. 23:00-04:00) applies to two
+    // separate stretches of the 0-24h chart at the same price: render both
+    // segments instead of dropping the [00:00, endMin) portion.
+    const segments =
+      endMin > startMin ? [[startMin, endMin]] : [[startMin, 24 * 60], ...(endMin > 0 ? [[0, endMin]] : [])];
+
+    return segments.map(([segStart, segEnd]) => {
+      const x = (segStart / 1440) * CHART_WIDTH;
+      const width = Math.max(((segEnd - segStart) / 1440) * CHART_WIDTH - BAR_GAP, 1);
+      const heightRatio = MIN_BAR_HEIGHT / CHART_HEIGHT + (1 - MIN_BAR_HEIGHT / CHART_HEIGHT) * ((w.energyPriceCentsPerKwh - minPrice) / priceRange);
+      const height = heightRatio * CHART_HEIGHT;
+      return { ...w, startTime: minutesToTime(segStart), x, width, height };
+    });
   });
 
   return (
