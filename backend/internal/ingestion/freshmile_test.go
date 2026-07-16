@@ -510,3 +510,38 @@ func TestFreshmilePriceFromDescriptionPlainTextEnglishFallback(t *testing.T) {
 		t.Error("text is empty, want the raw description")
 	}
 }
+
+// realFreshmileEmptyLocationPayload is a real /locations/{id} response for
+// a currently-unavailable location with no evses at all (production,
+// captured 2026-07-16) — normalization must still succeed for the station
+// itself (ref/coordinates are present) while producing zero tariffs,
+// rather than erroring out.
+const realFreshmileEmptyLocationPayload = `{"data":{"id":3658,"ref":"C1DF1E5BC8","name":"BP | Aire de Saint Léger OUEST","evses_statuses":[],"is_available":false,"coordinates":{"latitude":45.6116,"longitude":-0.60293},"address":{"fullname":"A10","city":"Saint-Léger","postal_code":"17800","country":"FRA"},"evses":[],"evses_available_count":0,"evses_total_count":0,"connectors":{"best_power":{"category":"superfast","kw":0},"types":["IEC_62196_T2_COMBO","IEC_62196_T2","CHADEMO"]}}}`
+
+func TestNormalizeFreshmileRealPayloadEmptyEvses(t *testing.T) {
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(realFreshmileEmptyLocationPayload), &envelope); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	details := envelope.Data
+	if details == nil {
+		t.Fatal("fixture missing data envelope")
+	}
+
+	src, ok := normalizeFreshmileStation(details)
+	if !ok {
+		t.Fatal("normalizeFreshmileStation = false, want true")
+	}
+	if src.SourceStationID != "C1DF1E5BC8" {
+		t.Errorf("SourceStationID = %q, want C1DF1E5BC8", src.SourceStationID)
+	}
+	if src.Lat != 45.6116 || src.Lng != -0.60293 {
+		t.Errorf("coords = %v,%v, want 45.6116,-0.60293", src.Lat, src.Lng)
+	}
+
+	if tariffs := normalizeFreshmileTariffs(details); len(tariffs) != 0 {
+		t.Errorf("got %d tariffs, want 0 (no evses)", len(tariffs))
+	}
+}
