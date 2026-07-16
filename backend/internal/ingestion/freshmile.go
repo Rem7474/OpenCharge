@@ -47,9 +47,12 @@ const freshmileMaxTilesVisited = 20000
 // simple worker-pool-over-a-channel like the detail-fetch phase.
 const freshmileScanWorkers = 16
 
-// freshmileFlushGraceTimeout bounds how long a batch write is allowed to
-// take after ctx has already ended the run — see writeResults.
-const freshmileFlushGraceTimeout = 30 * time.Second
+// freshmileFlushTimeout bounds how long a single batch write is allowed
+// to take. It's deliberately generous (this isn't a "how long is a
+// healthy write" tuning knob, just a backstop against a truly hung
+// query) since writeResults always runs the write decoupled from the
+// run's own ctx — see there for why.
+const freshmileFlushTimeout = 2 * time.Minute
 
 // freshmileProgressLogInterval controls how often fetchAllLocationIDs logs
 // progress while it scans — the discovery phase is a long, purely
@@ -199,22 +202,21 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 		if len(batch) == 0 {
 			return nil
 		}
-		// Normally just ctx, same budget as any other write in a healthy
-		// run. Only once ctx has actually ended (SIGINT, -timeout) do we
-		// switch to a write decoupled from it with its own bounded grace
-		// period — otherwise this last batch, sitting fully collected in
-		// memory, would be canceled along with everything else and lost,
-		// which is exactly what this whole flush-on-shutdown path exists
-		// to avoid. Applying that grace period unconditionally instead
-		// would silently cap every single flush at
-		// freshmileFlushGraceTimeout regardless of ctx's real deadline,
-		// canceling legitimate slow writes on a perfectly healthy run.
-		writeCtx := ctx
-		if ctx.Err() != nil {
-			var cancel context.CancelFunc
-			writeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), freshmileFlushGraceTimeout)
-			defer cancel()
-		}
+		// Always decoupled from ctx (context.WithoutCancel), not just once
+		// ctx has already ended: this batch is fully collected in memory
+		// by this point, so once we've committed to writing it, a SIGINT
+		// or -timeout landing mid-query shouldn't be able to abort it —
+		// checking ctx.Err() only at the top of flush() left a race where
+		// cancellation arriving after that check but before the query
+		// finished still aborted an in-progress write
+		// ("canceling statement due to user request" observed in
+		// practice). The bound is generous (freshmileFlushTimeout, not
+		// the short shutdown-specific grace period an earlier version of
+		// this used) so it doesn't interfere with a legitimately slow
+		// write under concurrent load — it's just a backstop against a
+		// truly hung query, not a race with the run's own cancellation.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), freshmileFlushTimeout)
+		defer cancel()
 		n, err := writeSourceStationChunk(writeCtx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
 		processed += n
 		batch = batch[:0]
