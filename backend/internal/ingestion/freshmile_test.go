@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -85,8 +86,15 @@ func TestFreshmilePriceFromDescription(t *testing.T) {
 			wantLang:  "en",
 		},
 		{
-			name:   "not valid json",
-			raw:    "0,70 € / kWh entamé.",
+			name:      "plain text, not a per-language JSON blob (production format)",
+			raw:       "0,70 € / kWh entamé.",
+			wantOK:    true,
+			wantCents: 70.0,
+			wantLang:  "",
+		},
+		{
+			name:   "not valid json and no price pattern in it either",
+			raw:    "Tarif sur demande",
 			wantOK: false,
 		},
 		{
@@ -428,5 +436,63 @@ func TestGetJSONGivesUpAfterMaxRetries(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&requests); got != freshmileMaxRetries+1 {
 		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, freshmileMaxRetries+1, freshmileMaxRetries)
+	}
+}
+
+// realFreshmileLocationPayload is an actual /locations/{id} response
+// (production, captured 2026-07-16). Two things about it don't match
+// what the rest of this file's fixtures assume: the location object is
+// wrapped in a "data" envelope, and the tariff description is a single
+// plain-text string ("0,25 € / kWh entamé + 0,05 € / min...") rather than
+// the {"fr":...,"en":...} JSON blob normalizeFreshmileTariffs was
+// originally written against.
+const realFreshmileLocationPayload = `{"data":{"id":2999,"ref":"AEC485D47D","name":"Cannes Parking Braille","coordinates":{"latitude":43.554817,"longitude":7.022205},"address":{"fullname":"5 Rue Louis Braille","city":"Cannes","postal_code":"06400","country":"FRA"},"evses":[{"id":5926,"connectors":[{"id":11298,"power":4,"standard":"DOMESTIC_F","tariff":{"id":2998,"description":"0,25 € \/ kWh entamé + 0,05 € \/ min.\r\nLa tarification continue tant que le véhicule reste branché.","is_free":false,"currency":"EUR","custom_ref":"normal-interop","is_preferential":false}}]}],"connectors":{"best_power":{"category":"normal","kw":22},"types":["DOMESTIC_F","IEC_62196_T2"]}}}`
+
+func TestNormalizeFreshmileRealPayloadWithDataEnvelopeAndPlainTextDescription(t *testing.T) {
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(realFreshmileLocationPayload), &envelope); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	details := envelope.Data
+	if details == nil {
+		t.Fatal("fixture missing data envelope")
+	}
+
+	src, ok := normalizeFreshmileStation(details)
+	if !ok {
+		t.Fatal("normalizeFreshmileStation = false, want true")
+	}
+	if src.SourceStationID != "AEC485D47D" {
+		t.Errorf("SourceStationID = %q, want AEC485D47D", src.SourceStationID)
+	}
+	if src.Lat != 43.554817 || src.Lng != 7.022205 {
+		t.Errorf("coords = %v,%v, want 43.554817,7.022205", src.Lat, src.Lng)
+	}
+
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	price := tariffs[0].EnergyPriceCentsPerKWh
+	if price == nil || *price != 25.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 25.0 (0,25 € plain-text description)", price)
+	}
+}
+
+func TestFreshmilePriceFromDescriptionPlainTextEnglishFallback(t *testing.T) {
+	price, lang, text, ok := freshmilePriceFromDescription("€ 0.30 / started kWh + € 0.30 / min\nThe pricing continues as long as the vehicle remains plugged in.")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if lang != "" {
+		t.Errorf("lang = %q, want empty (not a per-language JSON blob)", lang)
+	}
+	if price == nil || *price != 30.0 {
+		t.Errorf("price = %v, want 30.0", price)
+	}
+	if text == "" {
+		t.Error("text is empty, want the raw description")
 	}
 }

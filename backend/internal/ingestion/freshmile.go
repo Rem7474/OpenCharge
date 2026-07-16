@@ -635,36 +635,54 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 var freshmilePricePattern = regexp.MustCompile(`(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*/\s*(?:started\s+)?kWh`)
 
 // freshmilePriceFromDescription extracts a €/kWh price (in cents) from a
-// Freshmile tariff's JSON-encoded multi-language description (e.g.
-// {"fr": "0,70 € / kWh entamé.", "en": "€ 0.70 / started kWh."}),
-// preferring French then falling back to English.
+// Freshmile tariff's description field. Two shapes have been observed in
+// the wild: a JSON-encoded multi-language object (e.g. {"fr": "0,70 € /
+// kWh entamé.", "en": "€ 0.70 / started kWh."}) and — in current
+// production responses — a single plain-text string in whatever language
+// the API happened to answer in (e.g. "€ 0.30 / started kWh + € 0.30 /
+// min\nThe pricing continues..."). The JSON form is tried first (and
+// prefers French then English); a plain string that isn't valid JSON
+// falls back to matching the price pattern directly against it.
 func freshmilePriceFromDescription(raw any) (priceCents *float64, lang, text string, ok bool) {
 	descText := stringValue(raw)
 	if descText == "" {
 		return nil, "", "", false
 	}
+
 	var byLang map[string]string
-	if err := json.Unmarshal([]byte(descText), &byLang); err != nil {
+	if err := json.Unmarshal([]byte(descText), &byLang); err == nil {
+		for _, l := range []string{"fr", "en"} {
+			t := byLang[l]
+			if t == "" {
+				continue
+			}
+			if cents, ok := extractFreshmilePriceCents(t); ok {
+				return cents, l, t, true
+			}
+		}
 		return nil, "", "", false
 	}
-	for _, l := range []string{"fr", "en"} {
-		t := byLang[l]
-		if t == "" {
-			continue
-		}
-		match := freshmilePricePattern.FindStringSubmatch(t)
-		if len(match) != 3 {
-			continue
-		}
-		amount := firstNonEmpty(match[1], match[2])
-		euros, err := strconv.ParseFloat(strings.ReplaceAll(amount, ",", "."), 64)
-		if err != nil {
-			continue
-		}
-		// Round to avoid float64 noise from the euro->cents multiplication
-		// (e.g. 0.55 * 100 = 55.00000000000001).
-		cents := math.Round(euros*10000) / 100
-		return &cents, l, t, true
+
+	if cents, ok := extractFreshmilePriceCents(descText); ok {
+		return cents, "", descText, true
 	}
 	return nil, "", "", false
+}
+
+// extractFreshmilePriceCents matches freshmilePricePattern against a
+// single piece of text and converts the amount to cents.
+func extractFreshmilePriceCents(t string) (*float64, bool) {
+	match := freshmilePricePattern.FindStringSubmatch(t)
+	if len(match) != 3 {
+		return nil, false
+	}
+	amount := firstNonEmpty(match[1], match[2])
+	euros, err := strconv.ParseFloat(strings.ReplaceAll(amount, ",", "."), 64)
+	if err != nil {
+		return nil, false
+	}
+	// Round to avoid float64 noise from the euro->cents multiplication
+	// (e.g. 0.55 * 100 = 55.00000000000001).
+	cents := math.Round(euros*10000) / 100
+	return &cents, true
 }
