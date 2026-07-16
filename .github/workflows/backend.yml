@@ -56,6 +56,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable
+      TEST_DATABASE_URL: postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -70,8 +71,11 @@ jobs:
         run: go vet ./...
       - name: go build
         run: go build ./...
-      - name: go test
-        run: go test ./... -race -cover
+      - name: go test (unit + integration against Postgres/PostGIS)
+        # -p 1: internal/api and internal/repository integration tests share
+        # the same database and truncate tables on setup, so packages must
+        # run sequentially, not in parallel.
+        run: go test ./internal/... -p 1 -race -cover
 
   docker-build:
     runs-on: ubuntu-latest

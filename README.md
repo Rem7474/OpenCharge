@@ -68,6 +68,24 @@ Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra et Izivia sont corrélés.
 
+## Tests
+
+```bash
+cd backend
+go test ./internal/ingestion/...          # tests unitaires purs (parsing, normalisation)
+TEST_DATABASE_URL=postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable \
+  go test ./internal/... -p 1
+```
+
+Les tests de `internal/repository` et `internal/api` sont des tests
+d'intégration : ils s'exécutent contre une vraie base Postgres/PostGIS
+(migrations déjà appliquées) et sont **skippés automatiquement** si
+`TEST_DATABASE_URL` (ou `DATABASE_URL`) n'est pas défini. Chaque test
+tronque les tables au démarrage, donc `-p 1` est nécessaire pour éviter
+que deux packages ne se marchent dessus sur la même base. C'est exactement
+ce que fait la CI (`.github/workflows/backend.yml`), avec un service
+`postgis/postgis` éphémère.
+
 ## API
 
 ```bash
