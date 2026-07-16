@@ -139,6 +139,73 @@ func TestTariffRepository_ListDistinctSourcesWithPlans(t *testing.T) {
 	}
 }
 
+func TestTariffRepository_BulkUpsert(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	stationID, err := stationRepo.UpsertStation(ctx, testStation("FRBULKTAR1", 45.9, 6.1))
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	acPrice := 30.0
+	dcPrice := 50.0
+	dcPriceDup := 55.0
+	tariffs := []domain.StationTariff{
+		{StationID: stationID, Source: "electra", Plan: "app", Kind: domain.TariffKindAC, Model: "m", Currency: "EUR", EnergyPriceCentsPerKWh: &acPrice, Extra: map[string]any{}},
+		{StationID: stationID, Source: "electra", Plan: "app", Kind: domain.TariffKindDC, Model: "m", Currency: "EUR", EnergyPriceCentsPerKWh: &dcPrice, Extra: map[string]any{}},
+		// Same conflict key (station, source, kind, plan) as the previous
+		// row: the batch must dedupe (last one wins) instead of erroring
+		// with "ON CONFLICT DO UPDATE command cannot affect row a second
+		// time".
+		{StationID: stationID, Source: "electra", Plan: "app", Kind: domain.TariffKindDC, Model: "m", Currency: "EUR", EnergyPriceCentsPerKWh: &dcPriceDup, Extra: map[string]any{}},
+	}
+
+	if err := tariffRepo.BulkUpsert(ctx, tariffs); err != nil {
+		t.Fatalf("BulkUpsert: %v", err)
+	}
+
+	got, err := tariffRepo.ListByStation(ctx, stationID)
+	if err != nil {
+		t.Fatalf("ListByStation: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tariffs, want 2 (deduped)", len(got))
+	}
+	byKind := map[string]domain.StationTariff{}
+	for _, tar := range got {
+		byKind[tar.Kind] = tar
+	}
+	if byKind["dc"].EnergyPriceCentsPerKWh == nil || *byKind["dc"].EnergyPriceCentsPerKWh != 55.0 {
+		t.Errorf("dc EnergyPriceCentsPerKWh = %v, want 55.0 (last occurrence in the batch wins)", byKind["dc"].EnergyPriceCentsPerKWh)
+	}
+
+	// Re-upserting via BulkUpsert must update in place, not duplicate.
+	newACPrice := 35.0
+	if err := tariffRepo.BulkUpsert(ctx, []domain.StationTariff{
+		{StationID: stationID, Source: "electra", Plan: "app", Kind: domain.TariffKindAC, Model: "m", Currency: "EUR", EnergyPriceCentsPerKWh: &newACPrice, Extra: map[string]any{}},
+	}); err != nil {
+		t.Fatalf("BulkUpsert (update): %v", err)
+	}
+	got, err = tariffRepo.ListByStation(ctx, stationID)
+	if err != nil {
+		t.Fatalf("ListByStation after update: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tariffs after update, want 2 (upsert must not duplicate)", len(got))
+	}
+}
+
+func TestTariffRepository_BulkUpsert_Empty(t *testing.T) {
+	pool := setupTestPool(t)
+	tariffRepo := NewTariffRepository(pool)
+	if err := tariffRepo.BulkUpsert(context.Background(), nil); err != nil {
+		t.Errorf("BulkUpsert(nil) = %v, want nil", err)
+	}
+}
+
 func TestTariffRepository_ListByStation_Empty(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

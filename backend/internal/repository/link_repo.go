@@ -140,3 +140,48 @@ func (r *LinkRepository) Upsert(ctx context.Context, stationID, sourceStationID 
 	}
 	return nil
 }
+
+// LinkUpsert is one link to write in a BulkUpsert call.
+type LinkUpsert struct {
+	StationID       uuid.UUID
+	SourceStationID uuid.UUID
+	Source          string
+	LinkQuality     string
+	DistanceMeters  float64
+}
+
+// BulkUpsert writes many links in a single round trip. Each
+// (StationID, SourceStationID) pair is unique per call by construction
+// (SourceStationID is a freshly upserted source station's own UUID), so
+// unlike tariffs there's no same-batch conflict-key collision to dedupe.
+func (r *LinkRepository) BulkUpsert(ctx context.Context, links []LinkUpsert) error {
+	if len(links) == 0 {
+		return nil
+	}
+
+	n := len(links)
+	stationIDs := make([]uuid.UUID, n)
+	sourceStationIDs := make([]uuid.UUID, n)
+	sources := make([]string, n)
+	qualities := make([]string, n)
+	distances := make([]float64, n)
+	for i, l := range links {
+		stationIDs[i] = l.StationID
+		sourceStationIDs[i] = l.SourceStationID
+		sources[i] = l.Source
+		qualities[i] = l.LinkQuality
+		distances[i] = l.DistanceMeters
+	}
+
+	const query = `
+		INSERT INTO station_links (station_id, source_station_id, source, link_quality, distance_meters)
+		SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::float8[])
+		ON CONFLICT (station_id, source_station_id) DO UPDATE SET
+			link_quality = EXCLUDED.link_quality,
+			distance_meters = EXCLUDED.distance_meters`
+
+	if _, err := r.db.Exec(ctx, query, stationIDs, sourceStationIDs, sources, qualities, distances); err != nil {
+		return fmt.Errorf("bulk upsert station links: %w", err)
+	}
+	return nil
+}

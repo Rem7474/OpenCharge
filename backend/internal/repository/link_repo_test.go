@@ -95,6 +95,79 @@ func TestLinkRepository_FindNearestStations(t *testing.T) {
 	}
 }
 
+func TestLinkRepository_BulkUpsert(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	sourceRepo := NewSourceStationRepository(pool)
+	linkRepo := NewLinkRepository(pool)
+
+	station1, err := stationRepo.UpsertStation(ctx, testStation("FRBULKLK01", 45.9, 6.1))
+	if err != nil {
+		t.Fatalf("UpsertStation 1: %v", err)
+	}
+	station2, err := stationRepo.UpsertStation(ctx, testStation("FRBULKLK02", 46.0, 6.2))
+	if err != nil {
+		t.Fatalf("UpsertStation 2: %v", err)
+	}
+	src1, err := sourceRepo.Upsert(ctx, domain.SourceStation{Source: "electra", SourceStationID: "bulk-1", Lat: 45.9, Lng: 6.1})
+	if err != nil {
+		t.Fatalf("SourceStations.Upsert 1: %v", err)
+	}
+	src2, err := sourceRepo.Upsert(ctx, domain.SourceStation{Source: "electra", SourceStationID: "bulk-2", Lat: 46.0, Lng: 6.2})
+	if err != nil {
+		t.Fatalf("SourceStations.Upsert 2: %v", err)
+	}
+
+	err = linkRepo.BulkUpsert(ctx, []LinkUpsert{
+		{StationID: station1, SourceStationID: src1, Source: "electra", LinkQuality: domain.LinkQualityByGeolocation, DistanceMeters: 12.0},
+		{StationID: station2, SourceStationID: src2, Source: "electra", LinkQuality: domain.LinkQualityByOperatorName, DistanceMeters: 8.0},
+	})
+	if err != nil {
+		t.Fatalf("BulkUpsert: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM station_links WHERE source = 'electra'`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("found %d links, want 2", count)
+	}
+
+	// Re-upserting via BulkUpsert must update in place, not duplicate.
+	err = linkRepo.BulkUpsert(ctx, []LinkUpsert{
+		{StationID: station1, SourceStationID: src1, Source: "electra", LinkQuality: domain.LinkQualityByOperatorName, DistanceMeters: 5.0},
+	})
+	if err != nil {
+		t.Fatalf("BulkUpsert (update): %v", err)
+	}
+	var quality string
+	var distance float64
+	err = pool.QueryRow(ctx, `SELECT link_quality, distance_meters FROM station_links WHERE station_id = $1 AND source_station_id = $2`, station1, src1).
+		Scan(&quality, &distance)
+	if err != nil {
+		t.Fatalf("query link: %v", err)
+	}
+	if quality != domain.LinkQualityByOperatorName || distance != 5.0 {
+		t.Errorf("link = (%q, %v), want (%q, 5.0)", quality, distance, domain.LinkQualityByOperatorName)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM station_links WHERE source = 'electra'`).Scan(&count); err != nil {
+		t.Fatalf("count rows after update: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("found %d links after update, want 2 (upsert must not duplicate)", count)
+	}
+}
+
+func TestLinkRepository_BulkUpsert_Empty(t *testing.T) {
+	pool := setupTestPool(t)
+	linkRepo := NewLinkRepository(pool)
+	if err := linkRepo.BulkUpsert(context.Background(), nil); err != nil {
+		t.Errorf("BulkUpsert(nil) = %v, want nil", err)
+	}
+}
+
 func TestLinkRepository_Upsert(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

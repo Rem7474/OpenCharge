@@ -23,10 +23,15 @@ type normalizedSourceStation struct {
 	Tariffs []domain.StationTariff
 }
 
-// writeSourceStationChunk upserts a chunk's source stations, resolves all
-// of their nearest IRVE station in a single bulk query (instead of one
-// geospatial query per station), then upserts links and tariffs — all
-// inside one transaction.
+// writeSourceStationChunk writes a chunk of source stations and their
+// tariffs in a small, fixed number of round trips regardless of chunk
+// size: one bulk nearest-IRVE-station lookup, one bulk source-station
+// upsert, one bulk link upsert, one bulk tariff upsert — instead of ~1-8
+// round trips per station (nearest lookup + source station + link + up to
+// 6 tariffs). That difference is negligible on a local database (sub-
+// millisecond round trips) but dominates wall-clock time against a
+// database with real network latency, where it was measured to make
+// large batches ~100-200x slower than this bulk form.
 func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, maxDistanceM float64, items []normalizedSourceStation) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
@@ -43,43 +48,56 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 	txLinks := links.WithTx(tx)
 
 	points := make([]repository.NearestStationQuery, len(items))
+	stations := make([]domain.SourceStation, len(items))
 	for i, item := range items {
 		points[i] = repository.NearestStationQuery{Lat: item.Station.Lat, Lng: item.Station.Lng}
+		stations[i] = item.Station
 	}
+
 	nearest, err := txLinks.FindNearestStations(ctx, points, maxDistanceM)
 	if err != nil {
 		return 0, err
 	}
+	sourceStationIDs, err := txSourceStations.BulkUpsert(ctx, stations)
+	if err != nil {
+		return 0, err
+	}
 
-	processed := 0
+	var linkUpserts []repository.LinkUpsert
+	var tariffUpserts []domain.StationTariff
 	for i, item := range items {
-		sourceStationID, err := txSourceStations.Upsert(ctx, item.Station)
-		if err != nil {
-			return processed, err
+		candidate, ok := nearest[i]
+		if !ok {
+			continue
+		}
+		sourceStationID, ok := sourceStationIDs[repository.SourceStationKey(item.Station.Source, item.Station.SourceStationID)]
+		if !ok {
+			continue
 		}
 
-		candidate, ok := nearest[i]
-		if ok {
-			quality := domain.LinkQualityByGeolocation
-			if strings.EqualFold(candidate.OperatorName, item.Station.OperatorName) || strings.EqualFold(candidate.Name, item.Station.Name) {
-				quality = domain.LinkQualityByOperatorName
-			}
-			distance := candidate.DistanceMeters
-			if err := txLinks.Upsert(ctx, candidate.StationID, sourceStationID, item.Station.Source, quality, &distance); err != nil {
-				return processed, err
-			}
-			for _, t := range item.Tariffs {
-				t.StationID = candidate.StationID
-				if err := txTariffs.Upsert(ctx, t); err != nil {
-					return processed, err
-				}
-			}
+		quality := domain.LinkQualityByGeolocation
+		if strings.EqualFold(candidate.OperatorName, item.Station.OperatorName) || strings.EqualFold(candidate.Name, item.Station.Name) {
+			quality = domain.LinkQualityByOperatorName
 		}
-		processed++
+		linkUpserts = append(linkUpserts, repository.LinkUpsert{
+			StationID: candidate.StationID, SourceStationID: sourceStationID,
+			Source: item.Station.Source, LinkQuality: quality, DistanceMeters: candidate.DistanceMeters,
+		})
+		for _, t := range item.Tariffs {
+			t.StationID = candidate.StationID
+			tariffUpserts = append(tariffUpserts, t)
+		}
+	}
+
+	if err := txLinks.BulkUpsert(ctx, linkUpserts); err != nil {
+		return 0, err
+	}
+	if err := txTariffs.BulkUpsert(ctx, tariffUpserts); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit source station chunk tx: %w", err)
 	}
-	return processed, nil
+	return len(items), nil
 }

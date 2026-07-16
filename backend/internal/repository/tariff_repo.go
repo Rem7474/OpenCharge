@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -65,6 +66,127 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 		return fmt.Errorf("upsert station tariff: %w", err)
 	}
 	return nil
+}
+
+// tariffKey identifies a station_tariffs conflict key (station_id, source,
+// kind, plan).
+func tariffKey(t domain.StationTariff) string {
+	plan := t.Plan
+	if plan == "" {
+		plan = domain.TariffPlanStandard
+	}
+	return t.StationID.String() + "\x00" + t.Source + "\x00" + t.Kind + "\x00" + plan
+}
+
+// BulkUpsert writes many tariffs in a single round trip instead of one
+// Upsert call per tariff — the same batch of source stations can produce
+// several tariffs each (e.g. Electra's 3 plans x 2 kinds), so this is
+// where per-row round trips add up the most for large ingestion runs
+// against a database with real network latency.
+func (r *TariffRepository) BulkUpsert(ctx context.Context, tariffs []domain.StationTariff) error {
+	if len(tariffs) == 0 {
+		return nil
+	}
+
+	// Dedupe by conflict key, keeping the last occurrence: a single
+	// multi-row INSERT ON CONFLICT DO UPDATE errors if two input rows
+	// target the same key (e.g. two source stations correlated to the same
+	// IRVE station produce the same (station_id, source, kind, plan)).
+	deduped := dedupeTariffs(tariffs)
+
+	n := len(deduped)
+	stationIDs := make([]uuid.UUID, n)
+	sources := make([]string, n)
+	plans := make([]string, n)
+	kinds := make([]string, n)
+	models := make([]string, n)
+	currencies := make([]string, n)
+	energyPrices := make([]*float64, n)
+	sessionPrices := make([]*float64, n)
+	congestionPrices := make([]*float64, n)
+	serviceFees := make([]*float64, n)
+	validFroms := make([]*time.Time, n)
+	validTos := make([]*time.Time, n)
+	rawTexts := make([]string, n)
+	extras := make([]string, n)
+	for i, t := range deduped {
+		plan := t.Plan
+		if plan == "" {
+			plan = domain.TariffPlanStandard
+		}
+		extra, err := json.Marshal(t.Extra)
+		if err != nil {
+			return fmt.Errorf("marshal extra for bulk tariff %d: %w", i, err)
+		}
+		stationIDs[i] = t.StationID
+		sources[i] = t.Source
+		plans[i] = plan
+		kinds[i] = t.Kind
+		models[i] = t.Model
+		currencies[i] = t.Currency
+		energyPrices[i] = t.EnergyPriceCentsPerKWh
+		sessionPrices[i] = t.SessionPriceCentsPerMin
+		congestionPrices[i] = t.CongestionPriceCentsPerMin
+		serviceFees[i] = t.ServiceFeePercent
+		validFroms[i] = t.ValidFrom
+		validTos[i] = t.ValidTo
+		rawTexts[i] = t.RawText
+		extras[i] = string(extra)
+	}
+
+	const query = `
+		INSERT INTO station_tariffs (
+			station_id, source, plan, kind, model, currency,
+			energy_price_cents_per_kwh, session_price_cents_per_min, congestion_price_cents_per_min,
+			service_fee_percent, valid_from, valid_to, raw_text, extra, updated_at
+		)
+		SELECT s.station_id, s.source, s.plan, s.kind, s.model, s.currency,
+			s.energy_price_cents_per_kwh, s.session_price_cents_per_min, s.congestion_price_cents_per_min,
+			s.service_fee_percent, s.valid_from, s.valid_to, s.raw_text, s.extra::jsonb, now()
+		FROM unnest(
+			$1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+			$7::float8[], $8::float8[], $9::float8[],
+			$10::float8[], $11::timestamptz[], $12::timestamptz[], $13::text[], $14::text[]
+		) AS s(station_id, source, plan, kind, model, currency,
+			energy_price_cents_per_kwh, session_price_cents_per_min, congestion_price_cents_per_min,
+			service_fee_percent, valid_from, valid_to, raw_text, extra)
+		ON CONFLICT (station_id, source, kind, plan) DO UPDATE SET
+			model = EXCLUDED.model,
+			currency = EXCLUDED.currency,
+			energy_price_cents_per_kwh = EXCLUDED.energy_price_cents_per_kwh,
+			session_price_cents_per_min = EXCLUDED.session_price_cents_per_min,
+			congestion_price_cents_per_min = EXCLUDED.congestion_price_cents_per_min,
+			service_fee_percent = EXCLUDED.service_fee_percent,
+			valid_from = EXCLUDED.valid_from,
+			valid_to = EXCLUDED.valid_to,
+			raw_text = EXCLUDED.raw_text,
+			extra = EXCLUDED.extra,
+			updated_at = now()`
+
+	_, err := r.db.Exec(ctx, query,
+		stationIDs, sources, plans, kinds, models, currencies,
+		energyPrices, sessionPrices, congestionPrices,
+		serviceFees, validFroms, validTos, rawTexts, extras,
+	)
+	if err != nil {
+		return fmt.Errorf("bulk upsert station tariffs: %w", err)
+	}
+	return nil
+}
+
+func dedupeTariffs(tariffs []domain.StationTariff) []domain.StationTariff {
+	byKey := make(map[string]int, len(tariffs))
+	deduped := make([]domain.StationTariff, 0, len(tariffs))
+	for _, t := range tariffs {
+		key := tariffKey(t)
+		if idx, ok := byKey[key]; ok {
+			deduped[idx] = t
+			continue
+		}
+		byKey[key] = len(deduped)
+		deduped = append(deduped, t)
+	}
+	return deduped
 }
 
 // ListDistinctSourcesWithPlans returns every tariff source currently
