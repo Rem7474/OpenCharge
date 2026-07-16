@@ -43,20 +43,23 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable
       LISTEN_ADDR: ":8080"
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
-    ports:
-      - "${API_PORT:-8080}:8080"
+    # No ports published: only reachable from other containers (the web
+    # service reverse-proxies /api/* to it) — see nginx.conf.
 
   web:
     build:
       context: ./frontend/web
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:${API_PORT:-8080}}
+        # Relative path: same-origin through the web container's nginx
+        # reverse proxy (see nginx.conf's /api/ location). Only override
+        # this to an absolute URL if bypassing the reverse proxy entirely.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
     restart: unless-stopped
     depends_on:
       - api
     ports:
-      - "${WEB_PORT:-5173}:80"
+      - "${APP_PORT:-8081}:80"
 
 volumes:
   opencharge-db-data:

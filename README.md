@@ -65,19 +65,22 @@ c'est cette donnée qui alimente le graphique horaire du frontend.
 ## Lancer l'environnement
 
 ```bash
-cp .env.example .env   # ajuster les ports si déjà pris (ex. API_PORT=8081)
+cp .env.example .env   # ajuster APP_PORT si 8081 est déjà pris
 
 docker compose up -d db migrate
 # ou, sans docker : appliquer backend/db/migrations/*.sql avec golang-migrate
 # migrate -path backend/db/migrations -database "$DATABASE_URL" up
 
-# environnement complet (API + frontend web servi par nginx) :
+# environnement complet (API + frontend, un seul port exposé) :
 docker compose up -d db migrate api web
 ```
 
-`docker compose` lit `.env` automatiquement : `DB_PORT`, `API_PORT`,
-`WEB_PORT` contrôlent les ports exposés sur l'hôte (défauts identiques à
-avant : 5432/8080/5173), et `POSTGRES_USER`/`POSTGRES_PASSWORD`/
+`web` (nginx) est le seul point d'entrée HTTP : il sert le frontend sur `/`
+et fait reverse-proxy de `/api/*` vers le conteneur `api`, qui n'est jamais
+publié sur l'hôte. Une fois lancé : `http://localhost:8081/` (frontend) et
+`http://localhost:8081/api/stations?...` (API). `docker compose` lit `.env`
+automatiquement : `DB_PORT` et `APP_PORT` contrôlent les ports exposés sur
+l'hôte (défauts 5432/8081), et `POSTGRES_USER`/`POSTGRES_PASSWORD`/
 `POSTGRES_DB`/`CORS_ORIGIN`/`VITE_API_BASE_URL` les autres réglages. Voir
 `.env.example` pour la liste complète.
 
@@ -190,7 +193,11 @@ npm install
 npm run dev
 ```
 
-`VITE_API_BASE_URL` (défaut `http://localhost:8080`) pointe vers l'API.
+`VITE_API_BASE_URL` (défaut `http://localhost:8080`) pointe vers l'API
+lancée en local (`go run ./cmd/opencharge-api`, cf. section API ci-dessus).
+Ce mode (frontend et API lancés séparément, hors Docker) cible l'API
+directement par une URL absolue ; il ne passe pas par le reverse-proxy
+nginx décrit dans la section Docker ci-dessous.
 
 ### Pages et parcours
 
@@ -224,14 +231,18 @@ npm run dev
 ### Docker
 
 ```bash
-docker compose build web
-docker compose up -d web
+docker compose up -d db migrate api web
 ```
 
 Le `Dockerfile` (`frontend/web/Dockerfile`) est un build multi-stage
 `node:20-alpine` → `nginx:alpine`. `VITE_API_BASE_URL` est un argument de
 build (les variables Vite sont figées à la compilation, pas au runtime) :
-adaptez-le à l'URL publique de l'API en production.
+par défaut `/api`, un chemin relatif résolu contre l'origine de la page —
+c'est ce même conteneur `web` (nginx) qui sert le frontend sur `/` **et**
+fait reverse-proxy de `/api/*` vers le conteneur `api` (`frontend/web/nginx.conf`),
+qui lui n'est jamais exposé sur l'hôte. Un seul port est donc publié :
+`http://localhost:${APP_PORT:-8081}/` pour le frontend,
+`http://localhost:${APP_PORT:-8081}/api/*` pour l'API.
 
 ### Mobile (Capacitor)
 
