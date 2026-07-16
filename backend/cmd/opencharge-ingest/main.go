@@ -13,18 +13,19 @@ import (
 
 func main() {
 	var (
-		dsn        = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source     = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, or all")
-		irveURL    = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
-		electraURL = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
-		teslaURL   = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
-		linkMaxM   = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
-		timeout    = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
+		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
+		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, or all")
+		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
+		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
+		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
+		freshmileURL = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
+		linkMaxM     = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
+		timeout      = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
 	)
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, or all")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -76,6 +77,15 @@ func main() {
 		}
 		log.Printf("tesla ingestion complete: %d stations", count)
 	}
+	runFreshmile := func() {
+		ingester := ingestion.NewFreshmileIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *freshmileURL, ingestion.DefaultFreshmileConfig())
+		ingester.MaxLinkDistanceM = *linkMaxM
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("freshmile ingestion failed: %v", err)
+		}
+		log.Printf("freshmile ingestion complete: %d locations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -86,15 +96,18 @@ func main() {
 		runIzivia()
 	case "tesla":
 		runTesla()
+	case "freshmile":
+		runFreshmile()
 	case "all":
 		// IRVE first: it's the canonical referential that electra/izivia/
-		// tesla correlate against.
+		// tesla/freshmile correlate against.
 		runIRVE()
 		runElectra()
 		runIzivia()
 		runTesla()
+		runFreshmile()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, or all", *source)
 	}
 }
 

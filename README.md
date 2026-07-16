@@ -17,12 +17,12 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
       repository/           # accès PostgreSQL/PostGIS (pgx)
-      ingestion/             # import + normalisation IRVE/Electra/Izivia/Tesla + corrélation
+      ingestion/             # import + normalisation IRVE/Electra/Izivia/Tesla/Freshmile + corrélation
     db/migrations/          # migrations SQL (golang-migrate)
   frontend/
     web/                     # React + Leaflet, carte pilotée par bbox
@@ -66,6 +66,16 @@ Supercharger, un par combinaison véhicule/abonnement issue de ses
 `congestion_price_cents_per_min` du tarif correspondant plutôt que de
 créer une ligne séparée.
 
+Freshmile (`backend/internal/ingestion/freshmile.go`) peut exposer
+plusieurs tarifs distincts par station, un par produit tarifaire
+(`custom_ref`, ex. `normal-k-wh-interop-20`), chacun devenant son propre
+`Plan` — avec un suffixe `:preferential` quand le tarif est marqué
+`is_preferential` (abonnement/partenaire). Le prix €/kWh est extrait par
+regex depuis le texte de description multilingue du tarif (FR en priorité,
+sinon EN) ; un tarif dont le prix n'a pas pu être extrait est quand même
+conservé (`energy_price_cents_per_kwh` à `null`, brut dans `extra.tariff`)
+plutôt que d'être jeté, pour audit/futur raffinement de la regex.
+
 Chaque tarif porte aussi `extra.windows`, la liste de ses plages horaires
 avec leur propre prix (`{"startTime","endTime","energyPriceCentsPerKwh"}`) —
 c'est cette donnée qui alimente le graphique horaire du frontend.
@@ -96,18 +106,19 @@ l'hôte (défauts 5432/8081), et `POSTGRES_USER`/`POSTGRES_PASSWORD`/
 
 ```bash
 cd backend
-go run ./cmd/opencharge-ingest -source irve      # référentiel IRVE (GeoJSON)
-go run ./cmd/opencharge-ingest -source electra   # stations + tarifs Electra, corrélation
-go run ./cmd/opencharge-ingest -source izivia    # stations + tarifs Izivia, corrélation
-go run ./cmd/opencharge-ingest -source tesla     # Superchargers Tesla, corrélation
-go run ./cmd/opencharge-ingest -source all       # les quatre, dans cet ordre
+go run ./cmd/opencharge-ingest -source irve       # référentiel IRVE (GeoJSON)
+go run ./cmd/opencharge-ingest -source electra    # stations + tarifs Electra, corrélation
+go run ./cmd/opencharge-ingest -source izivia     # stations + tarifs Izivia, corrélation
+go run ./cmd/opencharge-ingest -source tesla      # Superchargers Tesla, corrélation
+go run ./cmd/opencharge-ingest -source freshmile  # stations + tarifs Freshmile, corrélation
+go run ./cmd/opencharge-ingest -source all        # les cinq, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
-`-electra-url`, `-tesla-url`, `-link-max-distance-m`.
+`-electra-url`, `-tesla-url`, `-freshmile-url`, `-link-max-distance-m`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra, Izivia et Tesla sont corrélés.
+lequel Electra, Izivia, Tesla et Freshmile sont corrélés.
 
 ## Tests
 
@@ -278,3 +289,7 @@ Xcode en local — hors périmètre de ce dépôt/CI pour l'instant.
   tarifs), scannée par grille sur la métropole
 - Tesla : API front `https://www.tesla.com/api/findus/*` (liste des sites,
   détails/tarifs par Supercharger)
+- Freshmile : API carto `https://prod-driver-api.freshmile.com/charge/api/v2`
+  (`map-locations` en clusters/points, `locations/{id}` pour le détail),
+  clusters résolus par subdivision récursive de bbox jusqu'aux points
+  unitaires
