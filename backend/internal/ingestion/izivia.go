@@ -237,20 +237,21 @@ func normalizeIziviaTariffs(pricing []any) []domain.StationTariff {
 				continue
 			}
 			rawText := texts[0]
-			price, fee := parsePriceText(rawText)
-			if price == nil && fee == nil {
+			price, sessionPrice, fee := parsePriceText(rawText)
+			if price == nil && sessionPrice == nil && fee == nil {
 				continue
 			}
 			return []domain.StationTariff{{
-				Source:                 "izivia",
-				Plan:                   domain.TariffPlanStandard,
-				Kind:                   domain.TariffKindMixed,
-				Model:                  "izivia_text",
-				Currency:               "EUR",
-				EnergyPriceCentsPerKWh: price,
-				ServiceFeePercent:      fee,
-				RawText:                rawText,
-				Extra:                  map[string]any{},
+				Source:                  "izivia",
+				Plan:                    domain.TariffPlanStandard,
+				Kind:                    domain.TariffKindMixed,
+				Model:                   "izivia_text",
+				Currency:                "EUR",
+				EnergyPriceCentsPerKWh:  price,
+				SessionPriceCentsPerMin: sessionPrice,
+				ServiceFeePercent:       fee,
+				RawText:                 rawText,
+				Extra:                   map[string]any{},
 			}}
 		}
 	}

@@ -50,8 +50,8 @@ func TestNormalizeIziviaStation(t *testing.T) {
 	if tariff.Model != "izivia_text" {
 		t.Errorf("Model = %q, want izivia_text", tariff.Model)
 	}
-	if tariff.EnergyPriceCentsPerKWh == nil || *tariff.EnergyPriceCentsPerKWh != 0.45 {
-		t.Errorf("EnergyPriceCentsPerKWh = %v, want 0.45", tariff.EnergyPriceCentsPerKWh)
+	if tariff.EnergyPriceCentsPerKWh == nil || *tariff.EnergyPriceCentsPerKWh != 45.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 45.0 (0,45€ in cents)", tariff.EnergyPriceCentsPerKWh)
 	}
 	if tariff.ServiceFeePercent == nil || *tariff.ServiceFeePercent != 15 {
 		t.Errorf("ServiceFeePercent = %v, want 15", tariff.ServiceFeePercent)

@@ -65,6 +65,8 @@ c'est cette donnée qui alimente le graphique horaire du frontend.
 ## Lancer l'environnement
 
 ```bash
+cp .env.example .env   # ajuster les ports si déjà pris (ex. API_PORT=8081)
+
 docker compose up -d db migrate
 # ou, sans docker : appliquer backend/db/migrations/*.sql avec golang-migrate
 # migrate -path backend/db/migrations -database "$DATABASE_URL" up
@@ -72,6 +74,12 @@ docker compose up -d db migrate
 # environnement complet (API + frontend web servi par nginx) :
 docker compose up -d db migrate api web
 ```
+
+`docker compose` lit `.env` automatiquement : `DB_PORT`, `API_PORT`,
+`WEB_PORT` contrôlent les ports exposés sur l'hôte (défauts identiques à
+avant : 5432/8080/5173), et `POSTGRES_USER`/`POSTGRES_PASSWORD`/
+`POSTGRES_DB`/`CORS_ORIGIN`/`VITE_API_BASE_URL` les autres réglages. Voir
+`.env.example` pour la liste complète.
 
 ## Ingestion
 

@@ -7,8 +7,14 @@ import (
 	"strings"
 )
 
-var pricePattern = regexp.MustCompile(`([0-9]+(?:[.,][0-9]+)?)\s*€(?:/?kWh|/kWh)?`)
-var serviceFeePattern = regexp.MustCompile(`([0-9]+(?:[.,][0-9]+)?)%\s+de frais de service`)
+// Izivia (and similar sources) describe pricing as free text rather than
+// structured fields, e.g. "0,45€/kWh (Dont 15% de frais de service)",
+// "0.30 € TTC du kWh", "Prix : 0,05€/min". These patterns are deliberately
+// case-insensitive and tolerant of the wording/spacing variants seen across
+// station descriptions, since the source gives no schema guarantee.
+var pricePerKWhPattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:/\s*kwh|du\s+kwh|par\s+kwh|kwh)`)
+var pricePerMinutePattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:/\s*min(?:ute)?s?|par\s+min(?:ute)?s?|la\s+minute)`)
+var serviceFeePattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*%\s*(?:de\s+)?frais\s+de\s+service|frais\s+de\s+service\s*(?:de\s*)?[:=]?\s*([0-9]+(?:[.,][0-9]+)?)\s*%`)
 
 func stringValue(value any) string {
 	switch typed := value.(type) {
@@ -62,26 +68,40 @@ func parseBooleanLoose(value string) bool {
 	}
 }
 
-// parsePriceText extracts a €/kWh price and an optional service fee
-// percentage from a free-text tariff description (e.g. Izivia's
-// "0,45€/kWh (Dont 15% de frais de service)").
-func parsePriceText(text string) (*float64, *float64) {
+// parsePriceText extracts an energy price (cents/kWh), a per-session price
+// (cents/min) and an optional service fee percentage from a free-text
+// tariff description (e.g. Izivia's "0,45€/kWh (Dont 15% de frais de
+// service)" or "0,05€/min"). Prices in the source text are euros, but
+// StationTariff fields are cents, so matches are scaled by 100.
+func parsePriceText(text string) (energyCentsPerKWh, sessionCentsPerMin, serviceFeePercent *float64) {
 	if strings.TrimSpace(text) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
-	var price *float64
-	if match := pricePattern.FindStringSubmatch(text); len(match) == 2 {
-		if parsed, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64); err == nil {
-			price = &parsed
+	energyCentsPerKWh = matchEuroCents(pricePerKWhPattern, text)
+	sessionCentsPerMin = matchEuroCents(pricePerMinutePattern, text)
+	if match := serviceFeePattern.FindStringSubmatch(text); match != nil {
+		raw := firstNonEmpty(match[1], match[2])
+		if parsed, err := strconv.ParseFloat(strings.ReplaceAll(raw, ",", "."), 64); err == nil {
+			serviceFeePercent = &parsed
 		}
 	}
-	var fee *float64
-	if match := serviceFeePattern.FindStringSubmatch(text); len(match) == 2 {
-		if parsed, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64); err == nil {
-			fee = &parsed
-		}
+	return energyCentsPerKWh, sessionCentsPerMin, serviceFeePercent
+}
+
+// matchEuroCents runs pattern against text and converts its first capture
+// group (a euro amount using either "." or "," as decimal separator) to
+// cents.
+func matchEuroCents(pattern *regexp.Regexp, text string) *float64 {
+	match := pattern.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return nil
 	}
-	return price, fee
+	parsed, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
+	if err != nil {
+		return nil
+	}
+	cents := parsed * 100
+	return &cents
 }
 
 func firstNonEmpty(values ...string) string {
