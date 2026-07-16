@@ -81,8 +81,8 @@ func TestNormalizeIziviaStationNoLocation(t *testing.T) {
 }
 
 func TestNormalizeIziviaTariffsNoPricing(t *testing.T) {
-	if got := normalizeIziviaTariffs(nil); got != nil {
-		t.Errorf("normalizeIziviaTariffs(nil) = %v, want nil", got)
+	if got := normalizeIziviaTariffs(nil, nil); got != nil {
+		t.Errorf("normalizeIziviaTariffs(nil, nil) = %v, want nil", got)
 	}
 }
 
@@ -96,12 +96,37 @@ func TestNormalizeIziviaTariffsFallsBackToRawPricingInfos(t *testing.T) {
 			},
 		},
 	}
-	tariffs := normalizeIziviaTariffs(pricing)
+	tariffs := normalizeIziviaTariffs(nil, pricing)
 	if len(tariffs) != 1 {
 		t.Fatalf("got %d tariffs, want 1", len(tariffs))
 	}
 	if tariffs[0].Kind != domain.TariffKindMixed {
 		t.Errorf("Kind = %q, want mixed", tariffs[0].Kind)
+	}
+}
+
+func TestNormalizeIziviaTariffsTopLevelPricingInfos(t *testing.T) {
+	// The dominant production shape: itemType "charging_location", leaf, with
+	// pricingInfos at the entry's own top level (not nested under
+	// chargingStations). This must yield a tariff — the earlier code only
+	// looked inside chargingStations and produced nothing here.
+	pricing := []any{
+		map[string]any{
+			"rawPricingInfos": []any{"0,207€/kWh  <br> (Dont 15% de frais de service)"},
+			"pricingInfos":    []any{"0,207€/kWh  \n (Dont 15% de frais de service)"},
+			"itemType":        "charging_location",
+			"structureType":   "leaf",
+		},
+	}
+	tariffs := normalizeIziviaTariffs(nil, pricing)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	if tariffs[0].EnergyPriceCentsPerKWh == nil || *tariffs[0].EnergyPriceCentsPerKWh != 20.7 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 20.7 (0,207€ in cents)", tariffs[0].EnergyPriceCentsPerKWh)
+	}
+	if tariffs[0].ServiceFeePercent == nil || *tariffs[0].ServiceFeePercent != 15 {
+		t.Errorf("ServiceFeePercent = %v, want 15", tariffs[0].ServiceFeePercent)
 	}
 }
 
@@ -143,7 +168,7 @@ func TestNormalizeIziviaTariffsInfersKindAndSkipsZeroPrice(t *testing.T) {
 		},
 	}
 
-	tariffs := normalizeIziviaTariffs(pricing)
+	tariffs := normalizeIziviaTariffs(nil, pricing)
 	if len(tariffs) != 1 {
 		t.Fatalf("got %d tariffs, want 1", len(tariffs))
 	}
@@ -159,6 +184,40 @@ func TestNormalizeIziviaTariffsInfersKindAndSkipsZeroPrice(t *testing.T) {
 	}
 	if tariff.ServiceFeePercent == nil || *tariff.ServiceFeePercent != 15.0 {
 		t.Errorf("ServiceFeePercent = %v, want 15.0", tariff.ServiceFeePercent)
+	}
+}
+
+func TestIziviaTariffKindFromConnectorStats(t *testing.T) {
+	acStation := map[string]any{"chargingConnectorsStats": []any{
+		map[string]any{"standard": "t2", "maxPowerInW": 25000.0}, // AC even >22kW
+		map[string]any{"standard": "standard_household", "maxPowerInW": 7260.0},
+	}}
+	dcStation := map[string]any{"chargingConnectorsStats": []any{
+		map[string]any{"standard": "combo_t2", "maxPowerInW": 150000.0},
+		map[string]any{"standard": "chademo", "maxPowerInW": 50000.0},
+	}}
+	mixedStation := map[string]any{"chargingConnectorsStats": []any{
+		map[string]any{"standard": "t2", "maxPowerInW": 22000.0},
+		map[string]any{"standard": "combo_t2", "maxPowerInW": 120000.0},
+	}}
+
+	// Text says "CCS 24kW" (would infer DC), but structured data is
+	// authoritative: an AC-only station stays AC.
+	if got := iziviaTariffKind(acStation, "Connecteurs : CCS 24kW"); got != domain.TariffKindAC {
+		t.Errorf("AC-only station kind = %q, want ac", got)
+	}
+	if got := iziviaTariffKind(dcStation, ""); got != domain.TariffKindDC {
+		t.Errorf("DC-only station kind = %q, want dc", got)
+	}
+	if got := iziviaTariffKind(mixedStation, ""); got != domain.TariffKindMixed {
+		t.Errorf("AC+DC station kind = %q, want mixed", got)
+	}
+	// No structured data at all: fall back to the text heuristic.
+	if got := iziviaTariffKind(map[string]any{}, "Connecteurs : CCS 50kW"); got != domain.TariffKindDC {
+		t.Errorf("no-stats station with DC text = %q, want dc (text fallback)", got)
+	}
+	if got := iziviaTariffKind(map[string]any{}, "0,45€/kWh"); got != domain.TariffKindMixed {
+		t.Errorf("no-stats station with no power in text = %q, want mixed", got)
 	}
 }
 

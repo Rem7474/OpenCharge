@@ -277,20 +277,79 @@ func normalizeIziviaStation(marker, station map[string]any, pricing []any) (doma
 		Raw:             map[string]any{"marker": marker, "station": station, "pricing": pricing},
 	}
 
-	return src, normalizeIziviaTariffs(pricing), true
+	return src, normalizeIziviaTariffs(station, pricing), true
 }
 
 // iziviaPowerPattern extracts a connector's power rating (e.g. "24kW" in
 // "Connecteurs : CCS 24kW") from Izivia's free-text pricing description.
 var iziviaPowerPattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*kW`)
 
+// iziviaTariffKind decides a station's tariff Kind (ac/dc/mixed). It prefers
+// the station's structured chargingConnectorsStats — far more reliable than
+// guessing from the pricing text — and only falls back to the free-text
+// heuristic (inferIziviaKind) when no usable connector data is present.
+//
+// A station exposing only AC (or only DC) connectors gets that kind; one
+// exposing both gets "mixed" (a single Izivia price applies to every
+// connector, and since ListByBBox feeds 'mixed' into both the AC and DC
+// minimums, the marker is still priced whatever the connector).
+func iziviaTariffKind(station map[string]any, text string) string {
+	stats, _ := station["chargingConnectorsStats"].([]any)
+	hasAC, hasDC := false, false
+	for _, raw := range stats {
+		c, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch iziviaConnectorKind(stringValue(c["standard"]), c["maxPowerInW"]) {
+		case domain.TariffKindAC:
+			hasAC = true
+		case domain.TariffKindDC:
+			hasDC = true
+		}
+	}
+	switch {
+	case hasAC && !hasDC:
+		return domain.TariffKindAC
+	case hasDC && !hasAC:
+		return domain.TariffKindDC
+	case hasAC && hasDC:
+		return domain.TariffKindMixed
+	default:
+		// No usable structured connector data — fall back to the free-text
+		// heuristic (which may itself return "mixed").
+		return inferIziviaKind(text)
+	}
+}
+
+// iziviaConnectorKind maps one chargingConnectorsStats entry to ac/dc. The
+// connector standard is authoritative: Type 2 / Type 3 / domestic sockets
+// are AC even when rated above 22kW (observed: "t2" up to 25kW), while
+// CCS Combo ("combo_t2") and CHAdeMO are DC. Only when the standard is
+// unrecognized does it fall back to power (>22kW ⇒ DC). Returns "" when
+// neither the standard nor the power is usable.
+func iziviaConnectorKind(standard string, maxPowerInW any) string {
+	switch strings.ToLower(strings.TrimSpace(standard)) {
+	case "combo_t2", "combo_ccs", "ccs", "chademo":
+		return domain.TariffKindDC
+	case "t2", "type2", "iec_62196_t2", "t3", "type3", "standard_household", "domestic", "ef", "e", "type_e":
+		return domain.TariffKindAC
+	}
+	if w, ok := floatValue(maxPowerInW); ok && w != nil && *w > 0 {
+		if *w/1000.0 > 22 {
+			return domain.TariffKindDC
+		}
+		return domain.TariffKindAC
+	}
+	return ""
+}
+
 // inferIziviaKind derives a tariff's Kind (ac/dc) from the power rating
-// mentioned in its pricing text, since Izivia's public API doesn't expose
-// connector kind as a structured field. Above 22kW (the ceiling for
-// three-phase AC charging) is treated as DC; at or below is AC. When no
-// power figure is found in the text, Kind falls back to Mixed rather than
-// guessing — that tariff just won't feed the AC/DC map aggregates, same
-// as before this change.
+// mentioned in its pricing text, used only as a fallback when a station has
+// no usable structured connector data (see iziviaTariffKind). Above 22kW
+// (the ceiling for three-phase AC charging) is treated as DC; at or below is
+// AC. When no power figure is found in the text, Kind falls back to Mixed
+// rather than guessing.
 func inferIziviaKind(text string) string {
 	match := iziviaPowerPattern.FindStringSubmatch(text)
 	if len(match) != 2 {
@@ -306,47 +365,67 @@ func inferIziviaKind(text string) string {
 	return domain.TariffKindAC
 }
 
-// normalizeIziviaTariffs turns Izivia's free-text pricing entries into
-// StationTariff rows, inferring Kind (ac/dc) from any power rating
-// mentioned in the text (see inferIziviaKind) — falling back to "mixed"
-// when the text gives no power figure to go on.
-func normalizeIziviaTariffs(pricing []any) []domain.StationTariff {
+// iziviaPricingTexts gathers every candidate pricing-description string from
+// an Izivia pricing-info-items payload, across BOTH shapes seen in
+// production. The dominant one (observed in ~90% of stations) is a
+// "charging_location / leaf" entry carrying pricingInfos/rawPricingInfos at
+// its own top level; the rarer one nests them under chargingStations[] (with
+// a subscriptionNames sibling). Earlier code only read the nested shape, so
+// the vast majority of stations produced no tariff at all — they then either
+// vanished from the map (the frontend requests hasTariffs=true) or showed no
+// Izivia price. pricingInfos is preferred over rawPricingInfos (same text,
+// but pricingInfos uses "\n" line breaks rather than "<br>").
+func iziviaPricingTexts(pricing []any) []string {
+	var texts []string
+	add := func(m map[string]any) {
+		got := extractStringList(m["pricingInfos"])
+		if len(got) == 0 {
+			got = extractStringList(m["rawPricingInfos"])
+		}
+		texts = append(texts, got...)
+	}
 	for _, item := range pricing {
 		entry, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
+		// Top-level shape.
+		add(entry)
+		// Nested shape.
 		chargingStations, _ := entry["chargingStations"].([]any)
 		for _, cs := range chargingStations {
-			csMap, ok := cs.(map[string]any)
-			if !ok {
-				continue
+			if csMap, ok := cs.(map[string]any); ok {
+				add(csMap)
 			}
-			texts := extractStringList(csMap["pricingInfos"])
-			if len(texts) == 0 {
-				texts = extractStringList(csMap["rawPricingInfos"])
-			}
-			if len(texts) == 0 {
-				continue
-			}
-			rawText := texts[0]
-			price, sessionPrice, fee := parsePriceText(rawText)
-			if price == nil && sessionPrice == nil && fee == nil {
-				continue
-			}
-			return []domain.StationTariff{{
-				Source:                  "izivia",
-				Plan:                    domain.TariffPlanStandard,
-				Kind:                    inferIziviaKind(rawText),
-				Model:                   "izivia_text",
-				Currency:                "EUR",
-				EnergyPriceCentsPerKWh:  price,
-				SessionPriceCentsPerMin: sessionPrice,
-				ServiceFeePercent:       fee,
-				RawText:                 rawText,
-				Extra:                   map[string]any{},
-			}}
 		}
+	}
+	return texts
+}
+
+// normalizeIziviaTariffs turns Izivia's free-text pricing entries into
+// StationTariff rows, deriving Kind (ac/dc/mixed) from the station's
+// structured connector data (see iziviaTariffKind), and only from the
+// pricing text as a fallback. It scans every candidate text (across both
+// payload shapes) and returns the first that yields a usable price, instead
+// of only ever looking at the first nested entry.
+func normalizeIziviaTariffs(station map[string]any, pricing []any) []domain.StationTariff {
+	for _, rawText := range iziviaPricingTexts(pricing) {
+		price, sessionPrice, fee := parsePriceText(rawText)
+		if price == nil && sessionPrice == nil && fee == nil {
+			continue
+		}
+		return []domain.StationTariff{{
+			Source:                  "izivia",
+			Plan:                    domain.TariffPlanStandard,
+			Kind:                    iziviaTariffKind(station, rawText),
+			Model:                   "izivia_text",
+			Currency:                "EUR",
+			EnergyPriceCentsPerKWh:  price,
+			SessionPriceCentsPerMin: sessionPrice,
+			ServiceFeePercent:       fee,
+			RawText:                 rawText,
+			Extra:                   map[string]any{},
+		}}
 	}
 	return nil
 }
