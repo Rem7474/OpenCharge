@@ -1,6 +1,8 @@
 package api
 
 import (
+	"strconv"
+	"strings"
 	"time"
 
 	"opencharge/internal/domain"
@@ -97,6 +99,65 @@ type stationDetailDTO struct {
 	Connectors []connectorDTO `json:"connectors"`
 	Is24_7     bool           `json:"is24_7"`
 	AccessType string         `json:"accessType,omitempty"`
+	// The four fields below come straight from the raw IRVE record kept in
+	// Station.Metadata (the full GeoJSON "properties" object, stored as-is
+	// at ingestion — see irve.go) rather than a dedicated column: they're
+	// display-only, never filtered/queried on, so promoting them to typed
+	// columns would just be a migration for no query benefit.
+	PDCCount         *int   `json:"pdcCount,omitempty"`
+	AccessibilityPMR string `json:"accessibilityPmr,omitempty"`
+	CableT2Attached  *bool  `json:"cableT2Attached,omitempty"`
+	// OpeningHours is IRVE's raw "horaires" text (e.g. "24/7", "Lun-Ven
+	// 8h-20h") — Is24_7 above only captures the exact-"24/7" case, throwing
+	// away every other schedule; this exposes the actual text instead.
+	OpeningHours string `json:"openingHours,omitempty"`
+}
+
+// metadataString reads a string field from a Station's raw IRVE metadata
+// (see stationDetailDTO's comment on why these read from metadata rather
+// than a typed column).
+func metadataString(metadata map[string]any, key string) string {
+	v, ok := metadata[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// metadataBool loosely parses a metadata string field as a boolean — IRVE's
+// raw values are Python-style "True"/"False" strings, not JSON booleans.
+func metadataBool(metadata map[string]any, key string) bool {
+	switch strings.ToLower(metadataString(metadata, key)) {
+	case "true", "1", "yes", "oui", "vrai":
+		return true
+	default:
+		return false
+	}
+}
+
+// metadataInt parses a metadata string field as an int, returning nil if
+// absent or unparseable rather than a misleading 0.
+func metadataInt(metadata map[string]any, key string) *int {
+	s := metadataString(metadata, key)
+	if s == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
+// metadataBoolPtr is like metadataBool but distinguishes "field absent"
+// (nil) from "field present and false" — used for cableT2Attached, where
+// an explicit "False" is meaningful information, not just unknown.
+func metadataBoolPtr(metadata map[string]any, key string) *bool {
+	if _, ok := metadata[key]; !ok {
+		return nil
+	}
+	b := metadataBool(metadata, key)
+	return &b
 }
 
 type sourcePlansDTO struct {
@@ -153,10 +214,14 @@ func toStationDetailDTO(s domain.Station) stationDetailDTO {
 			City:        s.AddressCity,
 			CountryCode: s.AddressCountry,
 		},
-		Location:   locationDTO{Lat: s.Lat, Lng: s.Lng},
-		Connectors: connectors,
-		Is24_7:     s.Is24_7,
-		AccessType: s.AccessType,
+		Location:         locationDTO{Lat: s.Lat, Lng: s.Lng},
+		Connectors:       connectors,
+		Is24_7:           s.Is24_7,
+		AccessType:       s.AccessType,
+		PDCCount:         metadataInt(s.Metadata, "nbre_pdc"),
+		AccessibilityPMR: metadataString(s.Metadata, "accessibilite_pmr"),
+		CableT2Attached:  metadataBoolPtr(s.Metadata, "cable_t2_attache"),
+		OpeningHours:     metadataString(s.Metadata, "horaires"),
 	}
 }
 

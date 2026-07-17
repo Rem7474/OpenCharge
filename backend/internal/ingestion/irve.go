@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -116,8 +115,6 @@ func normalizeIRVEFeature(f geoJSONFeature) (domain.Station, bool) {
 	stationID := firstNonEmpty(get("id_station_itinerance"), get("id_station_local"))
 
 	power, _ := parseLooseFloat(get("puissance_nominale"))
-	nbPDC, _ := strconv.Atoi(get("nbre_pdc"))
-	_ = nbPDC
 
 	accessType := "unknown"
 	if parseBooleanLoose(get("gratuit")) {

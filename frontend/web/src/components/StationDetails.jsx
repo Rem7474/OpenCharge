@@ -146,6 +146,14 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
           <p>
             Accès : {data.station.accessType || "inconnu"} · 24/7 : {data.station.is24_7 ? "oui" : "non"}
           </p>
+          {data.station.openingHours && data.station.openingHours !== "24/7" && (
+            <p>Horaires : {data.station.openingHours}</p>
+          )}
+          {data.station.pdcCount != null && <p>Points de charge sur site : {data.station.pdcCount}</p>}
+          {data.station.accessibilityPmr && <p>Accessibilité PMR : {data.station.accessibilityPmr}</p>}
+          {data.station.cableT2Attached != null && (
+            <p>Câble T2 attaché : {data.station.cableT2Attached ? "oui" : "non"}</p>
+          )}
 
           <h3>Prix</h3>
           {selectedTariffs.length === 0 && selectedEntries.length > 0 && (
