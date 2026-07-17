@@ -1,10 +1,132 @@
 package ingestion
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"opencharge/internal/domain"
 )
+
+func newTestIziviaIngester() *IziviaIngester {
+	ing := NewIziviaIngester(nil, nil, nil, nil, IziviaConfig{})
+	ing.retryBackoff = time.Millisecond // keep retry tests fast
+	return ing
+}
+
+func TestIziviaGetJSONRetriesOn5xxThenSucceeds(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = fmt.Fprint(w, "<html>504 Gateway Time-out</html>")
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"ok": true}`)
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	body, err := ing.getJSON(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("getJSON: %v", err)
+	}
+	if string(body) != `{"ok": true}` {
+		t.Errorf("body = %q, want ok:true", body)
+	}
+	if got := atomic.LoadInt32(&requests); got != 3 {
+		t.Errorf("requests = %d, want 3 (2 failures + 1 success)", got)
+	}
+}
+
+func TestIziviaPostJSONRetriesOnNetworkErrorThenSucceeds(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n < 2 {
+			// Simulate a connection-level failure (no HTTP response at all,
+			// status == 0 in withRetries) by closing the connection instead
+			// of writing a status line.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("ResponseWriter does not support hijacking")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"markers": []}`)
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	body, err := ing.postJSON(context.Background(), srv.URL, map[string]any{"square": map[string]any{}})
+	if err != nil {
+		t.Fatalf("postJSON: %v", err)
+	}
+	if string(body) != `{"markers": []}` {
+		t.Errorf("body = %q, want markers:[]", body)
+	}
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Errorf("requests = %d, want 2 (1 network failure + 1 success)", got)
+	}
+}
+
+func TestIziviaGetJSONDoesNotRetryOn4xx(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, "not found")
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	_, err := ing.getJSON(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("getJSON = nil error, want an error for a 404")
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error %q does not contain the status code", err.Error())
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("requests = %d, want 1 (4xx must not be retried)", got)
+	}
+}
+
+func TestIziviaGetJSONGivesUpAfterMaxRetries(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, "bad gateway")
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	_, err := ing.getJSON(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("getJSON = nil error, want an error after exhausting retries")
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
+	}
+	if got := atomic.LoadInt32(&requests); got != iziviaMaxRetries+1 {
+		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, iziviaMaxRetries+1, iziviaMaxRetries)
+	}
+}
 
 func TestNormalizeIziviaStation(t *testing.T) {
 	marker := map[string]any{"id": "izv-1"}

@@ -75,6 +75,7 @@ type IziviaIngester struct {
 	Config           IziviaConfig
 	MaxLinkDistanceM float64
 	client           *http.Client
+	retryBackoff     time.Duration // unexported: overridden by tests to keep them fast
 }
 
 func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, cfg IziviaConfig) *IziviaIngester {
@@ -90,8 +91,19 @@ func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStat
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
 		client:           newIziviaHTTPClient(workers),
+		retryBackoff:     2 * time.Second,
 	}
 }
+
+// iziviaMaxRetries is how many times a transient failure (network error,
+// timeout, or 5xx) is retried before giving up on that request. Every
+// square-scan and marker fetch used to have zero retry at all: a single
+// fronts-map.izivia.com timeout (observed in practice under load — the API
+// has no documented SLA) permanently dropped whatever that request covered
+// (an entire grid square during discovery, or one station during detail
+// fetch), logged and skipped, with no way to recover it within the run.
+// 4xx responses are never retried — they won't succeed on a second try.
+const iziviaMaxRetries = 5
 
 // Run scans Izivia's map for markers covering metropolitan France, fetches
 // station details and pricing for each, then correlates every station with
@@ -593,42 +605,72 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 }
 
 func (ing *IziviaIngester) postJSON(ctx context.Context, url string, payload map[string]any) ([]byte, error) {
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range iziviaHeaders {
-		req.Header.Set(k, v)
-	}
-	resp, err := ing.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		return nil, fmt.Errorf("izivia http %d: %s", resp.StatusCode, string(data))
-	}
-	return io.ReadAll(resp.Body)
+	return ing.withRetries(ctx, url, func() ([]byte, int, error) {
+		body, _ := json.Marshal(payload)
+		return ing.doRequest(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	})
 }
 
 func (ing *IziviaIngester) getJSON(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	return ing.withRetries(ctx, url, func() ([]byte, int, error) {
+		return ing.doRequest(ctx, http.MethodGet, url, nil)
+	})
+}
+
+// withRetries retries do (one HTTP attempt) on a transient failure —
+// network error, timeout, or 5xx — up to iziviaMaxRetries times with
+// exponential backoff, same pattern as Freshmile's getJSON. do's int
+// return is the HTTP status (0 if the request never got a response at
+// all); a non-zero status below 500 is a definitive client error and
+// stops retrying immediately.
+func (ing *IziviaIngester) withRetries(ctx context.Context, url string, do func() ([]byte, int, error)) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt <= iziviaMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := (1 << (attempt - 1)) * ing.retryBackoff
+			log.Printf("izivia: retrying %s in %v (attempt %d/%d) after: %v", url, backoff, attempt+1, iziviaMaxRetries+1, lastErr)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		body, status, err := do()
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if status != 0 && status < 500 {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+// doRequest performs a single HTTP request, always including the full URL
+// and status in any returned error so a failure is directly reproducible
+// without reconstructing it from a marker/square logged separately.
+func (ing *IziviaIngester) doRequest(ctx context.Context, method, url string, body io.Reader) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("build request for %s: %w", url, err)
 	}
 	for k, v := range iziviaHeaders {
 		req.Header.Set(k, v)
 	}
 	resp, err := ing.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("izivia request to %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		return nil, fmt.Errorf("izivia http %d: %s", resp.StatusCode, string(data))
+		return nil, resp.StatusCode, fmt.Errorf("izivia http %d for %s: %s", resp.StatusCode, url, string(data))
 	}
-	return io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("izivia read body from %s: %w", url, err)
+	}
+	return respBody, resp.StatusCode, nil
 }
