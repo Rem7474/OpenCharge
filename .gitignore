@@ -3,3 +3,14 @@
 *.db-wal
 *.csv
 *.jsonl
+
+# local env overrides (see .env.example)
+.env
+
+# frontend
+frontend/web/node_modules/
+frontend/web/dist/
+
+# backend
+backend/opencharge-api
+backend/opencharge-ingest

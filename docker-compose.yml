@@ -1,0 +1,80 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opencharge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opencharge}
+      POSTGRES_DB: ${POSTGRES_DB:-opencharge}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - opencharge-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opencharge} -d ${POSTGRES_DB:-opencharge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend/db/migrations:/migrations
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable",
+        "up",
+      ]
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    # No ports published: only reachable from other containers (the web
+    # service reverse-proxies /api/* to it) — see nginx.conf.
+
+  ingest:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: ingest
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable
+    # No default command: pass -source (and any other flag) via
+    # `docker compose run --rm ingest -source tesla`. The image bakes in
+    # TESLA_CHROME_PATH, so no extra flag is needed for the tesla source.
+
+  web:
+    build:
+      context: ./frontend/web
+      dockerfile: Dockerfile
+      args:
+        # Relative path: same-origin through the web container's nginx
+        # reverse proxy (see nginx.conf's /api/ location). Only override
+        # this to an absolute URL if bypassing the reverse proxy entirely.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${APP_PORT:-8081}:80"
+
+volumes:
+  opencharge-db-data:
