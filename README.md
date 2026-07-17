@@ -17,7 +17,7 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
@@ -116,7 +116,8 @@ go run ./cmd/opencharge-ingest -source lidl       # tarif fixe Lidl sur les stat
 go run ./cmd/opencharge-ingest -source chargenow  # stations + tarifs ChargeNow (DCS), corrélation
 go run ./cmd/opencharge-ingest -source ionity     # tarifs fixes Ionity sur les stations IRVE déjà taguées
 go run ./cmd/opencharge-ingest -source eborn      # tarifs fixes (par palier de puissance) eborn sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source all        # les dix, dans cet ordre
+go run ./cmd/opencharge-ingest -source sowatt     # tarif fixe Sowatt Solutions sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source all        # les onze, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
@@ -125,17 +126,18 @@ Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra, Izivia, Tesla, Freshmile et ChargeNow sont corrélés, et
-que Fastned/Lidl/Ionity/eborn tagguent directement (leurs stations sont
-déjà les lignes IRVE elles-mêmes, identifiées par `operator_name`/
+que Fastned/Lidl/Ionity/eborn/Sowatt tagguent directement (leurs stations
+sont déjà les lignes IRVE elles-mêmes, identifiées par `operator_name`/
 `enseigne` contenant leur nom — voir `backend/internal/ingestion/
-fastned.go`, `lidl.go`, `ionity.go`, `eborn.go`).
+fastned.go`, `lidl.go`, `ionity.go`, `eborn.go`, `sowatt.go`).
 
-**Fastned, Lidl et Ionity n'ont pas d'API de tarifs publique scrapable** :
-leurs tarifs (Fastned : 0,61 €/kWh standard, 0,43 €/kWh abonné ; Lidl :
-0,29 €/kWh unique, AC comme DC ; Ionity : 0,55 €/kWh sans appli, 0,52 €/kWh
-avec appli) sont des constantes fixes dans le code, à mettre à jour
-manuellement si l'un de ces réseaux change ses prix. Aucune requête réseau
-n'est faite pour ces trois runs.
+**Fastned, Lidl, Ionity et Sowatt Solutions n'ont pas d'API de tarifs
+publique scrapable** : leurs tarifs (Fastned : 0,61 €/kWh standard,
+0,43 €/kWh abonné ; Lidl : 0,29 €/kWh unique, AC comme DC ; Ionity :
+0,55 €/kWh sans appli, 0,52 €/kWh avec appli ; Sowatt Solutions :
+0,54 €/kWh unique, AC comme DC) sont des constantes fixes dans le code, à
+mettre à jour manuellement si l'un de ces réseaux change ses prix. Aucune
+requête réseau n'est faite pour ces runs.
 
 **eborn** (`backend/internal/ingestion/eborn.go`) est dans la même
 situation (pas d'API scrapable), mais son tarif dépend du kind (ac/dc) et,

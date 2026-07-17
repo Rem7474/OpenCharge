@@ -16,7 +16,7 @@ import (
 func main() {
 	var (
 		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, or all")
+		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
 		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
 		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
@@ -29,7 +29,7 @@ func main() {
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
 	}
 
 	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
@@ -147,6 +147,16 @@ func main() {
 		}
 		log.Printf("eborn ingestion complete: %d stations", count)
 	}
+	runSowatt := func() {
+		// Same shape as ionity/fastned/lidl/eborn: no source URL/config,
+		// just tags already-known IRVE stations — see sowatt.go.
+		ingester := ingestion.NewSowattIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("sowatt ingestion failed: %v", err)
+		}
+		log.Printf("sowatt ingestion complete: %d stations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -169,10 +179,12 @@ func main() {
 		runIonity()
 	case "eborn":
 		runEborn()
+	case "sowatt":
+		runSowatt()
 	case "all":
 		// IRVE first: it's the canonical referential that electra/izivia/
 		// tesla/freshmile/chargenow correlate against, and that
-		// fastned/lidl/ionity/eborn tag directly — so it must exist
+		// fastned/lidl/ionity/eborn/sowatt tag directly — so it must exist
 		// before any of those run too.
 		runIRVE()
 		runElectra()
@@ -184,8 +196,9 @@ func main() {
 		runChargenow()
 		runIonity()
 		runEborn()
+		runSowatt()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all", *source)
 	}
 }
 
