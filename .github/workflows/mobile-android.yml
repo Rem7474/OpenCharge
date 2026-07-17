@@ -1,0 +1,98 @@
+name: Mobile (Android)
+
+# Builds the Capacitor Android shell on every release tag and attaches the
+# APK(s) to the corresponding GitHub Release — mirrors docker-publish.yml's
+# trigger, but produces an installable app instead of a server image.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: frontend/web
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/web/package-lock.json
+
+      - run: npm ci
+
+      # Production mode picks up frontend/web/.env.production
+      # (VITE_API_BASE_URL=https://opencharge.remcorp.fr/api) — the
+      # Capacitor WebView has no page origin to resolve a relative "/api"
+      # against, unlike the browser/Docker deployment.
+      - name: Build web app
+        run: npm run build
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: frontend/web/android
+
+      # Signing is optional: without these secrets set on the repo, the
+      # release build below is left unsigned (still built, just not
+      # installable as-is) and only the debug APK is published. See
+      # frontend/web/android/keystore.properties.example.
+      - name: Write release keystore
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        working-directory: frontend/web/android
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.keystore
+          cat > keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Build debug APK
+        working-directory: frontend/web/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Build release APK
+        working-directory: frontend/web/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencharge-android-${{ github.ref_name }}
+          path: |
+            frontend/web/android/app/build/outputs/apk/debug/*.apk
+            frontend/web/android/app/build/outputs/apk/release/*.apk
+
+      - name: Attach debug APK to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: frontend/web/android/app/build/outputs/apk/debug/*.apk
+
+      - name: Attach signed release APK to the release
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: frontend/web/android/app/build/outputs/apk/release/*.apk

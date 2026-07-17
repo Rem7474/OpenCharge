@@ -1,5 +1,18 @@
 apply plugin: 'com.android.application'
 
+// Release signing is optional and never committed: CI (see
+// .github/workflows/mobile-android.yml) writes this file from secrets
+// before building, and a local release build can do the same by copying
+// keystore.properties.example. Without it, `assembleRelease` still
+// produces an APK, just unsigned (fine for CI to build, not installable
+// as-is on a device).
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+def hasSigningConfig = keystorePropertiesFile.exists()
+if (hasSigningConfig) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace = "com.opencharge.app"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -16,10 +29,23 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (hasSigningConfig) {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasSigningConfig) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
