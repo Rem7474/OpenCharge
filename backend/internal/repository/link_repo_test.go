@@ -95,6 +95,73 @@ func TestLinkRepository_FindNearestStations(t *testing.T) {
 	}
 }
 
+func TestLinkRepository_FindNearestStationsForKind(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	linkRepo := NewLinkRepository(pool)
+
+	// Two co-located IRVE rows (same physical address, different PDC):
+	// a DC (CCS) connector and an AC (T2) connector, close enough to each
+	// other that pure nearest-by-distance can't tell them apart reliably.
+	dc := testStation("FRKINDDC01", 45.9000, 6.1000)
+	dc.ConnectorType = "CCS"
+	dc.OperatorName = "KindTest"
+	ac := testStation("FRKINDAC01", 45.90001, 6.10001)
+	ac.ConnectorType = "T2"
+	ac.OperatorName = "KindTest"
+	far := testStation("FRKINDFAR1", 46.5000, 6.9000)
+	far.ConnectorType = "T2"
+
+	if _, err := stationRepo.UpsertStation(ctx, dc); err != nil {
+		t.Fatalf("UpsertStation dc: %v", err)
+	}
+	if _, err := stationRepo.UpsertStation(ctx, ac); err != nil {
+		t.Fatalf("UpsertStation ac: %v", err)
+	}
+	if _, err := stationRepo.UpsertStation(ctx, far); err != nil {
+		t.Fatalf("UpsertStation far: %v", err)
+	}
+
+	points := []NearestStationQuery{
+		{Lat: 45.9000, Lng: 6.1000},  // index 0: sits exactly on "dc"
+		{Lat: 10.0000, Lng: 10.0000}, // index 1: nowhere near anything
+	}
+
+	dcResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, 150)
+	if err != nil {
+		t.Fatalf("FindNearestStationsForKind(dc): %v", err)
+	}
+	dcCandidate, ok := dcResults[0]
+	if !ok {
+		t.Fatal("dcResults[0] missing, want the dc station")
+	}
+	if dcCandidate.DistanceMeters < 0 {
+		t.Errorf("dcResults[0].DistanceMeters = %v, want >= 0", dcCandidate.DistanceMeters)
+	}
+
+	acResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindAC, 150)
+	if err != nil {
+		t.Fatalf("FindNearestStationsForKind(ac): %v", err)
+	}
+	acCandidate, ok := acResults[0]
+	if !ok {
+		t.Fatal("acResults[0] missing, want the ac station")
+	}
+
+	if dcCandidate.StationID == acCandidate.StationID {
+		t.Errorf("dc and ac candidates resolved to the same station %v, want distinct co-located stations", dcCandidate.StationID)
+	}
+
+	if _, ok := dcResults[1]; ok {
+		t.Errorf("dcResults[1] = %+v, want absent (no station within range)", dcResults[1])
+	}
+
+	if empty, err := linkRepo.FindNearestStationsForKind(ctx, nil, domain.TariffKindDC, 150); err != nil || empty != nil {
+		t.Errorf("FindNearestStationsForKind(nil) = (%v, %v), want (nil, nil)", empty, err)
+	}
+}
+
 func TestLinkRepository_BulkUpsert(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

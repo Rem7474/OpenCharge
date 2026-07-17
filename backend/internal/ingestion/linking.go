@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"opencharge/internal/domain"
@@ -58,6 +59,58 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 	if err != nil {
 		return 0, err
 	}
+
+	// A source station's tariffs can span both ac and dc kinds (e.g.
+	// Electra), but IRVE models one row per physical connector: a
+	// co-located CCS row and T2 row for what's really one charging point
+	// are indistinguishable by distance alone. So beyond the plain
+	// nearest-overall lookup above (used as the fallback and for the
+	// station_links row when a source station has no kind-tagged
+	// tariffs), resolve a kind-preferring nearest separately for the
+	// subset of items that actually have an ac or dc tariff to place.
+	var acIdxs, dcIdxs []int
+	var acPoints, dcPoints []repository.NearestStationQuery
+	for i, item := range items {
+		hasAC, hasDC := false, false
+		for _, t := range item.Tariffs {
+			switch t.Kind {
+			case domain.TariffKindAC:
+				hasAC = true
+			case domain.TariffKindDC:
+				hasDC = true
+			}
+		}
+		if hasAC {
+			acIdxs = append(acIdxs, i)
+			acPoints = append(acPoints, points[i])
+		}
+		if hasDC {
+			dcIdxs = append(dcIdxs, i)
+			dcPoints = append(dcPoints, points[i])
+		}
+	}
+
+	nearestAC := map[int]repository.NearestStationCandidate{}
+	if len(acPoints) > 0 {
+		byLocalIdx, err := txLinks.FindNearestStationsForKind(ctx, acPoints, domain.TariffKindAC, maxDistanceM)
+		if err != nil {
+			return 0, err
+		}
+		for local, candidate := range byLocalIdx {
+			nearestAC[acIdxs[local]] = candidate
+		}
+	}
+	nearestDC := map[int]repository.NearestStationCandidate{}
+	if len(dcPoints) > 0 {
+		byLocalIdx, err := txLinks.FindNearestStationsForKind(ctx, dcPoints, domain.TariffKindDC, maxDistanceM)
+		if err != nil {
+			return 0, err
+		}
+		for local, candidate := range byLocalIdx {
+			nearestDC[dcIdxs[local]] = candidate
+		}
+	}
+
 	sourceStationIDs, err := txSourceStations.BulkUpsert(ctx, stations)
 	if err != nil {
 		return 0, err
@@ -66,26 +119,50 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 	var linkUpserts []repository.LinkUpsert
 	var tariffUpserts []domain.StationTariff
 	for i, item := range items {
-		candidate, ok := nearest[i]
-		if !ok {
-			continue
-		}
+		anyCandidate, hasAny := nearest[i]
 		sourceStationID, ok := sourceStationIDs[repository.SourceStationKey(item.Station.Source, item.Station.SourceStationID)]
 		if !ok {
 			continue
 		}
 
-		quality := domain.LinkQualityByGeolocation
-		if strings.EqualFold(candidate.OperatorName, item.Station.OperatorName) || strings.EqualFold(candidate.Name, item.Station.Name) {
-			quality = domain.LinkQualityByOperatorName
+		// Every distinct IRVE station this source station's tariffs
+		// actually resolved to gets its own link row — usually one (ac
+		// and dc land on the same station), occasionally two (co-located
+		// but distinct ac/dc rows).
+		usedStations := map[uuid.UUID]repository.NearestStationCandidate{}
+		if hasAny {
+			usedStations[anyCandidate.StationID] = anyCandidate
 		}
-		linkUpserts = append(linkUpserts, repository.LinkUpsert{
-			StationID: candidate.StationID, SourceStationID: sourceStationID,
-			Source: item.Station.Source, LinkQuality: quality, DistanceMeters: candidate.DistanceMeters,
-		})
+
 		for _, t := range item.Tariffs {
+			candidate, ok := anyCandidate, hasAny
+			switch t.Kind {
+			case domain.TariffKindAC:
+				if c, kindOK := nearestAC[i]; kindOK {
+					candidate, ok = c, true
+				}
+			case domain.TariffKindDC:
+				if c, kindOK := nearestDC[i]; kindOK {
+					candidate, ok = c, true
+				}
+			}
+			if !ok {
+				continue
+			}
 			t.StationID = candidate.StationID
 			tariffUpserts = append(tariffUpserts, t)
+			usedStations[candidate.StationID] = candidate
+		}
+
+		for _, candidate := range usedStations {
+			quality := domain.LinkQualityByGeolocation
+			if strings.EqualFold(candidate.OperatorName, item.Station.OperatorName) || strings.EqualFold(candidate.Name, item.Station.Name) {
+				quality = domain.LinkQualityByOperatorName
+			}
+			linkUpserts = append(linkUpserts, repository.LinkUpsert{
+				StationID: candidate.StationID, SourceStationID: sourceStationID,
+				Source: item.Station.Source, LinkQuality: quality, DistanceMeters: candidate.DistanceMeters,
+			})
 		}
 	}
 

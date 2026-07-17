@@ -166,6 +166,129 @@ func (r *LinkRepository) FindNearestStations(ctx context.Context, points []Neare
 	return result, rows.Err()
 }
 
+// candidateKindFilterFragment is the SQL predicate FindNearestStationsForKind
+// uses to identify a "kind-compatible" IRVE candidate: connector types are
+// classified DC (CCS/CHAdeMO) or AC (T2/EF), mirroring
+// domain.TariffKindForConnector — kept in sync by hand since this lives in
+// SQL, not Go, for the same reason bboxDeltas' index-friendly filtering
+// does: it needs to run inside the query, not after fetching rows.
+const candidateKindFilterFragment = `
+	CASE
+		WHEN st.connector_type IN ('CCS', 'CHAdeMO') THEN 'dc'
+		WHEN st.connector_type IN ('T2', 'EF') THEN 'ac'
+		ELSE ''
+	END`
+
+// FindNearestStationsForKind is FindNearestStations, but among the several
+// nearest candidates within range it prefers one whose own connector type
+// matches the given ac/dc kind — falling back to the plain nearest overall
+// if no kind-compatible candidate exists within maxDistanceMeters.
+//
+// This exists because IRVE models one row per physical connector: a single
+// address can have several PDC rows at (near enough to be indistinguishable
+// by distance) the same coordinates — e.g. a CCS 300kW row and a T2 22kW
+// row for what's really one charging point. Picking "the nearest" by
+// distance alone is then close to arbitrary, and since a single source
+// station's tariffs can span both ac and dc kinds (e.g. Electra), the plain
+// nearest-only lookup could attach a dc tariff to the row that's actually
+// the ac-only connector, permanently hiding that price from anyone at the
+// dc station (confirmed in production: a CCS 300kW station showing no
+// price at all because its dc tariff landed on the co-located T2 row).
+//
+// Each point's LATERAL subquery still uses the same bbox-prefiltered KNN
+// index scan as FindNearestStations (see bboxDeltas), just with LIMIT 5
+// instead of LIMIT 1 — picking the best-of-5 by kind happens in Go, not by
+// reordering the SQL's ORDER BY, so the index-accelerated pure-distance
+// scan that makes this fast at all is untouched.
+func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points []NearestStationQuery, kind string, maxDistanceMeters float64) (map[int]NearestStationCandidate, error) {
+	if len(points) == 0 {
+		return nil, nil
+	}
+
+	lngs := make([]float64, len(points))
+	lats := make([]float64, len(points))
+	idxs := make([]int32, len(points))
+	for i, p := range points {
+		lngs[i] = p.Lng
+		lats[i] = p.Lat
+		idxs[i] = int32(i)
+	}
+
+	lngDelta, latDelta := bboxDeltas(maxDistanceMeters)
+
+	query := fmt.Sprintf(`
+		SELECT q.idx, s.id, s.operator_name, s.name, s.distance_m, s.candidate_kind
+		FROM unnest($1::float8[], $2::float8[], $3::int[]) AS q(lng, lat, idx)
+		LEFT JOIN LATERAL (
+			SELECT st.id, st.operator_name, st.name,
+				ST_Distance(st.location::geography, ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)::geography) AS distance_m,
+				(%s) AS candidate_kind
+			FROM stations st
+			WHERE st.location && ST_MakeEnvelope(q.lng - $5, q.lat - $6, q.lng + $5, q.lat + $6, 4326)
+				AND ST_DWithin(st.location::geography, ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)::geography, $4)
+			ORDER BY st.location <-> ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)
+			LIMIT 5
+		) s ON true
+		ORDER BY q.idx, s.distance_m`, candidateKindFilterFragment)
+
+	rows, err := r.db.Query(ctx, query, lngs, lats, idxs, maxDistanceMeters, lngDelta, latDelta)
+	if err != nil {
+		return nil, fmt.Errorf("find nearest stations for kind %s (bulk): %w", kind, err)
+	}
+	defer rows.Close()
+
+	type scored struct {
+		candidate     NearestStationCandidate
+		candidateKind string
+	}
+	byIdx := map[int][]scored{}
+	for rows.Next() {
+		var idx int32
+		var id *uuid.UUID
+		var operatorName, name *string
+		var distance *float64
+		var candidateKind *string
+		if err := rows.Scan(&idx, &id, &operatorName, &name, &distance, &candidateKind); err != nil {
+			return nil, fmt.Errorf("scan nearest station for kind %s (bulk): %w", kind, err)
+		}
+		if id == nil {
+			continue
+		}
+		c := NearestStationCandidate{StationID: *id, DistanceMeters: *distance}
+		if operatorName != nil {
+			c.OperatorName = *operatorName
+		}
+		if name != nil {
+			c.Name = *name
+		}
+		ck := ""
+		if candidateKind != nil {
+			ck = *candidateKind
+		}
+		byIdx[int(idx)] = append(byIdx[int(idx)], scored{candidate: c, candidateKind: ck})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := map[int]NearestStationCandidate{}
+	for idx, candidates := range byIdx {
+		// candidates is already ordered by distance ascending (ORDER BY
+		// q.idx, s.distance_m above), so the first kind match found is also
+		// the nearest kind match; candidates[0] (the overall nearest) is
+		// the fallback if none match.
+		best := candidates[0].candidate
+		for _, c := range candidates {
+			if c.candidateKind == kind {
+				best = c.candidate
+				break
+			}
+		}
+		result[idx] = best
+	}
+	return result, nil
+}
+
 // Upsert creates or refreshes the correlation between an IRVE station and a
 // source station.
 func (r *LinkRepository) Upsert(ctx context.Context, stationID, sourceStationID uuid.UUID, source, linkQuality string, distanceMeters *float64) error {
