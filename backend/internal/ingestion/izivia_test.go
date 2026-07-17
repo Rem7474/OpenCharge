@@ -1,10 +1,165 @@
 package ingestion
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"opencharge/internal/domain"
 )
+
+func newTestIziviaIngester() *IziviaIngester {
+	ing := NewIziviaIngester(nil, nil, nil, nil, IziviaConfig{})
+	ing.retryBackoff = time.Millisecond // keep retry tests fast
+	return ing
+}
+
+func TestIziviaGetJSONRetriesOn5xxThenSucceeds(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = fmt.Fprint(w, "<html>504 Gateway Time-out</html>")
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"ok": true}`)
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	body, err := ing.getJSON(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("getJSON: %v", err)
+	}
+	if string(body) != `{"ok": true}` {
+		t.Errorf("body = %q, want ok:true", body)
+	}
+	if got := atomic.LoadInt32(&requests); got != 3 {
+		t.Errorf("requests = %d, want 3 (2 failures + 1 success)", got)
+	}
+}
+
+// TestIziviaPostJSONRetryLogUsesLabelNotJustURL pins the fix for a real
+// production observability gap: /map/markers has the same URL for every
+// grid square, so a retry/failure log keyed only on the URL is
+// indistinguishable from any other in-flight square's log line — there's
+// no way to tell which one actually failed. postJSON's label parameter
+// (distinct from the request URL) must be what shows up in the retry log.
+func TestIziviaPostJSONRetryLogUsesLabelNotJustURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, "bad gateway")
+	}))
+	defer srv.Close()
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(prevOutput)
+
+	ing := newTestIziviaIngester()
+	label := srv.URL + " (square centerLng=2.2 centerLat=46.2 zoom=7)"
+	_, err := ing.postJSON(context.Background(), srv.URL, label, map[string]any{"square": map[string]any{}})
+	if err == nil {
+		t.Fatal("postJSON = nil error, want an error after exhausting retries")
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "centerLng=2.2 centerLat=46.2") {
+		t.Errorf("retry log doesn't mention the square, got: %s", logged)
+	}
+}
+
+func TestIziviaPostJSONRetriesOnNetworkErrorThenSucceeds(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n < 2 {
+			// Simulate a connection-level failure (no HTTP response at all,
+			// status == 0 in withRetries) by closing the connection instead
+			// of writing a status line.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("ResponseWriter does not support hijacking")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"markers": []}`)
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	body, err := ing.postJSON(context.Background(), srv.URL, srv.URL, map[string]any{"square": map[string]any{}})
+	if err != nil {
+		t.Fatalf("postJSON: %v", err)
+	}
+	if string(body) != `{"markers": []}` {
+		t.Errorf("body = %q, want markers:[]", body)
+	}
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Errorf("requests = %d, want 2 (1 network failure + 1 success)", got)
+	}
+}
+
+func TestIziviaGetJSONDoesNotRetryOn4xx(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, "not found")
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	_, err := ing.getJSON(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("getJSON = nil error, want an error for a 404")
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error %q does not contain the status code", err.Error())
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("requests = %d, want 1 (4xx must not be retried)", got)
+	}
+}
+
+func TestIziviaGetJSONGivesUpAfterMaxRetries(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, "bad gateway")
+	}))
+	defer srv.Close()
+
+	ing := newTestIziviaIngester()
+	_, err := ing.getJSON(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("getJSON = nil error, want an error after exhausting retries")
+	}
+	if !strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
+	}
+	if got := atomic.LoadInt32(&requests); got != iziviaMaxRetries+1 {
+		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, iziviaMaxRetries+1, iziviaMaxRetries)
+	}
+}
 
 func TestNormalizeIziviaStation(t *testing.T) {
 	marker := map[string]any{"id": "izv-1"}
@@ -232,5 +387,34 @@ func TestNormalizeCountry(t *testing.T) {
 		if got := normalizeCountry(input); got != want {
 			t.Errorf("normalizeCountry(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestErrorBodySummary(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"multi-line Java stack trace is cut to its first line",
+			"com.izivia.emobility.fronts.commons.exception.ExternalTechnicalProblemException: \n\tat com.izivia.emobility.api.impl.mbp.MbpClientHttpHandlerKt.checkOk(MbpClientHttpHandler.kt:55)\n\tat com.izivia.emobility.api.impl.mbp.MbpClientHttpHandlerKt.check(MbpClientHttpHandler.kt:65)",
+			"com.izivia.emobility.fronts.commons.exception.ExternalTechnicalProblemException:",
+		},
+		{"single-line body is kept as-is", "not found", "not found"},
+		{"empty body", "", "(empty body)"},
+		{"whitespace-only body", "   \n\n  ", "(empty body)"},
+		{
+			"a single line longer than the cap is truncated",
+			strings.Repeat("x", 250),
+			strings.Repeat("x", 200) + "…",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := errorBodySummary([]byte(c.body)); got != c.want {
+				t.Errorf("errorBodySummary(%q) = %q, want %q", c.body, got, c.want)
+			}
+		})
 	}
 }

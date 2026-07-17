@@ -141,7 +141,24 @@ func TestFreshmilePriceFromDescription(t *testing.T) {
 	}
 }
 
-func TestNormalizeFreshmileTariffs(t *testing.T) {
+// TestNormalizeFreshmileTariffsDedupesToOnePerKind exercises the same
+// three-connector fixture the old per-plan version of this test used
+// (before every connector's custom_ref became its own Plan, see
+// normalizeFreshmileTariffs), but now expects a single collapsed "dc"
+// tariff: all three connectors resolve to Kind=dc here (best_power
+// category "fast" forces every connector to dc regardless of its own
+// power), and among them the two non-preferential candidates (70.0 and
+// the free one) beat the preferential 51.0 one on tier alone, then the
+// free (0.0) one wins on price within that tier.
+// TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType exercises a
+// three-connector fixture where every connector resolves to Kind=dc
+// (best_power category "fast" forces that regardless of each connector's
+// own power), but two distinct connector types are present (CCS and T2).
+// Dedup groups by (Kind, ConnectorType), not Kind alone, so this must
+// produce two tariffs: the lone CCS candidate survives as-is, and the two
+// T2 candidates resolve via freshmileBetterCandidate (free non-preferential
+// beats preferential regardless of price).
+func TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType(t *testing.T) {
 	details := map[string]any{
 		"connectors": map[string]any{
 			"best_power": map[string]any{"category": "fast", "kw": 50},
@@ -193,52 +210,131 @@ func TestNormalizeFreshmileTariffs(t *testing.T) {
 	}
 
 	tariffs := normalizeFreshmileTariffs(details)
-	if len(tariffs) != 3 {
-		t.Fatalf("got %d tariffs, want 3", len(tariffs))
+	if len(tariffs) != 2 {
+		t.Fatalf("got %d tariffs, want 2 (CCS and T2 stay separate within the dc kind)", len(tariffs))
 	}
 
-	byPlan := map[string]domain.StationTariff{}
+	byConnector := map[string]domain.StationTariff{}
 	for _, tariff := range tariffs {
 		if tariff.Source != "freshmile" {
-			t.Errorf("tariff %s: Source = %q, want freshmile", tariff.Plan, tariff.Source)
+			t.Errorf("tariff %s: Source = %q, want freshmile", tariff.ConnectorType, tariff.Source)
 		}
-		byPlan[tariff.Plan] = tariff
+		if tariff.Plan != domain.TariffPlanStandard {
+			t.Errorf("tariff %s: Plan = %q, want %q (custom_ref is no longer surfaced as Plan)", tariff.ConnectorType, tariff.Plan, domain.TariffPlanStandard)
+		}
+		if tariff.Kind != domain.TariffKindDC {
+			t.Errorf("tariff %s: Kind = %q, want dc (best_power_category=fast)", tariff.ConnectorType, tariff.Kind)
+		}
+		byConnector[tariff.ConnectorType] = tariff
 	}
 
-	standard, ok := byPlan["normal-k-wh-interop-20"]
+	ccs, ok := byConnector[domain.ConnectorTypeCCS]
 	if !ok {
-		t.Fatal("missing plan normal-k-wh-interop-20 (non-preferential)")
+		t.Fatal("missing CCS tariff")
 	}
-	if standard.Kind != domain.TariffKindDC {
-		t.Errorf("standard.Kind = %q, want dc (best_power_category=fast)", standard.Kind)
-	}
-	if standard.EnergyPriceCentsPerKWh == nil || *standard.EnergyPriceCentsPerKWh != 70.0 {
-		t.Errorf("standard.EnergyPriceCentsPerKWh = %v, want 70.0", standard.EnergyPriceCentsPerKWh)
-	}
-	if standard.Extra["connectorType"] != "CCS" {
-		t.Errorf("standard.Extra[connectorType] = %v, want CCS", standard.Extra["connectorType"])
+	if ccs.EnergyPriceCentsPerKWh == nil || *ccs.EnergyPriceCentsPerKWh != 70.0 {
+		t.Errorf("CCS EnergyPriceCentsPerKWh = %v, want 70.0 (only candidate for this connector type)", ccs.EnergyPriceCentsPerKWh)
 	}
 
-	preferential, ok := byPlan["normal-k-wh-interop-20:preferential"]
+	t2, ok := byConnector[domain.ConnectorTypeT2]
 	if !ok {
-		t.Fatal("missing plan normal-k-wh-interop-20:preferential")
+		t.Fatal("missing T2 tariff")
 	}
-	if preferential.EnergyPriceCentsPerKWh == nil || *preferential.EnergyPriceCentsPerKWh != 51.0 {
-		t.Errorf("preferential.EnergyPriceCentsPerKWh = %v, want 51.0", preferential.EnergyPriceCentsPerKWh)
+	if t2.EnergyPriceCentsPerKWh == nil || *t2.EnergyPriceCentsPerKWh != 0 {
+		t.Errorf("T2 EnergyPriceCentsPerKWh = %v, want 0 (the free, non-preferential candidate wins over the preferential 51 one)", t2.EnergyPriceCentsPerKWh)
 	}
-	if preferential.Extra["connectorType"] != "T2" {
-		t.Errorf("preferential.Extra[connectorType] = %v, want T2", preferential.Extra["connectorType"])
+	if t2.Extra["is_free"] != true {
+		t.Errorf("T2 Extra[is_free] = %v, want true", t2.Extra["is_free"])
+	}
+}
+
+// TestNormalizeFreshmileTariffsNonPreferentialAlwaysWins pins that a
+// non-preferential (publicly available) price is picked over a
+// preferential (partner/member-only) one even when the preferential price
+// is cheaper — showing a discount most visitors can't access would be
+// misleading.
+func TestNormalizeFreshmileTariffsNonPreferentialAlwaysWins(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":        "EUR",
+							"is_preferential": true,
+							"custom_ref":      "cheap-partner-deal",
+							"description":     `{"fr": "0,10 € / kWh entamé."}`,
+						},
+					},
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"custom_ref":  "public-price",
+							"description": `{"fr": "0,80 € / kWh entamé."}`,
+						},
+					},
+				},
+			},
+		},
 	}
 
-	free, ok := byPlan["free-charging"]
-	if !ok {
-		t.Fatal("missing plan free-charging")
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
 	}
-	if free.EnergyPriceCentsPerKWh == nil || *free.EnergyPriceCentsPerKWh != 0 {
-		t.Errorf("free.EnergyPriceCentsPerKWh = %v, want 0 (is_free is a real 0 €/kWh price)", free.EnergyPriceCentsPerKWh)
+	if got := tariffs[0].EnergyPriceCentsPerKWh; got == nil || *got != 80.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 80.0 (the more expensive but non-preferential price)", got)
 	}
-	if free.Extra["is_free"] != true {
-		t.Errorf("free.Extra[is_free] = %v, want true", free.Extra["is_free"])
+}
+
+// TestNormalizeFreshmileTariffsSeparatesACAndDC confirms the per-Kind
+// dedup keeps AC and DC as two distinct tariffs rather than collapsing
+// everything down to a single row per station.
+func TestNormalizeFreshmileTariffsSeparatesACAndDC(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"custom_ref":  "ac-tariff",
+							"description": `{"fr": "0,40 € / kWh entamé."}`,
+						},
+					},
+					map[string]any{
+						"power":    100.0,
+						"standard": "IEC_62196_T2_COMBO",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"custom_ref":  "dc-tariff",
+							"description": `{"fr": "0,60 € / kWh entamé."}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 2 {
+		t.Fatalf("got %d tariffs, want 2 (one ac, one dc)", len(tariffs))
+	}
+	byKind := map[string]domain.StationTariff{}
+	for _, tariff := range tariffs {
+		byKind[tariff.Kind] = tariff
+	}
+	if ac, ok := byKind[domain.TariffKindAC]; !ok || ac.EnergyPriceCentsPerKWh == nil || *ac.EnergyPriceCentsPerKWh != 40.0 {
+		t.Errorf("ac tariff = %+v, want EnergyPriceCentsPerKWh=40.0", ac)
+	}
+	if dc, ok := byKind[domain.TariffKindDC]; !ok || dc.EnergyPriceCentsPerKWh == nil || *dc.EnergyPriceCentsPerKWh != 60.0 {
+		t.Errorf("dc tariff = %+v, want EnergyPriceCentsPerKWh=60.0", dc)
 	}
 }
 
@@ -266,6 +362,82 @@ func TestNormalizeFreshmileTariffsUnparsablePriceKeepsNilNotDropped(t *testing.T
 	}
 	if tariffs[0].EnergyPriceCentsPerKWh != nil {
 		t.Errorf("EnergyPriceCentsPerKWh = %v, want nil", tariffs[0].EnergyPriceCentsPerKWh)
+	}
+}
+
+// TestNormalizeFreshmileTariffsPackagedPriceStaysUnparsed pins that a
+// "forfait" (flat package for a fixed amount of energy, e.g. "forfait de 2
+// € par 6 kWh") — real production text — is deliberately left with both
+// prices nil rather than guessing a €/kWh figure from it. The pattern's
+// tight "par <unit>" adjacency requirement already keeps this from
+// matching (there's a number between "par" and "kWh"), so this is a
+// regression test for that, not new behavior.
+func TestNormalizeFreshmileTariffsPackagedPriceStaysUnparsed(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":   "EUR",
+							"custom_ref": "package-pricing",
+							"description": "Le prix dépend de l'énergie délivrée.\n" +
+								"- Recharge par badge : forfait de 2 € par 6 kWh\n" +
+								"- Recharge par smartphone en mode anonyme : forfait de 3 € par 6 kWh",
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1 (kept even though price couldn't be parsed)", len(tariffs))
+	}
+	if tariffs[0].EnergyPriceCentsPerKWh != nil {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want nil (packaged pricing isn't a single €/kWh figure)", tariffs[0].EnergyPriceCentsPerKWh)
+	}
+	if tariffs[0].SessionPriceCentsPerMin != nil {
+		t.Errorf("SessionPriceCentsPerMin = %v, want nil", tariffs[0].SessionPriceCentsPerMin)
+	}
+}
+
+// TestNormalizeFreshmileTariffsCombinedKWhAndPerMinute pins two real
+// production behaviors together: lowercase "kwh" must match (case was
+// previously significant and silently dropped it), and a description
+// combining both a €/kWh price and a €/min rate must populate both fields
+// instead of stopping at whichever pattern matches first.
+func TestNormalizeFreshmileTariffsCombinedKWhAndPerMinute(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":   "EUR",
+							"custom_ref": "kwh-and-per-minute",
+							"description": "Le prix dépend de l'énergie délivrée et du temps de branchement\n" +
+								"0,50 € par kwh et 0,05 € par minute",
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	got := tariffs[0]
+	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 50.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 50.0", got.EnergyPriceCentsPerKWh)
+	}
+	if got.SessionPriceCentsPerMin == nil || *got.SessionPriceCentsPerMin != 5.0 {
+		t.Errorf("SessionPriceCentsPerMin = %v, want 5.0", got.SessionPriceCentsPerMin)
 	}
 }
 
@@ -394,7 +566,7 @@ func TestGetJSONRetriesOn5xxThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestFreshmileIngester(srv.URL)
-	body, err := ing.getJSON(context.Background(), srv.URL)
+	body, err := ing.getJSON(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatalf("getJSON: %v", err)
 	}
@@ -416,7 +588,7 @@ func TestGetJSONDoesNotRetryOn4xx(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestFreshmileIngester(srv.URL)
-	_, err := ing.getJSON(context.Background(), srv.URL)
+	_, err := ing.getJSON(context.Background(), srv.URL, nil)
 	if err == nil {
 		t.Fatal("getJSON = nil error, want an error for a 404")
 	}
@@ -441,7 +613,7 @@ func TestGetJSONGivesUpAfterMaxRetries(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestFreshmileIngester(srv.URL)
-	_, err := ing.getJSON(context.Background(), srv.URL)
+	_, err := ing.getJSON(context.Background(), srv.URL, nil)
 	if err == nil {
 		t.Fatal("getJSON = nil error, want an error after exhausting retries")
 	}

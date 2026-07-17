@@ -17,7 +17,7 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
@@ -111,14 +111,58 @@ go run ./cmd/opencharge-ingest -source electra    # stations + tarifs Electra, c
 go run ./cmd/opencharge-ingest -source izivia     # stations + tarifs Izivia, corrélation
 go run ./cmd/opencharge-ingest -source tesla      # Superchargers Tesla, corrélation
 go run ./cmd/opencharge-ingest -source freshmile  # stations + tarifs Freshmile, corrélation
-go run ./cmd/opencharge-ingest -source all        # les cinq, dans cet ordre
+go run ./cmd/opencharge-ingest -source fastned    # tarifs fixes Fastned sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source lidl       # tarif fixe Lidl sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source chargenow  # stations + tarifs ChargeNow (DCS), corrélation
+go run ./cmd/opencharge-ingest -source ionity     # tarifs fixes Ionity sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source eborn      # tarifs fixes (par palier de puissance) eborn sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source sowatt     # tarif fixe Sowatt Solutions sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source all        # les onze, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
-`-electra-url`, `-tesla-url`, `-freshmile-url`, `-link-max-distance-m`.
+`-electra-url`, `-tesla-url`, `-freshmile-url`, `-chargenow-url`,
+`-link-max-distance-m`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra, Izivia, Tesla et Freshmile sont corrélés.
+lequel Electra, Izivia, Tesla, Freshmile et ChargeNow sont corrélés, et
+que Fastned/Lidl/Ionity/eborn/Sowatt tagguent directement (leurs stations
+sont déjà les lignes IRVE elles-mêmes, identifiées par `operator_name`/
+`enseigne` contenant leur nom — voir `backend/internal/ingestion/
+fastned.go`, `lidl.go`, `ionity.go`, `eborn.go`, `sowatt.go`).
+
+**Fastned, Lidl, Ionity et Sowatt Solutions n'ont pas d'API de tarifs
+publique scrapable** : leurs tarifs (Fastned : 0,61 €/kWh standard,
+0,43 €/kWh abonné ; Lidl : 0,29 €/kWh unique, AC comme DC ; Ionity :
+0,55 €/kWh sans appli, 0,52 €/kWh avec appli ; Sowatt Solutions :
+0,54 €/kWh unique, AC comme DC) sont des constantes fixes dans le code, à
+mettre à jour manuellement si l'un de ces réseaux change ses prix. Aucune
+requête réseau n'est faite pour ces runs.
+
+**eborn** (`backend/internal/ingestion/eborn.go`) est dans la même
+situation (pas d'API scrapable), mais son tarif dépend du kind (ac/dc) et,
+pour le dc, d'un palier de puissance (≤60kW vs >60kW) — chaque station
+reçoit donc exactement un prix par plan (standard/carte/forfait), choisi à
+partir de son propre `connector_type`/`power_kw` déjà connu d'IRVE, plutôt
+que tous les paliers. Le plan "forfait" (abonnement mensuel à 49€ rendant
+la recharge gratuite) n'a pas de champ dédié pour un coût récurrent dans le
+schéma actuel — le prix énergie est à 0 et le coût de l'abonnement est
+seulement documenté dans `raw_text`.
+
+**ChargeNow** (`backend/internal/ingestion/chargenow.go`) scanne toute la
+France via son API de clusters/pools (`/api/map/v1/fr/query`, même logique
+de subdivision par bounding box que Freshmile), puis interroge son API de
+tarifs (`/tariffs/CHARGENOW_PRIME/prices`) pour chaque pool trouvé.
+Particularité : l'API de découverte de ChargeNow ne renvoie ni le type de
+connecteur ni la puissance de chaque point de charge (seulement son id),
+alors que l'API de tarifs a besoin de `power_type`/`power` pour répondre —
+l'ingester corrèle donc chaque pool avec la station IRVE la plus proche
+*avant* même d'interroger les tarifs, uniquement pour lire ce
+`connector_type`/`power_kw` déjà connu d'IRVE. Nécessite le header WAF
+`rest-api-path` sur chaque requête (`clusters` pour `/query`, confirmé ;
+`prices` pour `/tariffs/.../prices` est une supposition non vérifiée en
+conditions réelles — voir le commentaire sur `doRequest` si ce endpoint se
+met à échouer de façon suspecte).
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux

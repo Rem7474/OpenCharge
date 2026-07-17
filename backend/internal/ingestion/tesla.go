@@ -104,6 +104,8 @@ func teslaDetailsURLFmtFor(locationsURL string) string {
 // Electra/Izivia/Freshmile, just with browser tabs instead of HTTP
 // connections as the concurrency unit.
 func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
+	runStart := time.Now()
+
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
 		// headless Chrome and serves an "Access Denied" page instead of
@@ -203,6 +205,16 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	}
 
 	log.Printf("tesla: done, %d stations processed", result.processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	// result.processed > 0 guards against a run that silently processed
+	// nothing looking identical to "no Tesla stations exist" and wiping the
+	// entire known dataset — see the same guard in izivia.go.
+	if firstErr == nil && result.processed > 0 {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
+			return result.processed, err
+		}
+	}
 	return result.processed, firstErr
 }
 

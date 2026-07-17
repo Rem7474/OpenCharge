@@ -8,6 +8,7 @@
   --color-accent: #1a7f37;
   --color-accent-mid: #d97706;
   --color-accent-high: #b91c1c;
+  --color-accent-extreme: #111111;
   --color-gray: #9a9a9a;
   /* dataviz: single-series sequential blue (see references/palette.md) */
   --viz-series-1: #2a78d6;
@@ -95,6 +96,7 @@ a {
 .map-container {
   flex: 1;
   position: relative;
+  background: var(--color-border);
 }
 
 .map-container .leaflet-container {
@@ -102,13 +104,26 @@ a {
   width: 100%;
 }
 
+/* Floats over the map (top-right — mirrors .filter-panel's left dock),
+   sized to its own content instead of stretching to the map's full
+   height: it used to be a flex sibling of .map-container inside
+   .app-body, which forced it to stretch full-height (align-self: stretch,
+   the flex default) and leave a block of plain background below whatever
+   content it actually had. */
 .sidebar {
+  position: fixed;
+  top: 68px;
+  right: 12px;
+  z-index: 1150;
   width: 380px;
-  max-width: 42vw;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 80px);
   overflow-y: auto;
-  border-left: 1px solid var(--color-border);
-  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  padding: 16px 18px;
   background: var(--color-bg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
 }
 
 .status-banner {
@@ -127,9 +142,14 @@ a {
 .close-btn {
   float: right;
   cursor: pointer;
-  border: none;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
   background: none;
-  font-size: 16px;
+  color: var(--color-text);
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  line-height: 1;
 }
 
 .about-page {
@@ -168,6 +188,26 @@ a {
   letter-spacing: 0.03em;
 }
 
+.onboarding-reopen-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  width: 30px;
+  height: 30px;
+  background: none;
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.show-all-stations-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .operator-filter {
   position: relative;
 }
@@ -188,34 +228,67 @@ a {
   border-color: var(--color-accent);
 }
 
-.operator-filter-panel {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 1100;
+/* Centered floating overlay (backdrop + modal card) — a full network
+   picker, not a small anchored dropdown. */
+.operator-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.operator-panel {
+  width: 100%;
+  max-width: 400px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  width: 240px;
-  padding: 8px;
+  border-radius: 18px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.operator-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.operator-panel-header h3 {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.operator-panel-body {
+  padding: 12px 16px 16px;
+  overflow-y: auto;
 }
 
 .operator-filter-search {
   width: 100%;
-  padding: 5px 8px;
+  padding: 8px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 13px;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
 }
 
 .operator-filter-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 220px;
-  overflow-y: auto;
 }
 
 .operator-filter-list li {
@@ -242,6 +315,221 @@ a {
   padding: 4px;
 }
 
+/* --- Filter panel (floating "Filtrer par" card) --- */
+
+.filter-toggle-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  color: var(--color-text);
+}
+
+.filter-toggle-btn[aria-expanded="true"] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Docked to the top-right of the viewport, below the header/filter bar —
+   fixed (not absolute: FilterPanel is rendered from FilterBar, which sits
+   above .map-container as a header, not inside it) so it floats over the
+   map without covering it, instead of a centered modal + backdrop. */
+.filter-panel {
+  position: fixed;
+  top: 68px;
+  left: 12px;
+  z-index: 1150;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+@media (max-width: 720px) {
+  /* A full-width bar docked under the header, not a floating card — the
+     station detail panel is the one that owns the bottom of the screen on
+     mobile (see .sidebar's own mobile override), so the filter panel takes
+     the top instead of stacking underneath it. */
+  .filter-panel {
+    top: 60px;
+    left: 8px;
+    right: 8px;
+    bottom: auto;
+    width: auto;
+    max-width: 100%;
+    max-height: calc(100vh - 76px);
+  }
+}
+
+.filter-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.filter-panel-header h3 {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-panel-body {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.filter-section {
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.filter-panel-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.filter-reset-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  color: var(--color-text);
+}
+
+.filter-reset-btn:hover {
+  border-color: var(--color-accent-high);
+  color: var(--color-accent-high);
+}
+
+.filter-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 8px;
+}
+
+.filter-section-label:not(:first-child) {
+  margin-top: 14px;
+}
+
+.filter-price-inputs {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.filter-price-range {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.filter-price-range-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-muted);
+  margin-bottom: 6px;
+}
+
+.filter-price-range-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-price-range-inputs input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.filter-price-range-inputs span {
+  color: var(--color-muted);
+  flex-shrink: 0;
+}
+
+/* --- Power slider (discrete steps: 3 / 22 / 50 / 150 / 350+ kW) --- */
+
+.power-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+.power-slider-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--color-muted);
+  padding: 0 2px;
+}
+
+.power-slider-labels .active {
+  color: var(--color-accent);
+  font-weight: 700;
+}
+
+/* --- Connector type pills --- */
+
+.connector-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.connector-pill {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.connector-pill[aria-pressed="true"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+}
+
 .price-mode-toggle {
   display: flex;
   border: 1px solid var(--color-border);
@@ -263,7 +551,8 @@ a {
   color: #fff;
 }
 
-.kwh-input {
+.kwh-input,
+.minutes-input {
   width: 64px;
   padding: 3px 6px;
   border: 1px solid var(--color-border);
@@ -274,14 +563,15 @@ a {
 /* --- Station marker price label --- */
 
 .price-marker {
-  background: #fff;
+  background: var(--color-bg);
+  color: var(--color-text);
   border: 2px solid var(--color-accent);
   border-radius: 999px;
-  padding: 2px 8px;
+  padding: 3px 10px;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 }
 
 .price-marker.no-price {
@@ -289,12 +579,107 @@ a {
   color: var(--color-muted);
 }
 
+.price-marker--low {
+  border-color: var(--color-accent);
+}
+
+.price-marker--mid {
+  border-color: var(--color-accent-mid);
+}
+
+.price-marker--high {
+  border-color: var(--color-accent-high);
+}
+
+.price-marker--extreme {
+  /* Filled black (not just a border) so this tier stays legible against
+     both the light and dark --color-bg values — a black border alone
+     would nearly vanish on the dark theme's #16181c background. */
+  background: var(--color-accent-extreme);
+  border-color: var(--color-accent-extreme);
+  color: #ffffff;
+}
+
 /* --- Station detail --- */
+
+.station-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.station-header-text h2 {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.station-header-sub {
+  font-size: 13px;
+  color: var(--color-muted);
+  margin-top: 2px;
+}
+
+.station-header .close-btn {
+  float: none;
+  flex-shrink: 0;
+}
+
+.station-meta-card {
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.station-meta-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.station-meta-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--color-muted);
+}
+
+.connector-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.connector-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
 
 .station-price-block {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 14px;
+  padding: 12px 14px;
   margin-bottom: 10px;
 }
 
@@ -304,21 +689,29 @@ a {
 }
 
 .station-price-block .source-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-weight: 600;
   text-transform: uppercase;
   font-size: 11px;
   color: var(--color-muted);
 }
 
+.station-price-block.best-overall .source-name {
+  color: var(--color-accent);
+}
+
 .station-price-block .price {
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 700;
+  margin-top: 2px;
 }
 
 .tariff-row {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 10px;
+  border-radius: 14px;
+  padding: 12px 14px;
   margin-bottom: 10px;
 }
 
@@ -330,8 +723,9 @@ a {
 }
 
 .tariff-row .price {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
+  margin-top: 2px;
 }
 
 .tariff-row .raw-text {
@@ -393,7 +787,11 @@ a {
 }
 
 .hourly-price-chart-bar {
-  fill: var(--viz-series-1);
+  fill: var(--viz-baseline);
+}
+
+.hourly-price-chart-bar--now {
+  fill: var(--color-text);
 }
 
 .hourly-price-chart-baseline {
@@ -404,12 +802,107 @@ a {
 .hourly-price-chart-value {
   font-size: 9px;
   font-weight: 600;
+  fill: var(--viz-ink-secondary);
+}
+
+.hourly-price-chart-value--now {
   fill: var(--color-text);
 }
 
 .hourly-price-chart-label {
   font-size: 8px;
   fill: var(--viz-ink-muted);
+}
+
+/* --- Onboarding (operator/plan selection, full-page) --- */
+
+.onboarding-screen {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.onboarding-header {
+  padding: 24px 20px 8px;
+}
+
+.onboarding-header h2 {
+  margin: 0 0 8px;
+}
+
+.onboarding-header p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 520px;
+}
+
+.onboarding-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboarding-empty {
+  color: var(--color-muted);
+  font-size: 13.5px;
+}
+
+.onboarding-item {
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  padding: 4px 14px;
+}
+
+.onboarding-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  cursor: pointer;
+}
+
+.onboarding-item-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.onboarding-item .plan-selector {
+  margin: 0 0 10px;
+}
+
+.onboarding-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.onboarding-skip {
+  border: none;
+  background: none;
+  color: var(--color-muted);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.onboarding-continue {
+  border: none;
+  border-radius: 999px;
+  padding: 12px 20px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .visually-hidden {
@@ -430,22 +923,32 @@ a {
     --color-text: #f0f0f0;
     --color-border: #33363b;
     --color-muted: #9a9a9a;
+    /* Lightened vs. the light-mode values so the price-tier marker borders
+       (section 2, --color-accent-mid/--color-accent-high are only ever
+       used as borders, never as a button background) stay legible against
+       the dark background — the light-mode shades read as near-black on
+       #16181c. --color-accent is left unchanged: it's also used as a
+       button background with white text (.price-mode-toggle,
+       .plan-selector), and its existing shade already has adequate
+       contrast in both themes. */
+    --color-accent-mid: #fbbf24;
+    --color-accent-high: #f87171;
+    --color-gray: #6b7280;
   }
 }
 
 @media (max-width: 720px) {
   .sidebar {
     position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
     top: auto;
-    width: 100%;
+    width: auto;
     max-width: 100%;
     max-height: 60vh;
-    border-left: none;
-    border-top: 1px solid var(--color-border);
-    border-radius: 16px 16px 0 0;
-    padding-bottom: env(safe-area-inset-bottom, 16px);
+    margin: 0;
+    border-radius: 18px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }

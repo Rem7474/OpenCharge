@@ -104,6 +104,58 @@ func TestListStations_ReturnsStationsInBBox(t *testing.T) {
 	}
 }
 
+func TestListStations_FiltersByConnectorTypeAndMinPower(t *testing.T) {
+	h := setupHandler(t)
+	router := newRouter(h)
+	ctx := context.Background()
+
+	fastCCS := domain.Station{
+		IRVEIDPDC: "FRAPICONN01", OperatorName: "Izivia", Name: "Fast CCS",
+		AddressCountry: "FR", Lat: 45.90, Lng: 6.10,
+		PowerKW: floatPtr(150), ConnectorType: "CCS", AccessType: "paid", Metadata: map[string]any{},
+	}
+	slowT2 := domain.Station{
+		IRVEIDPDC: "FRAPICONN02", OperatorName: "Izivia", Name: "Slow T2",
+		AddressCountry: "FR", Lat: 45.91, Lng: 6.11,
+		PowerKW: floatPtr(22), ConnectorType: "T2", AccessType: "paid", Metadata: map[string]any{},
+	}
+	for _, s := range []domain.Station{fastCCS, slowT2} {
+		if _, err := h.Stations.UpsertStation(ctx, s); err != nil {
+			t.Fatalf("seed station %s: %v", s.IRVEIDPDC, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/stations?bbox=6.0,45.8,6.3,46.0&connectorType=CCS", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var items []stationListItemDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "irve:FRAPICONN01" {
+		t.Errorf("connectorType=CCS returned %+v, want only FRAPICONN01", items)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/stations?bbox=6.0,45.8,6.3,46.0&minPowerKw=50", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	items = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "irve:FRAPICONN01" {
+		t.Errorf("minPowerKw=50 returned %+v, want only FRAPICONN01", items)
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }
+
 func TestGetStation_NotFound(t *testing.T) {
 	h := setupHandler(t)
 	router := newRouter(h)
@@ -174,6 +226,73 @@ func TestGetStation_ReturnsStationWithTariffs(t *testing.T) {
 	}
 	if resp.Tariffs[0].Source != "izivia" || resp.Tariffs[0].RawText != "0,45€/kWh" {
 		t.Errorf("unexpected tariff: %+v", resp.Tariffs[0])
+	}
+}
+
+func TestGetStation_ExposesIRVEMetadataFields(t *testing.T) {
+	h := setupHandler(t)
+	station := domain.Station{
+		IRVEIDPDC: "FRAPIMETA01", OperatorName: "TotalEnergies", Name: "Paris | Rue Sorbier 40",
+		AddressCountry: "FR", Lat: 48.865684, Lng: 2.392972,
+		ConnectorType: "T2", AccessType: "paid",
+		Metadata: map[string]any{
+			"nbre_pdc":          "5",
+			"accessibilite_pmr": "Non accessible",
+			"cable_t2_attache":  "False",
+			"horaires":          "24/7",
+		},
+	}
+	if _, err := h.Stations.UpsertStation(context.Background(), station); err != nil {
+		t.Fatalf("seed station: %v", err)
+	}
+
+	router := newRouter(h)
+	req := httptest.NewRequest(http.MethodGet, "/stations/irve:FRAPIMETA01", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp stationDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Station.PDCCount == nil || *resp.Station.PDCCount != 5 {
+		t.Errorf("PDCCount = %v, want 5", resp.Station.PDCCount)
+	}
+	if resp.Station.AccessibilityPMR != "Non accessible" {
+		t.Errorf("AccessibilityPMR = %q, want %q", resp.Station.AccessibilityPMR, "Non accessible")
+	}
+	if resp.Station.CableT2Attached == nil || *resp.Station.CableT2Attached != false {
+		t.Errorf("CableT2Attached = %v, want a pointer to false (field present, explicitly False)", resp.Station.CableT2Attached)
+	}
+	if resp.Station.OpeningHours != "24/7" {
+		t.Errorf("OpeningHours = %q, want %q", resp.Station.OpeningHours, "24/7")
+	}
+}
+
+func TestGetStation_MissingIRVEMetadataFieldsOmitted(t *testing.T) {
+	h := setupHandler(t)
+	seedStation(t, h, "FRAPIMETA02", 45.90, 6.10) // seedStation sets Metadata: map[string]any{}
+
+	router := newRouter(h)
+	req := httptest.NewRequest(http.MethodGet, "/stations/irve:FRAPIMETA02", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp stationDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Station.PDCCount != nil {
+		t.Errorf("PDCCount = %v, want nil (field absent from metadata)", resp.Station.PDCCount)
+	}
+	if resp.Station.CableT2Attached != nil {
+		t.Errorf("CableT2Attached = %v, want nil (field absent from metadata, distinct from an explicit false)", resp.Station.CableT2Attached)
 	}
 }
 

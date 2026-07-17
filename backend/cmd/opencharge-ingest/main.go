@@ -16,19 +16,20 @@ import (
 func main() {
 	var (
 		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, or all")
+		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
 		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
 		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
 		teslaChrome  = flag.String("tesla-chrome-path", getEnv("TESLA_CHROME_PATH", ""), "path to the Chromium/Chrome binary used to fetch tesla.com (empty = chromedp's own PATH lookup)")
 		freshmileURL = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
+		chargenowURL = flag.String("chargenow-url", ingestion.DefaultChargenowBaseURL, "ChargeNow map API base URL")
 		linkMaxM     = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
 		timeout      = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
 	)
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
 	}
 
 	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
@@ -97,6 +98,65 @@ func main() {
 		}
 		log.Printf("freshmile ingestion complete: %d locations", count)
 	}
+	runFastned := func() {
+		// No source URL/config: Fastned's stations are already in IRVE,
+		// this only tags them with fixed tariffs — see fastned.go.
+		ingester := ingestion.NewFastnedIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("fastned ingestion failed: %v", err)
+		}
+		log.Printf("fastned ingestion complete: %d stations", count)
+	}
+	runLidl := func() {
+		// Same shape as fastned: no source URL/config, just tags
+		// already-known IRVE stations — see lidl.go.
+		ingester := ingestion.NewLidlIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("lidl ingestion failed: %v", err)
+		}
+		log.Printf("lidl ingestion complete: %d stations", count)
+	}
+	runChargenow := func() {
+		ingester := ingestion.NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *chargenowURL, ingestion.DefaultChargenowConfig())
+		ingester.MaxLinkDistanceM = *linkMaxM
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("chargenow ingestion failed: %v", err)
+		}
+		log.Printf("chargenow ingestion complete: %d stations", count)
+	}
+	runIonity := func() {
+		// No source URL/config: Ionity's stations are already in IRVE,
+		// this only tags them with fixed tariffs — see ionity.go.
+		ingester := ingestion.NewIonityIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("ionity ingestion failed: %v", err)
+		}
+		log.Printf("ionity ingestion complete: %d stations", count)
+	}
+	runEborn := func() {
+		// Same shape as ionity/fastned/lidl: no source URL/config, just
+		// tags already-known IRVE stations — see eborn.go.
+		ingester := ingestion.NewEbornIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("eborn ingestion failed: %v", err)
+		}
+		log.Printf("eborn ingestion complete: %d stations", count)
+	}
+	runSowatt := func() {
+		// Same shape as ionity/fastned/lidl/eborn: no source URL/config,
+		// just tags already-known IRVE stations — see sowatt.go.
+		ingester := ingestion.NewSowattIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("sowatt ingestion failed: %v", err)
+		}
+		log.Printf("sowatt ingestion complete: %d stations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -109,16 +169,36 @@ func main() {
 		runTesla()
 	case "freshmile":
 		runFreshmile()
+	case "fastned":
+		runFastned()
+	case "lidl":
+		runLidl()
+	case "chargenow":
+		runChargenow()
+	case "ionity":
+		runIonity()
+	case "eborn":
+		runEborn()
+	case "sowatt":
+		runSowatt()
 	case "all":
 		// IRVE first: it's the canonical referential that electra/izivia/
-		// tesla/freshmile correlate against.
+		// tesla/freshmile/chargenow correlate against, and that
+		// fastned/lidl/ionity/eborn/sowatt tag directly — so it must exist
+		// before any of those run too.
 		runIRVE()
 		runElectra()
 		runIzivia()
 		runTesla()
 		runFreshmile()
+		runFastned()
+		runLidl()
+		runChargenow()
+		runIonity()
+		runEborn()
+		runSowatt()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all", *source)
 	}
 }
 

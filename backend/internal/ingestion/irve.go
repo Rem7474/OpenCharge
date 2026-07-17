@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -116,8 +115,6 @@ func normalizeIRVEFeature(f geoJSONFeature) (domain.Station, bool) {
 	stationID := firstNonEmpty(get("id_station_itinerance"), get("id_station_local"))
 
 	power, _ := parseLooseFloat(get("puissance_nominale"))
-	nbPDC, _ := strconv.Atoi(get("nbre_pdc"))
-	_ = nbPDC
 
 	accessType := "unknown"
 	if parseBooleanLoose(get("gratuit")) {
@@ -162,16 +159,16 @@ func primaryConnectorType(props map[string]any) string {
 		key  string
 		kind string
 	}{
-		{"prise_type_combo_ccs", "CCS"},
-		{"prise_type_chademo", "CHAdeMO"},
-		{"prise_type_2", "T2"},
-		{"prise_type_ef", "EF"},
-		{"prise_type_autre", "other"},
+		{"prise_type_combo_ccs", domain.ConnectorTypeCCS},
+		{"prise_type_chademo", domain.ConnectorTypeCHAdeMO},
+		{"prise_type_2", domain.ConnectorTypeT2},
+		{"prise_type_ef", domain.ConnectorTypeEF},
+		{"prise_type_autre", domain.ConnectorTypeOther},
 	}
 	for _, flag := range flags {
 		if parseBooleanLoose(strings.TrimSpace(stringValue(props[flag.key]))) {
 			return flag.kind
 		}
 	}
-	return "unknown"
+	return domain.ConnectorTypeUnknown
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"opencharge/internal/domain"
 )
 
@@ -137,6 +139,51 @@ func TestStationRepository_GetByIRVEID_NotFound(t *testing.T) {
 	}
 }
 
+func TestStationRepository_ListByOperatorLike(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	repo := NewStationRepository(pool)
+
+	viaOperator := testStation("FROPLIKE01", 45.9, 6.1)
+	viaOperator.OperatorName = "FASTNED"
+	viaOperator.Enseigne = "FASTNED"
+	if _, err := repo.UpsertStation(ctx, viaOperator); err != nil {
+		t.Fatalf("UpsertStation viaOperator: %v", err)
+	}
+
+	// Matched via enseigne, not operator_name, and with different casing —
+	// IRVE data isn't consistent about which column carries a network's
+	// brand name for a given station.
+	viaEnseigne := testStation("FROPLIKE02", 45.91, 6.11)
+	viaEnseigne.OperatorName = "Some Legal Entity SAS"
+	viaEnseigne.Enseigne = "Fastned"
+	if _, err := repo.UpsertStation(ctx, viaEnseigne); err != nil {
+		t.Fatalf("UpsertStation viaEnseigne: %v", err)
+	}
+
+	other := testStation("FROPLIKE03", 45.92, 6.12)
+	other.OperatorName = "Electra"
+	other.Enseigne = "Electra"
+	if _, err := repo.UpsertStation(ctx, other); err != nil {
+		t.Fatalf("UpsertStation other: %v", err)
+	}
+
+	got, err := repo.ListByOperatorLike(ctx, "fastned")
+	if err != nil {
+		t.Fatalf("ListByOperatorLike: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByOperatorLike(\"fastned\") = %d stations, want 2", len(got))
+	}
+	ids := map[string]bool{}
+	for _, s := range got {
+		ids[s.IRVEIDPDC] = true
+	}
+	if !ids["FROPLIKE01"] || !ids["FROPLIKE02"] {
+		t.Errorf("ListByOperatorLike(\"fastned\") = %v, want FROPLIKE01 and FROPLIKE02", ids)
+	}
+}
+
 func TestStationRepository_ListByBBox(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()
@@ -194,6 +241,128 @@ func TestStationRepository_ListByBBox(t *testing.T) {
 	}
 }
 
+func TestStationRepository_ListByBBox_ConnectorTypeAndMinPower(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	repo := NewStationRepository(pool)
+
+	ccsFast := testStation("FRCONN0001", 45.90, 6.10)
+	ccsFast.ConnectorType = "CCS"
+	power := 150.0
+	ccsFast.PowerKW = &power
+
+	t2Slow := testStation("FRCONN0002", 45.91, 6.12)
+	t2Slow.ConnectorType = "T2"
+	slowPower := 22.0
+	t2Slow.PowerKW = &slowPower
+
+	unknownPower := testStation("FRCONN0003", 45.92, 6.13)
+	unknownPower.ConnectorType = "CHAdeMO"
+	unknownPower.PowerKW = nil
+
+	for _, s := range []domain.Station{ccsFast, t2Slow, unknownPower} {
+		if _, err := repo.UpsertStation(ctx, s); err != nil {
+			t.Fatalf("UpsertStation(%s): %v", s.IRVEIDPDC, err)
+		}
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+
+	// Connector type filter, single value.
+	ccsOnly := bbox
+	ccsOnly.ConnectorTypes = []string{"CCS"}
+	results, err := repo.ListByBBox(ctx, ccsOnly)
+	if err != nil {
+		t.Fatalf("ListByBBox connectorType=CCS: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRCONN0001" {
+		t.Errorf("connectorType=CCS returned %+v, want only FRCONN0001", results)
+	}
+
+	// Connector type filter, multiple values.
+	ccsOrChademo := bbox
+	ccsOrChademo.ConnectorTypes = []string{"CCS", "CHAdeMO"}
+	results, err = repo.ListByBBox(ctx, ccsOrChademo)
+	if err != nil {
+		t.Fatalf("ListByBBox connectorType=CCS,CHAdeMO: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("got %d stations for connectorType=CCS,CHAdeMO, want 2", len(results))
+	}
+
+	// Min power filter: excludes the slow T2 and the unknown-power station.
+	fastOnly := bbox
+	minPower := 50.0
+	fastOnly.MinPowerKW = &minPower
+	results, err = repo.ListByBBox(ctx, fastOnly)
+	if err != nil {
+		t.Fatalf("ListByBBox minPowerKw=50: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRCONN0001" {
+		t.Errorf("minPowerKw=50 returned %+v, want only FRCONN0001 (unknown power must not pass)", results)
+	}
+
+	// Combined: connector type AND min power.
+	combined := bbox
+	combined.ConnectorTypes = []string{"CCS", "T2"}
+	combined.MinPowerKW = &minPower
+	results, err = repo.ListByBBox(ctx, combined)
+	if err != nil {
+		t.Fatalf("ListByBBox combined filter: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRCONN0001" {
+		t.Errorf("combined filter returned %+v, want only FRCONN0001", results)
+	}
+}
+
+// TestStationRepository_ListByBBox_PrefersExactConnectorMatch pins the
+// COALESCE fallback in stationListSelectPrefix/ListByBBox's sourced
+// aggregate: a station whose own connector_type is T2 must get its price
+// from a T2-specific Freshmile tariff, not the cheaper generic (no
+// connector_type) tariff also present on the same station — otherwise a
+// station's summary price wouldn't reflect the connector it actually has.
+func TestStationRepository_ListByBBox_PrefersExactConnectorMatch(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRPREFCONN1", 45.90, 6.10)
+	station.ConnectorType = "T2"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	t2Price := 40.0
+	genericPrice := 10.0 // cheaper, but not connector-specific — must lose to the exact match
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &t2Price,
+		ConnectorType: "T2", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert T2 tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: &genericPrice, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert generic tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	if got := results[0].PricingSummary.ACMinCentsPerKWh; got == nil || *got != 40.0 {
+		t.Errorf("ACMinCentsPerKWh = %v, want 40.0 (the T2-specific tariff, not the cheaper generic 10.0)", got)
+	}
+}
+
 func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()
@@ -239,6 +408,72 @@ func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	}
 	if len(results[0].TariffSources) != 1 || results[0].TariffSources[0] != "izivia" {
 		t.Errorf("TariffSources = %v, want [izivia]", results[0].TariffSources)
+	}
+}
+
+func TestStationRepository_ListByBBox_PriceRange(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	cheap := testStation("FRPRICE001", 45.90, 6.10)
+	mid := testStation("FRPRICE002", 45.91, 6.11)
+	expensive := testStation("FRPRICE003", 45.92, 6.12)
+	noPrice := testStation("FRPRICE004", 45.93, 6.13)
+
+	cheapID, err := stationRepo.UpsertStation(ctx, cheap)
+	if err != nil {
+		t.Fatalf("UpsertStation cheap: %v", err)
+	}
+	midID, err := stationRepo.UpsertStation(ctx, mid)
+	if err != nil {
+		t.Fatalf("UpsertStation mid: %v", err)
+	}
+	expensiveID, err := stationRepo.UpsertStation(ctx, expensive)
+	if err != nil {
+		t.Fatalf("UpsertStation expensive: %v", err)
+	}
+	if _, err := stationRepo.UpsertStation(ctx, noPrice); err != nil {
+		t.Fatalf("UpsertStation noPrice: %v", err)
+	}
+
+	cheapPrice, midPrice, expensivePrice := 20.0, 30.0, 60.0
+	for id, price := range map[uuid.UUID]*float64{cheapID: &cheapPrice, midID: &midPrice, expensiveID: &expensivePrice} {
+		if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+			StationID: id, Source: "izivia", Kind: domain.TariffKindMixed, Model: "izivia_text",
+			Currency: "EUR", EnergyPriceCentsPerKWh: price,
+		}); err != nil {
+			t.Fatalf("Tariffs.Upsert: %v", err)
+		}
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	minPrice, maxPrice := 25.0, 40.0
+	bbox.MinPriceCentsPerKWh = &minPrice
+	bbox.MaxPriceCentsPerKWh = &maxPrice
+
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox price range: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRPRICE002" {
+		t.Fatalf("ListByBBox price range [25,40] = %+v, want only FRPRICE002 (30 cts)", results)
+	}
+
+	// A station with no known price must never match a price-range filter,
+	// same as it never matches HasTariffs=true.
+	minOnly := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	zero := 0.0
+	minOnly.MinPriceCentsPerKWh = &zero
+	results, err = stationRepo.ListByBBox(ctx, minOnly)
+	if err != nil {
+		t.Fatalf("ListByBBox minPrice=0: %v", err)
+	}
+	for _, r := range results {
+		if r.Station.IRVEIDPDC == "FRPRICE004" {
+			t.Error("station with no known price matched a minPrice filter, want excluded")
+		}
 	}
 }
 

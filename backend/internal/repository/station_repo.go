@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -81,12 +82,98 @@ const stationListSelectPrefix = `
 		-- otherwise these stations come back with null ac/dc and get grayed
 		-- out on the map even though a tariff exists (visible in the detail
 		-- view, which lists every kind).
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed')),
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed'))`
+		--
+		-- COALESCE prefers a tariff whose connector_type exactly matches this
+		-- station's own s.connector_type (Freshmile is currently the only
+		-- source that populates it) over the coarse kind-only minimum: e.g. a
+		-- station with a T2 connector and a Freshmile CCS-specific tariff on
+		-- file for the *same physical location* (a different PDC row sharing
+		-- source_station correlation) shouldn't have that CCS price bleed into
+		-- this station's summary. "t.connector_type <> ''" guards against
+		-- s.connector_type also being '' (unknown) — that must never look like
+		-- an "exact match" against every generic (non-connector-specific)
+		-- tariff row.
+		--
+		-- current_window_price(t.extra, t.energy_price_cents_per_kwh) instead
+		-- of the bare column: for tariffs with time-of-day windows (Electra),
+		-- the column is a snapshot fixed at the last ingestion run, not live —
+		-- see migration 008 for why that goes stale between runs. Non-windowed
+		-- tariffs (everything else) fall through to the same column value.
+		COALESCE(
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed'))
+		),
+		COALESCE(
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed'))
+		)`
 
 const stationListFrom = `
 	FROM stations s
 	LEFT JOIN station_tariffs t ON t.station_id = s.id`
+
+// stationBestPriceACFragment/stationBestPriceDCFragment mirror
+// stationListSelectPrefix's own ac_min/dc_min COALESCE expressions
+// exactly (kept in sync by hand — see that prefix's comment for why the
+// exact-connector-match preference exists). Factored out here so
+// stationBestPriceFragment (below) doesn't hand-duplicate the whole thing
+// a second time.
+const stationBestPriceACFragment = `COALESCE(
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed'))
+)`
+
+const stationBestPriceDCFragment = `COALESCE(
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed'))
+)`
+
+// stationBestPriceFragment picks the same price a client would display for
+// a station via utils/pricing.js#pickPriceCentsPerKWh: prefer whichever of
+// ac/dc matches the station's own connector kind, falling back to
+// whichever is available. Used by ListByBBox's price-range filter when no
+// f.Sources selection is active, since without one there is no "filtered"
+// price to filter on — unlike ORDER BY/GROUP BY, HAVING can't reference a
+// SELECT-list alias and must repeat the aggregate expression verbatim.
+var stationBestPriceFragment = stationBestPriceExprFor(stationBestPriceACFragment, stationBestPriceDCFragment)
+
+// stationBestPriceExprFor builds the same "prefer the station's own
+// connector kind, else whichever is available" COALESCE/CASE shape as
+// stationBestPriceFragment, but over caller-supplied AC/DC fragments — used
+// both for the unfiltered global best price and, with sourcesParamIdx
+// spliced into ac/dcFragment, for the price among only the caller's
+// selected sources (see stationSelectedPriceFragment).
+func stationBestPriceExprFor(acFragment, dcFragment string) string {
+	return fmt.Sprintf(`COALESCE(
+		CASE
+			WHEN s.connector_type IN ('CCS', 'CHAdeMO') THEN (%[2]s)
+			WHEN s.connector_type IN ('T2', 'EF') THEN (%[1]s)
+			ELSE NULL
+		END,
+		(%[1]s), (%[2]s)
+	)`, acFragment, dcFragment)
+}
+
+// stationSelectedPriceFragment mirrors stationBestPriceFragment but scoped
+// to only the tariffs matching f.Sources (the same (source||':'||plan) =
+// ANY($sourcesParamIdx) filter ListByBBox's SELECT list already applies for
+// SelectedSourcesPricing) — the price a user with that specific
+// source/plan selection would actually see for the station, as opposed to
+// the station's cheapest tariff overall. Used by ListByBBox's price-range
+// filter whenever a sources selection is active: the min/max price fields
+// filter what the user would pay, not an unrelated cheaper plan they
+// haven't selected.
+func stationSelectedPriceFragment(sourcesParamIdx int) string {
+	acFragment := fmt.Sprintf(`COALESCE(
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+	)`, sourcesParamIdx)
+	dcFragment := fmt.Sprintf(`COALESCE(
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+	)`, sourcesParamIdx)
+	return stationBestPriceExprFor(acFragment, dcFragment)
+}
 
 // BulkUpsertStations upserts a slice of IRVE stations in a single round trip
 // via a multi-row INSERT ... SELECT FROM unnest(...), the same bulk form as
@@ -226,8 +313,14 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	args = append(args, f.Sources)
 	sourcesParamIdx := len(args)
 	query := stationListSelectPrefix + fmt.Sprintf(`,
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%d::text[])),
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%d::text[]))`, sourcesParamIdx, sourcesParamIdx)
+		COALESCE(
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+		),
+		COALESCE(
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+		)`, sourcesParamIdx)
 	query += stationListFrom + `
 		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 
@@ -236,11 +329,49 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 		query += fmt.Sprintf(" AND s.operator_name = $%d", len(args))
 	}
 
+	if len(f.ConnectorTypes) > 0 {
+		args = append(args, f.ConnectorTypes)
+		query += fmt.Sprintf(" AND s.connector_type = ANY($%d::text[])", len(args))
+	}
+
+	if f.MinPowerKW != nil {
+		args = append(args, *f.MinPowerKW)
+		query += fmt.Sprintf(" AND s.power_kw >= $%d", len(args))
+	}
+
 	query += `
 		GROUP BY s.id`
 
+	// Every condition here depends on an aggregate (COUNT/MIN ... FILTER),
+	// so it must live in HAVING, not WHERE — and unlike ORDER BY/GROUP BY,
+	// HAVING can't reference a SELECT-list output alias, so
+	// stationBestPriceFragment's aggregate expression has to be repeated
+	// verbatim rather than referenced by name.
+	// When a sources selection is active, the price range filters against
+	// the price for that selection specifically (stationSelectedPriceFragment)
+	// rather than the station's cheapest tariff overall — a user filtering
+	// "0.20-0.30 €/kWh" while only Electra is selected expects that bound to
+	// apply to Electra's price, not some unrelated cheaper source they
+	// haven't picked.
+	priceFragment := stationBestPriceFragment
+	if len(f.Sources) > 0 {
+		priceFragment = stationSelectedPriceFragment(sourcesParamIdx)
+	}
+
+	var having []string
 	if f.HasTariffs != nil && *f.HasTariffs {
-		query += ` HAVING COUNT(t.id) > 0`
+		having = append(having, "COUNT(t.id) > 0")
+	}
+	if f.MinPriceCentsPerKWh != nil {
+		args = append(args, *f.MinPriceCentsPerKWh)
+		having = append(having, fmt.Sprintf("%s >= $%d", priceFragment, len(args)))
+	}
+	if f.MaxPriceCentsPerKWh != nil {
+		args = append(args, *f.MaxPriceCentsPerKWh)
+		having = append(having, fmt.Sprintf("%s <= $%d", priceFragment, len(args)))
+	}
+	if len(having) > 0 {
+		query += " HAVING " + strings.Join(having, " AND ")
 	}
 
 	args = append(args, limit, f.Offset)
@@ -288,6 +419,47 @@ func (r *StationRepository) GetByIRVEID(ctx context.Context, irveID string) (*do
 	}
 	_ = json.Unmarshal(metadata, &s.Metadata)
 	return &s, nil
+}
+
+// ListByOperatorLike returns every IRVE station whose operator_name or
+// enseigne case-insensitively contains needle — for ingesters (Fastned)
+// whose whole network is already present in the IRVE referential, so there
+// is no external station list to fetch/correlate: the "source" is just a
+// tag applied directly to matching IRVE rows, no source_stations/
+// station_links involved at all. Matches on either column since IRVE data
+// entry isn't consistent about which of the two carries a network's brand
+// name for a given station.
+func (r *StationRepository) ListByOperatorLike(ctx context.Context, needle string) ([]domain.Station, error) {
+	const query = `
+		SELECT id, irve_id_station, irve_id_pdc, operator_name, amenageur, enseigne, name,
+			address_street, address_postal_code, address_city, address_country_code,
+			ST_Y(location), ST_X(location), power_kw, connector_type, access_type, is_24_7,
+			metadata, created_at, updated_at
+		FROM stations
+		WHERE operator_name ILIKE '%' || $1 || '%' OR enseigne ILIKE '%' || $1 || '%'`
+
+	rows, err := r.pool.Query(ctx, query, needle)
+	if err != nil {
+		return nil, fmt.Errorf("list stations by operator like %q: %w", needle, err)
+	}
+	defer rows.Close()
+
+	var stations []domain.Station
+	for rows.Next() {
+		var s domain.Station
+		var metadata []byte
+		if err := rows.Scan(
+			&s.ID, &s.IRVEIDStation, &s.IRVEIDPDC, &s.OperatorName, &s.Amenageur, &s.Enseigne, &s.Name,
+			&s.AddressStreet, &s.AddressPostal, &s.AddressCity, &s.AddressCountry,
+			&s.Lat, &s.Lng, &s.PowerKW, &s.ConnectorType, &s.AccessType, &s.Is24_7,
+			&metadata, &s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan station by operator like %q: %w", needle, err)
+		}
+		_ = json.Unmarshal(metadata, &s.Metadata)
+		stations = append(stations, s)
+	}
+	return stations, rows.Err()
 }
 
 func scanStationSummary(rows pgx.Rows, hasSourcesFilter bool) (domain.StationSummary, error) {

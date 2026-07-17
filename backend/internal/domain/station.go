@@ -44,8 +44,25 @@ type StationFilter struct {
 	Operator                       string
 	HasTariffs                     *bool
 	Sources                        []string
-	Limit                          int
-	Offset                         int
+	// ConnectorTypes, when non-empty, restricts results to stations whose
+	// own connector_type is one of these (e.g. ["CCS", "CHAdeMO"]) — see
+	// domain.ConnectorType* for the vocabulary.
+	ConnectorTypes []string
+	// MinPowerKW, when set, restricts results to stations with power_kw at
+	// least this value. A station with power_kw unknown (NULL) never
+	// matches — an unknown power shouldn't pass a "≥X kW" filter.
+	MinPowerKW *float64
+	// MinPriceCentsPerKWh/MaxPriceCentsPerKWh, when set, restrict results to
+	// stations whose own "best price" (the same connector-kind-aware pick
+	// utils/pricing.js#pickPriceCentsPerKWh does client-side, from
+	// pricingSummary — the best price across ALL sources, not narrowed by
+	// Sources) falls in [min, max]. A station with no known price never
+	// matches either bound — an unknown price shouldn't pass a price-range
+	// filter any more than it should pass a HasTariffs one.
+	MinPriceCentsPerKWh *float64
+	MaxPriceCentsPerKWh *float64
+	Limit               int
+	Offset              int
 }
 
 // Connector is an aggregated connector group exposed by the API
