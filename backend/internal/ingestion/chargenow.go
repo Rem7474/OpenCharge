@@ -42,7 +42,7 @@ var chargenowHeaders = map[string]string{
     "dnt": "1",
     "origin": "https://chargenow.com",
     "referer": "https://chargenow.com/web/fr/cn-fr/map",
-    "rest-api-path": "clusters",  # header clé pour passer le WAF
+    "rest-api-path": "clusters",
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
