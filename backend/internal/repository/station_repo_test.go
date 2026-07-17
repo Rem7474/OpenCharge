@@ -268,6 +268,54 @@ func TestStationRepository_ListByBBox_ConnectorTypeAndMinPower(t *testing.T) {
 	}
 }
 
+// TestStationRepository_ListByBBox_PrefersExactConnectorMatch pins the
+// COALESCE fallback in stationListSelectPrefix/ListByBBox's sourced
+// aggregate: a station whose own connector_type is T2 must get its price
+// from a T2-specific Freshmile tariff, not the cheaper generic (no
+// connector_type) tariff also present on the same station — otherwise a
+// station's summary price wouldn't reflect the connector it actually has.
+func TestStationRepository_ListByBBox_PrefersExactConnectorMatch(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRPREFCONN1", 45.90, 6.10)
+	station.ConnectorType = "T2"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	t2Price := 40.0
+	genericPrice := 10.0 // cheaper, but not connector-specific — must lose to the exact match
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &t2Price,
+		ConnectorType: "T2", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert T2 tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: &genericPrice, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert generic tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	if got := results[0].PricingSummary.ACMinCentsPerKWh; got == nil || *got != 40.0 {
+		t.Errorf("ACMinCentsPerKWh = %v, want 40.0 (the T2-specific tariff, not the cheaper generic 10.0)", got)
+	}
+}
+
 func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

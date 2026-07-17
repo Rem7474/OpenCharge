@@ -81,8 +81,25 @@ const stationListSelectPrefix = `
 		-- otherwise these stations come back with null ac/dc and get grayed
 		-- out on the map even though a tariff exists (visible in the detail
 		-- view, which lists every kind).
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed')),
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed'))`
+		--
+		-- COALESCE prefers a tariff whose connector_type exactly matches this
+		-- station's own s.connector_type (Freshmile is currently the only
+		-- source that populates it) over the coarse kind-only minimum: e.g. a
+		-- station with a T2 connector and a Freshmile CCS-specific tariff on
+		-- file for the *same physical location* (a different PDC row sharing
+		-- source_station correlation) shouldn't have that CCS price bleed into
+		-- this station's summary. "t.connector_type <> ''" guards against
+		-- s.connector_type also being '' (unknown) — that must never look like
+		-- an "exact match" against every generic (non-connector-specific)
+		-- tariff row.
+		COALESCE(
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed'))
+		),
+		COALESCE(
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed'))
+		)`
 
 const stationListFrom = `
 	FROM stations s
@@ -226,8 +243,14 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	args = append(args, f.Sources)
 	sourcesParamIdx := len(args)
 	query := stationListSelectPrefix + fmt.Sprintf(`,
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%d::text[])),
-		MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%d::text[]))`, sourcesParamIdx, sourcesParamIdx)
+		COALESCE(
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+		),
+		COALESCE(
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+		)`, sourcesParamIdx)
 	query += stationListFrom + `
 		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 
