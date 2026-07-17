@@ -13,6 +13,7 @@ const PLAN_LABELS = {
   public: "Sans l'appli",
   app: "Avec l'appli",
   subscription: "Abonné",
+  card: "Carte",
 };
 
 export function formatPlanLabel(planId) {
