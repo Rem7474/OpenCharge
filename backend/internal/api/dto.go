@@ -1,6 +1,8 @@
 package api
 
 import (
+	"time"
+
 	"opencharge/internal/domain"
 )
 
@@ -114,6 +116,12 @@ type tariffDTO struct {
 	ServiceFeePercent          *float64       `json:"service_fee_percent,omitempty"`
 	RawText                    string         `json:"raw_text,omitempty"`
 	Extra                      map[string]any `json:"extra,omitempty"`
+	// UpdatedAt is when an ingestion run last wrote this tariff. Every run
+	// rewrites it whether or not the price moved, so it reads as "last
+	// checked" (how fresh the data is) rather than "price changed on".
+	// A pointer so a tariff with no timestamp is omitted rather than
+	// serialized as a meaningless year-0001 date.
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
 type stationDetailResponse struct {
@@ -150,7 +158,7 @@ func toTariffDTO(t domain.StationTariff) tariffDTO {
 	if extra == nil {
 		extra = map[string]any{}
 	}
-	return tariffDTO{
+	dto := tariffDTO{
 		Source:                     t.Source,
 		Plan:                       t.Plan,
 		Kind:                       t.Kind,
@@ -163,4 +171,8 @@ func toTariffDTO(t domain.StationTariff) tariffDTO {
 		RawText:                    t.RawText,
 		Extra:                      extra,
 	}
+	if !t.UpdatedAt.IsZero() {
+		dto.UpdatedAt = &t.UpdatedAt
+	}
+	return dto
 }

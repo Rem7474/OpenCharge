@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchStationDetails } from "../api/stations.js";
 import { connectorPriceKind, formatPrice, hasHourlyPricing } from "../utils/pricing.js";
-import { formatSourceLabel, formatPlanLabel } from "../utils/format.js";
+import { formatSourceLabel, formatPlanLabel, formatUpdatedAt } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 
 // Pick, among a (source, plan)'s tariffs, the one matching the station's
@@ -24,6 +24,7 @@ function cheapestTariff(tariffs, connectorKind) {
 }
 
 function TariffRow({ tariff, priceMode, chargeKWh }) {
+  const updatedAt = formatUpdatedAt(tariff.updated_at);
   return (
     <div className="tariff-row">
       <div className="source">
@@ -41,6 +42,7 @@ function TariffRow({ tariff, priceMode, chargeKWh }) {
         <div>{(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min</div>
       )}
       {tariff.raw_text && <div className="raw-text">{tariff.raw_text}</div>}
+      {updatedAt && <div className="updated-at">Mis à jour le {updatedAt}</div>}
     </div>
   );
 }

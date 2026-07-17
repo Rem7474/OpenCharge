@@ -340,6 +340,15 @@ a {
   margin-top: 4px;
 }
 
+/* Data freshness ("last checked"), deliberately quieter than the price and
+   the source's own raw wording it sits under. */
+.tariff-row .updated-at {
+  font-size: 11px;
+  color: var(--color-muted);
+  margin-top: 4px;
+  font-style: italic;
+}
+
 /* --- Plan selector (per-operator price tier, e.g. Electra public/app/abonné) --- */
 
 .plan-selector {

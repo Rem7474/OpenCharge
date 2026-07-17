@@ -19,3 +19,23 @@ export function formatPlanLabel(planId) {
   if (!planId) return "";
   return PLAN_LABELS[planId] ?? formatSourceLabel(planId);
 }
+
+/**
+ * Format a tariff's `updated_at` (RFC 3339, as sent by the API) for display.
+ * Ingestion rewrites that timestamp on every run whether or not the price
+ * moved, so this answers "how fresh is this data?", not "when did the price
+ * last change?". Returns "" for a missing or unparseable date so callers can
+ * skip the line entirely rather than render "Invalid Date".
+ */
+export function formatUpdatedAt(isoDate) {
+  if (!isoDate) return "";
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
