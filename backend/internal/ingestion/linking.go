@@ -22,6 +22,16 @@ const ingestionBulkChunkSize = 200
 type normalizedSourceStation struct {
 	Station domain.SourceStation
 	Tariffs []domain.StationTariff
+	// ACPowerKW/DCPowerKW, when known, are the source's own rated power for
+	// its AC/DC connectors — used as FindNearestStationsForKind's power-aware
+	// tie-break target so that, when several IRVE rows of the same kind sit
+	// at essentially the same coordinates (e.g. two DC rows of different
+	// power at one physical location), the tariff lands on the row whose own
+	// power actually matches rather than just whichever is nearest. Left nil
+	// by sources that don't expose a usable power figure (most of them),
+	// which keeps their existing nearest-by-distance-only behavior.
+	ACPowerKW *float64
+	DCPowerKW *float64
 }
 
 // writeSourceStationChunk writes a chunk of source stations and their
@@ -82,11 +92,15 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 		}
 		if hasAC {
 			acIdxs = append(acIdxs, i)
-			acPoints = append(acPoints, points[i])
+			acPoint := points[i]
+			acPoint.TargetPowerKW = item.ACPowerKW
+			acPoints = append(acPoints, acPoint)
 		}
 		if hasDC {
 			dcIdxs = append(dcIdxs, i)
-			dcPoints = append(dcPoints, points[i])
+			dcPoint := points[i]
+			dcPoint.TargetPowerKW = item.DCPowerKW
+			dcPoints = append(dcPoints, dcPoint)
 		}
 	}
 

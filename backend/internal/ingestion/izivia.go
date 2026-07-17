@@ -300,7 +300,8 @@ func (ing *IziviaIngester) fetchAndNormalizeMarker(ctx context.Context, marker m
 	if !ok {
 		return normalizedSourceStation{}, false, fmt.Errorf("station without usable location")
 	}
-	return normalizedSourceStation{Station: src, Tariffs: tariffs}, true, nil
+	acPowerKW, dcPowerKW := iziviaMaxPowerKWByKind(station)
+	return normalizedSourceStation{Station: src, Tariffs: tariffs, ACPowerKW: acPowerKW, DCPowerKW: dcPowerKW}, true, nil
 }
 
 func normalizeIziviaStation(marker, station map[string]any, pricing []any) (domain.SourceStation, []domain.StationTariff, bool) {
@@ -407,6 +408,41 @@ func iziviaConnectorKind(standard string, maxPowerInW any) string {
 		return domain.TariffKindAC
 	}
 	return ""
+}
+
+// iziviaMaxPowerKWByKind reads a station's chargingConnectorsStats and
+// returns the highest rated power (in kW) among its AC connectors and among
+// its DC connectors, respectively — nil for a kind the station has none of.
+// Used as the target power for FindNearestStationsForKind's power-aware
+// tie-break: IRVE frequently models the same physical Izivia location as
+// several rows at effectively the same coordinates (e.g. a 22kW AC and a
+// 150kW DC row, or even two DC rows of different power), so distance and
+// kind alone aren't always enough to disambiguate which row a given
+// AC/DC-kind tariff should land on.
+func iziviaMaxPowerKWByKind(station map[string]any) (acKW, dcKW *float64) {
+	stats, _ := station["chargingConnectorsStats"].([]any)
+	for _, raw := range stats {
+		c, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		w, ok := floatValue(c["maxPowerInW"])
+		if !ok || w == nil || *w <= 0 {
+			continue
+		}
+		kw := *w / 1000.0
+		switch iziviaConnectorKind(stringValue(c["standard"]), c["maxPowerInW"]) {
+		case domain.TariffKindAC:
+			if acKW == nil || kw > *acKW {
+				acKW = &kw
+			}
+		case domain.TariffKindDC:
+			if dcKW == nil || kw > *dcKW {
+				dcKW = &kw
+			}
+		}
+	}
+	return acKW, dcKW
 }
 
 // inferIziviaKind derives a tariff's Kind (ac/dc) from the power rating

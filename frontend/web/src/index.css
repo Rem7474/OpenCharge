@@ -8,6 +8,7 @@
   --color-accent: #1a7f37;
   --color-accent-mid: #d97706;
   --color-accent-high: #b91c1c;
+  --color-accent-extreme: #111111;
   --color-gray: #9a9a9a;
   /* dataviz: single-series sequential blue (see references/palette.md) */
   --viz-series-1: #2a78d6;
@@ -588,6 +589,15 @@ a {
 
 .price-marker--high {
   border-color: var(--color-accent-high);
+}
+
+.price-marker--extreme {
+  /* Filled black (not just a border) so this tier stays legible against
+     both the light and dark --color-bg values — a black border alone
+     would nearly vanish on the dark theme's #16181c background. */
+  background: var(--color-accent-extreme);
+  border-color: var(--color-accent-extreme);
+  color: #ffffff;
 }
 
 /* --- Station detail --- */

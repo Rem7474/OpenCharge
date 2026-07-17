@@ -95,9 +95,11 @@ func (r *LinkRepository) FindNearestStation(ctx context.Context, lat, lng, maxDi
 }
 
 // NearestStationQuery is one point to resolve in a FindNearestStations
-// bulk call.
+// bulk call. TargetPowerKW is only consulted by FindNearestStationsForKind
+// (FindNearestStations ignores it) — see that method's doc comment.
 type NearestStationQuery struct {
-	Lat, Lng float64
+	Lat, Lng      float64
+	TargetPowerKW *float64
 }
 
 // FindNearestStations resolves the closest IRVE station within
@@ -206,6 +208,15 @@ const candidateKindFilterFragment = `
 // instead of LIMIT 1 — picking the best-of-5 by kind happens in Go, not by
 // reordering the SQL's ORDER BY, so the index-accelerated pure-distance
 // scan that makes this fast at all is untouched.
+//
+// When a point also sets TargetPowerKW, kind alone still isn't always
+// enough: IRVE can carry several same-kind rows at the same coordinates
+// (e.g. two DC connectors of different power for one physical location —
+// observed with Izivia, whose station detail exposes each connector's own
+// rated power). Among the kind-matching candidates, the one whose own
+// power_kw is closest to TargetPowerKW is preferred over just the nearest;
+// a point with no TargetPowerKW (or candidates with no power_kw on file)
+// falls back to the plain nearest-of-kind behavior.
 func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points []NearestStationQuery, kind string, maxDistanceMeters float64) (map[int]NearestStationCandidate, error) {
 	if len(points) == 0 {
 		return nil, nil
@@ -281,6 +292,11 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 		return nil, err
 	}
 
+	targetPowerByIdx := make(map[int]*float64, len(points))
+	for i, p := range points {
+		targetPowerByIdx[i] = p.TargetPowerKW
+	}
+
 	result := map[int]NearestStationCandidate{}
 	for idx, candidates := range byIdx {
 		// candidates is already ordered by distance ascending (ORDER BY
@@ -288,15 +304,43 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 		// the nearest kind match; candidates[0] (the overall nearest) is
 		// the fallback if none match.
 		best := candidates[0].candidate
+		haveKindMatch := false
+		var bestPowerDelta float64
+		targetPowerKW := targetPowerByIdx[idx]
 		for _, c := range candidates {
-			if c.candidateKind == kind {
+			if c.candidateKind != kind {
+				continue
+			}
+			if !haveKindMatch {
 				best = c.candidate
-				break
+				haveKindMatch = true
+				if targetPowerKW != nil && c.candidate.PowerKW != nil {
+					bestPowerDelta = powerDeltaAbs(*targetPowerKW, *c.candidate.PowerKW)
+				} else {
+					bestPowerDelta = -1 // no power comparison available yet
+				}
+				continue
+			}
+			if targetPowerKW == nil || c.candidate.PowerKW == nil {
+				continue
+			}
+			delta := powerDeltaAbs(*targetPowerKW, *c.candidate.PowerKW)
+			if bestPowerDelta < 0 || delta < bestPowerDelta {
+				best = c.candidate
+				bestPowerDelta = delta
 			}
 		}
 		result[idx] = best
 	}
 	return result, nil
+}
+
+func powerDeltaAbs(a, b float64) float64 {
+	d := a - b
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 // Upsert creates or refreshes the correlation between an IRVE station and a

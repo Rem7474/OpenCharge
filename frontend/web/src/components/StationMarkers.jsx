@@ -85,6 +85,11 @@ export default function StationMarkers({
         const hasSelection = Object.keys(selectedSources).length > 0;
         const pricing = hasSelection ? station.selectedSourcesPricing : station.pricingSummary;
         const priceCents = pickPriceCentsPerKWh(pricing, connectorType);
+        // With a sources selection active, a station with no tariff for any
+        // selected source/plan isn't relevant to what the user is looking
+        // for — hide it instead of showing a dead "—" marker they'd have to
+        // click through to learn nothing from.
+        if (hasSelection && priceCents == null) return null;
         const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
         const tier = priceTier(priceCents);
 

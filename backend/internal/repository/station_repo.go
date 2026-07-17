@@ -131,17 +131,49 @@ const stationBestPriceDCFragment = `COALESCE(
 // stationBestPriceFragment picks the same price a client would display for
 // a station via utils/pricing.js#pickPriceCentsPerKWh: prefer whichever of
 // ac/dc matches the station's own connector kind, falling back to
-// whichever is available. Used by ListByBBox's price-range filter, which
-// — unlike ORDER BY/GROUP BY — cannot reference a SELECT-list alias and
-// must repeat the aggregate expression verbatim in its HAVING clause.
-var stationBestPriceFragment = fmt.Sprintf(`COALESCE(
-	CASE
-		WHEN s.connector_type IN ('CCS', 'CHAdeMO') THEN (%[2]s)
-		WHEN s.connector_type IN ('T2', 'EF') THEN (%[1]s)
-		ELSE NULL
-	END,
-	(%[1]s), (%[2]s)
-)`, stationBestPriceACFragment, stationBestPriceDCFragment)
+// whichever is available. Used by ListByBBox's price-range filter when no
+// f.Sources selection is active, since without one there is no "filtered"
+// price to filter on — unlike ORDER BY/GROUP BY, HAVING can't reference a
+// SELECT-list alias and must repeat the aggregate expression verbatim.
+var stationBestPriceFragment = stationBestPriceExprFor(stationBestPriceACFragment, stationBestPriceDCFragment)
+
+// stationBestPriceExprFor builds the same "prefer the station's own
+// connector kind, else whichever is available" COALESCE/CASE shape as
+// stationBestPriceFragment, but over caller-supplied AC/DC fragments — used
+// both for the unfiltered global best price and, with sourcesParamIdx
+// spliced into ac/dcFragment, for the price among only the caller's
+// selected sources (see stationSelectedPriceFragment).
+func stationBestPriceExprFor(acFragment, dcFragment string) string {
+	return fmt.Sprintf(`COALESCE(
+		CASE
+			WHEN s.connector_type IN ('CCS', 'CHAdeMO') THEN (%[2]s)
+			WHEN s.connector_type IN ('T2', 'EF') THEN (%[1]s)
+			ELSE NULL
+		END,
+		(%[1]s), (%[2]s)
+	)`, acFragment, dcFragment)
+}
+
+// stationSelectedPriceFragment mirrors stationBestPriceFragment but scoped
+// to only the tariffs matching f.Sources (the same (source||':'||plan) =
+// ANY($sourcesParamIdx) filter ListByBBox's SELECT list already applies for
+// SelectedSourcesPricing) — the price a user with that specific
+// source/plan selection would actually see for the station, as opposed to
+// the station's cheapest tariff overall. Used by ListByBBox's price-range
+// filter whenever a sources selection is active: the min/max price fields
+// filter what the user would pay, not an unrelated cheaper plan they
+// haven't selected.
+func stationSelectedPriceFragment(sourcesParamIdx int) string {
+	acFragment := fmt.Sprintf(`COALESCE(
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+	)`, sourcesParamIdx)
+	dcFragment := fmt.Sprintf(`COALESCE(
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+	)`, sourcesParamIdx)
+	return stationBestPriceExprFor(acFragment, dcFragment)
+}
 
 // BulkUpsertStations upserts a slice of IRVE stations in a single round trip
 // via a multi-row INSERT ... SELECT FROM unnest(...), the same bulk form as
@@ -315,17 +347,28 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	// HAVING can't reference a SELECT-list output alias, so
 	// stationBestPriceFragment's aggregate expression has to be repeated
 	// verbatim rather than referenced by name.
+	// When a sources selection is active, the price range filters against
+	// the price for that selection specifically (stationSelectedPriceFragment)
+	// rather than the station's cheapest tariff overall — a user filtering
+	// "0.20-0.30 €/kWh" while only Electra is selected expects that bound to
+	// apply to Electra's price, not some unrelated cheaper source they
+	// haven't picked.
+	priceFragment := stationBestPriceFragment
+	if len(f.Sources) > 0 {
+		priceFragment = stationSelectedPriceFragment(sourcesParamIdx)
+	}
+
 	var having []string
 	if f.HasTariffs != nil && *f.HasTariffs {
 		having = append(having, "COUNT(t.id) > 0")
 	}
 	if f.MinPriceCentsPerKWh != nil {
 		args = append(args, *f.MinPriceCentsPerKWh)
-		having = append(having, fmt.Sprintf("%s >= $%d", stationBestPriceFragment, len(args)))
+		having = append(having, fmt.Sprintf("%s >= $%d", priceFragment, len(args)))
 	}
 	if f.MaxPriceCentsPerKWh != nil {
 		args = append(args, *f.MaxPriceCentsPerKWh)
-		having = append(having, fmt.Sprintf("%s <= $%d", stationBestPriceFragment, len(args)))
+		having = append(having, fmt.Sprintf("%s <= $%d", priceFragment, len(args)))
 	}
 	if len(having) > 0 {
 		query += " HAVING " + strings.Join(having, " AND ")

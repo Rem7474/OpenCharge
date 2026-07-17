@@ -31,17 +31,19 @@ export function pickPriceCentsPerKWh(pricingSummary, connectorType) {
 }
 
 /**
- * Bucket a €/kWh price (in cents) into a cheap/mid/expensive tier for the
- * map marker color-coding: <28 cts green, 28-35 orange, >35 red. Always
- * computed from the raw per-kWh rate, never from a formatted/mode-dependent
- * display value — the tier must stay the same regardless of whether the
- * price is shown as €/kWh or as a total for a chosen session size.
+ * Bucket a €/kWh price (in cents) into a cheap/mid/expensive/extreme tier
+ * for the map marker color-coding: <28 cts green, 28-35 orange, 35-50 red,
+ * >50 black. Always computed from the raw per-kWh rate, never from a
+ * formatted/mode-dependent display value — the tier must stay the same
+ * regardless of whether the price is shown as €/kWh or as a total for a
+ * chosen session size.
  */
 export function priceTier(priceCentsPerKWh) {
   if (priceCentsPerKWh == null) return null;
   if (priceCentsPerKWh < 28) return "low";
   if (priceCentsPerKWh <= 35) return "mid";
-  return "high";
+  if (priceCentsPerKWh <= 50) return "high";
+  return "extreme";
 }
 
 /**
