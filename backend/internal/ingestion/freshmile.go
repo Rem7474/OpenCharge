@@ -149,6 +149,8 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // everything — discovery alone used to take the vast majority of a run's
 // wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
+	runStart := time.Now()
+
 	// pipelineCtx (not ctx directly) governs scanLocationIDs and the
 	// detail-fetch workers, so that once writeResults returns — whether
 	// because the pipeline finished normally or because a flush failed —
@@ -248,6 +250,13 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	workerWG.Wait()
 
 	log.Printf("freshmile: done, %d locations processed", processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	if err == nil {
+		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart); sweepErr != nil {
+			return processed, sweepErr
+		}
+	}
 	return processed, err
 }
 

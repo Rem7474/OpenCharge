@@ -70,6 +70,8 @@ func NewElectraIngester(pool *pgxpool.Pool, sourceStations *repository.SourceSta
 // Run downloads Electra's station list, stores each as a SourceStation with
 // normalized tariffs, then correlates it with the nearest IRVE station.
 func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
+	runStart := time.Now()
+
 	stations, err := ing.fetch(ctx)
 	if err != nil {
 		return 0, err
@@ -100,6 +102,13 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 		log.Printf("electra: %d/%d processed", linked, len(stations))
 	}
 	log.Printf("electra: done, %d source stations processed", linked)
+
+	// Only sweep after every station in this run was written successfully
+	// (see repository.SweepStaleSourceData) — a run that returned early on error above
+	// never reaches this point.
+	if err := repository.SweepStaleSourceData(ctx, ing.Pool, "electra", runStart); err != nil {
+		return linked, err
+	}
 	return linked, nil
 }
 

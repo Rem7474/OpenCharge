@@ -168,6 +168,14 @@ a {
   letter-spacing: 0.03em;
 }
 
+.show-all-stations-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .operator-filter {
   position: relative;
 }

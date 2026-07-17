@@ -11,6 +11,8 @@ export default function FilterBar({
   onChangeChargeKWh,
   chargeMinutes,
   onChangeChargeMinutes,
+  showAllStations,
+  onChangeShowAllStations,
 }) {
   return (
     <div className="filter-bar">
@@ -63,6 +65,17 @@ export default function FilterBar({
             </label>
           </>
         )}
+      </div>
+
+      <div className="filter-group">
+        <label className="show-all-stations-toggle">
+          <input
+            type="checkbox"
+            checked={showAllStations}
+            onChange={(e) => onChangeShowAllStations(e.target.checked)}
+          />
+          Toutes les bornes IRVE (même sans prix)
+        </label>
       </div>
     </div>
   );

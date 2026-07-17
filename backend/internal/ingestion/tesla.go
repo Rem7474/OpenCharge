@@ -104,6 +104,8 @@ func teslaDetailsURLFmtFor(locationsURL string) string {
 // Electra/Izivia/Freshmile, just with browser tabs instead of HTTP
 // connections as the concurrency unit.
 func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
+	runStart := time.Now()
+
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
 		// headless Chrome and serves an "Access Denied" page instead of
@@ -203,6 +205,13 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	}
 
 	log.Printf("tesla: done, %d stations processed", result.processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	if firstErr == nil {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart); err != nil {
+			return result.processed, err
+		}
+	}
 	return result.processed, firstErr
 }
 

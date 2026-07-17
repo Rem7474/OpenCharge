@@ -19,6 +19,11 @@ export default function MapPage() {
   // per-minute rate and any flat session fee (see utils/pricing.js#
   // tariffCostBreakdown), alongside chargeKWh for the energy cost.
   const [chargeMinutes, setChargeMinutes] = useState(DEFAULT_CHARGE_MINUTES);
+  // Off by default (only priced stations shown, today's behavior): the
+  // IRVE referential has many more stations than ones we've matched a
+  // price for, and showing every one of them by default would bury the
+  // priced ones a user is actually here to compare.
+  const [showAllStations, setShowAllStations] = useState(false);
 
   const toggleSource = (source, wasChecked) => {
     setSelectedSources((prev) => {
@@ -48,6 +53,8 @@ export default function MapPage() {
         onChangeChargeKWh={setChargeKWh}
         chargeMinutes={chargeMinutes}
         onChangeChargeMinutes={setChargeMinutes}
+        showAllStations={showAllStations}
+        onChangeShowAllStations={setShowAllStations}
       />
       <div className="app-body" style={{ flex: 1 }}>
         <div className="map-container">
@@ -61,6 +68,7 @@ export default function MapPage() {
               selectedSources={selectedSources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}
+              showAllStations={showAllStations}
             />
           </MapContainer>
         </div>

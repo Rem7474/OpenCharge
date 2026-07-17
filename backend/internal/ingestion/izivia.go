@@ -101,6 +101,8 @@ func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStat
 // writeSourceStationChunk — same bulk correlation + single-transaction
 // pattern as Electra, instead of one uncommitted round trip per marker.
 func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
+	runStart := time.Now()
+
 	markers, err := ing.fetchMarkers(ctx)
 	if err != nil {
 		return 0, err
@@ -191,6 +193,14 @@ feedLoop:
 	}
 
 	log.Printf("izivia: done, %d stations processed", result.processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData) —
+	// firstErr covers both ctx cancellation and a write failure.
+	if firstErr == nil {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "izivia", runStart); err != nil {
+			return result.processed, err
+		}
+	}
 	return result.processed, firstErr
 }
 
