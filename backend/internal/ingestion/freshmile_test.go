@@ -341,6 +341,82 @@ func TestNormalizeFreshmileTariffsUnparsablePriceKeepsNilNotDropped(t *testing.T
 	}
 }
 
+// TestNormalizeFreshmileTariffsPackagedPriceStaysUnparsed pins that a
+// "forfait" (flat package for a fixed amount of energy, e.g. "forfait de 2
+// € par 6 kWh") — real production text — is deliberately left with both
+// prices nil rather than guessing a €/kWh figure from it. The pattern's
+// tight "par <unit>" adjacency requirement already keeps this from
+// matching (there's a number between "par" and "kWh"), so this is a
+// regression test for that, not new behavior.
+func TestNormalizeFreshmileTariffsPackagedPriceStaysUnparsed(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":   "EUR",
+							"custom_ref": "package-pricing",
+							"description": "Le prix dépend de l'énergie délivrée.\n" +
+								"- Recharge par badge : forfait de 2 € par 6 kWh\n" +
+								"- Recharge par smartphone en mode anonyme : forfait de 3 € par 6 kWh",
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1 (kept even though price couldn't be parsed)", len(tariffs))
+	}
+	if tariffs[0].EnergyPriceCentsPerKWh != nil {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want nil (packaged pricing isn't a single €/kWh figure)", tariffs[0].EnergyPriceCentsPerKWh)
+	}
+	if tariffs[0].SessionPriceCentsPerMin != nil {
+		t.Errorf("SessionPriceCentsPerMin = %v, want nil", tariffs[0].SessionPriceCentsPerMin)
+	}
+}
+
+// TestNormalizeFreshmileTariffsCombinedKWhAndPerMinute pins two real
+// production behaviors together: lowercase "kwh" must match (case was
+// previously significant and silently dropped it), and a description
+// combining both a €/kWh price and a €/min rate must populate both fields
+// instead of stopping at whichever pattern matches first.
+func TestNormalizeFreshmileTariffsCombinedKWhAndPerMinute(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":   "EUR",
+							"custom_ref": "kwh-and-per-minute",
+							"description": "Le prix dépend de l'énergie délivrée et du temps de branchement\n" +
+								"0,50 € par kwh et 0,05 € par minute",
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	got := tariffs[0]
+	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 50.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 50.0", got.EnergyPriceCentsPerKWh)
+	}
+	if got.SessionPriceCentsPerMin == nil || *got.SessionPriceCentsPerMin != 5.0 {
+		t.Errorf("SessionPriceCentsPerMin = %v, want 5.0", got.SessionPriceCentsPerMin)
+	}
+}
+
 func TestNormalizeFreshmileTariffsNoEvses(t *testing.T) {
 	if got := normalizeFreshmileTariffs(map[string]any{}); got != nil {
 		t.Errorf("normalizeFreshmileTariffs({}) = %v, want nil", got)

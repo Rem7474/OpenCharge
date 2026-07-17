@@ -781,31 +781,38 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 		return t
 	}
 
-	if price, lang, text, ok := freshmilePriceFromDescription(tariffRaw["description"]); ok {
+	// Try both a €/kWh price and a €/min rate rather than stopping at the
+	// first match: some Freshmile tariffs genuinely combine the two in one
+	// description (e.g. "0,50 € par kwh et 0,05 € par minute" — real
+	// production text), and a tariff that's actually per-minute-only would
+	// never even reach the session-price check if €/kWh matching returned
+	// early. Genuinely tiered/packaged descriptions ("6 € les 5 premières
+	// heures puis 2 € toutes les 15 minutes", "forfait de 2 € par 6 kWh")
+	// don't reduce to a single €/kWh or €/min figure and are deliberately
+	// left with both prices nil — both patterns require their unit word
+	// directly adjacent to the amount, which keeps them from latching onto
+	// an unrelated number in a tiered/packaged description.
+	price, lang, priceText, priceOK := freshmilePriceFromDescription(tariffRaw["description"])
+	sessionPrice, sessionText, sessionOK := freshmileSessionPriceFromDescription(tariffRaw["description"])
+	if !priceOK && !sessionOK {
+		log.Printf("freshmile: could not extract a €/kWh or €/min price from tariff %v description: %v", tariffRaw["id"], tariffRaw["description"])
+		return t
+	}
+	if priceOK {
 		t.EnergyPriceCentsPerKWh = price
 		extra["parsedLang"] = lang
-		extra["parsedText"] = text
+		extra["parsedText"] = priceText
 		extra["energyPriceEuro"] = *price / 100
-		return t
 	}
-
-	// Not priced by energy — some Freshmile tariffs are priced by time
-	// instead (a simple "0,40 € par minute" rate, or a tiered "6 € les 5
-	// premières heures puis 2 € toutes les 15 minutes" structure). The
-	// simple per-minute case is common enough to be worth extracting;
-	// tiered ones don't reduce to a single €/min figure and are
-	// deliberately left unmatched (both prices nil) rather than reporting
-	// a misleading number — freshmileSessionPricePattern's tight "par
-	// minute"/"/min" adjacency requirement already keeps it from
-	// accidentally matching a tiered description's trailing rate.
-	if sessionPrice, text, ok := freshmileSessionPriceFromDescription(tariffRaw["description"]); ok {
+	if sessionOK {
 		t.SessionPriceCentsPerMin = sessionPrice
-		t.Model = "freshmile_per_minute"
-		extra["parsedText"] = text
-		return t
+		if priceOK {
+			t.Model = "freshmile_kwh_and_per_minute"
+		} else {
+			t.Model = "freshmile_per_minute"
+			extra["parsedText"] = sessionText
+		}
 	}
-
-	log.Printf("freshmile: could not extract a €/kWh or €/min price from tariff %v description: %v", tariffRaw["id"], tariffRaw["description"])
 	return t
 }
 
@@ -815,7 +822,9 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 // alternative capture groups; the amount can use either a comma or dot
 // decimal separator. The separator between amount and "kWh" also varies:
 // "/" ("0,70 € / kWh"), or the word "par"/"per" ("0,25 € par kWh entamé").
-var freshmilePricePattern = regexp.MustCompile(`(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*(?:/|par|per)\s*(?:started\s+)?kWh`)
+// Case-insensitive: production text isn't consistent about capitalizing
+// "kWh" (e.g. "0,50 € par kwh" — lowercase — was silently unmatched before).
+var freshmilePricePattern = regexp.MustCompile(`(?i)(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*(?:/|par|per)\s*(?:started\s+)?kwh`)
 
 // freshmilePriceFromDescription extracts a €/kWh price (in cents) from a
 // Freshmile tariff's description field. Two shapes have been observed in
