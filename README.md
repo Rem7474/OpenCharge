@@ -17,7 +17,7 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
@@ -112,22 +112,25 @@ go run ./cmd/opencharge-ingest -source izivia     # stations + tarifs Izivia, co
 go run ./cmd/opencharge-ingest -source tesla      # Superchargers Tesla, corrélation
 go run ./cmd/opencharge-ingest -source freshmile  # stations + tarifs Freshmile, corrélation
 go run ./cmd/opencharge-ingest -source fastned    # tarifs fixes Fastned sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source all        # les six, dans cet ordre
+go run ./cmd/opencharge-ingest -source lidl       # tarif fixe Lidl sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source all        # les sept, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 `-electra-url`, `-tesla-url`, `-freshmile-url`, `-link-max-distance-m`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra, Izivia, Tesla, Freshmile et Fastned sont corrélés (pour
-Fastned, la "corrélation" est directe : ses stations sont déjà les lignes
-IRVE elles-mêmes, identifiées par `operator_name`/`enseigne` contenant
-"fastned" — voir `backend/internal/ingestion/fastned.go`).
+lequel Electra, Izivia, Tesla, Freshmile, Fastned et Lidl sont corrélés
+(pour Fastned et Lidl, la "corrélation" est directe : leurs stations sont
+déjà les lignes IRVE elles-mêmes, identifiées par `operator_name`/
+`enseigne` contenant "fastned"/"lidl" — voir
+`backend/internal/ingestion/fastned.go` et `lidl.go`).
 
-**Fastned n'a pas d'API de tarifs publique scrapable** : ses deux tarifs
-(0,61 €/kWh standard, 0,43 €/kWh abonné) sont des constantes fixes dans le
-code, à mettre à jour manuellement si Fastned change ses prix. Aucune
-requête réseau n'est faite pour ce run.
+**Fastned et Lidl n'ont pas d'API de tarifs publique scrapable** : leurs
+tarifs (Fastned : 0,61 €/kWh standard, 0,43 €/kWh abonné ; Lidl : 0,29 €/kWh
+unique, AC comme DC) sont des constantes fixes dans le code, à mettre à
+jour manuellement si l'un de ces réseaux change ses prix. Aucune requête
+réseau n'est faite pour ces deux runs.
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux

@@ -16,7 +16,7 @@ import (
 func main() {
 	var (
 		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, or all")
+		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, or all")
 		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
 		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
@@ -28,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, or all")
 	}
 
 	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
@@ -107,6 +107,16 @@ func main() {
 		}
 		log.Printf("fastned ingestion complete: %d stations", count)
 	}
+	runLidl := func() {
+		// Same shape as fastned: no source URL/config, just tags
+		// already-known IRVE stations — see lidl.go.
+		ingester := ingestion.NewLidlIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("lidl ingestion failed: %v", err)
+		}
+		log.Printf("lidl ingestion complete: %d stations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -121,18 +131,21 @@ func main() {
 		runFreshmile()
 	case "fastned":
 		runFastned()
+	case "lidl":
+		runLidl()
 	case "all":
 		// IRVE first: it's the canonical referential that electra/izivia/
-		// tesla/freshmile correlate against, and that fastned tags
-		// directly — so it must exist before fastned runs too.
+		// tesla/freshmile correlate against, and that fastned/lidl tag
+		// directly — so it must exist before those run too.
 		runIRVE()
 		runElectra()
 		runIzivia()
 		runTesla()
 		runFreshmile()
 		runFastned()
+		runLidl()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, or all", *source)
 	}
 }
 
