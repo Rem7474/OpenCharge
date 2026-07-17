@@ -1,8 +1,10 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +47,37 @@ func TestIziviaGetJSONRetriesOn5xxThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestIziviaPostJSONRetryLogUsesLabelNotJustURL pins the fix for a real
+// production observability gap: /map/markers has the same URL for every
+// grid square, so a retry/failure log keyed only on the URL is
+// indistinguishable from any other in-flight square's log line — there's
+// no way to tell which one actually failed. postJSON's label parameter
+// (distinct from the request URL) must be what shows up in the retry log.
+func TestIziviaPostJSONRetryLogUsesLabelNotJustURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, "bad gateway")
+	}))
+	defer srv.Close()
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(prevOutput)
+
+	ing := newTestIziviaIngester()
+	label := srv.URL + " (square centerLng=2.2 centerLat=46.2 zoom=7)"
+	_, err := ing.postJSON(context.Background(), srv.URL, label, map[string]any{"square": map[string]any{}})
+	if err == nil {
+		t.Fatal("postJSON = nil error, want an error after exhausting retries")
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "centerLng=2.2 centerLat=46.2") {
+		t.Errorf("retry log doesn't mention the square, got: %s", logged)
+	}
+}
+
 func TestIziviaPostJSONRetriesOnNetworkErrorThenSucceeds(t *testing.T) {
 	var requests int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +102,7 @@ func TestIziviaPostJSONRetriesOnNetworkErrorThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestIziviaIngester()
-	body, err := ing.postJSON(context.Background(), srv.URL, map[string]any{"square": map[string]any{}})
+	body, err := ing.postJSON(context.Background(), srv.URL, srv.URL, map[string]any{"square": map[string]any{}})
 	if err != nil {
 		t.Fatalf("postJSON: %v", err)
 	}

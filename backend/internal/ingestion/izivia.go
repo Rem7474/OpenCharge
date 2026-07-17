@@ -269,7 +269,8 @@ func (ing *IziviaIngester) fetchAndNormalizeMarker(ctx context.Context, marker m
 		return normalizedSourceStation{}, false, fmt.Errorf("marker without id")
 	}
 
-	stationBody, err := ing.postJSON(ctx, fmt.Sprintf("%s/charging-locations/%s", iziviaBaseURL, stationID), map[string]any{})
+	detailsURL := fmt.Sprintf("%s/charging-locations/%s", iziviaBaseURL, stationID)
+	stationBody, err := ing.postJSON(ctx, detailsURL, detailsURL, map[string]any{})
 	if err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("fetch station details: %w", err)
 	}
@@ -554,9 +555,18 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 			defer wg.Done()
 			for square := range squareCh {
 				payload := map[string]any{"square": square, "filters": map[string]any{}}
-				body, err := ing.postJSON(ctx, iziviaBaseURL+"/map/markers", payload)
+				markersURL := iziviaBaseURL + "/map/markers"
+				// /map/markers has the same URL for every square — only the
+				// payload distinguishes one request from another, so the
+				// label passed to postJSON (used in retry logs) must spell
+				// out the square explicitly. Without this, a page of retry
+				// logs (or the final failure below) is indistinguishable
+				// noise: no way to tell which of the many in-flight squares
+				// actually failed.
+				label := fmt.Sprintf("%s (square centerLng=%g centerLat=%g zoom=%d)", markersURL, square.CenterLng, square.CenterLat, square.Zoom)
+				body, err := ing.postJSON(ctx, markersURL, label, payload)
 				if err != nil {
-					log.Printf("izivia: markers square failed: %v", err)
+					log.Printf("izivia: markers square failed: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
 					continue
 				}
 				var markers []map[string]any
@@ -604,8 +614,16 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 	return all, nil
 }
 
-func (ing *IziviaIngester) postJSON(ctx context.Context, url string, payload map[string]any) ([]byte, error) {
-	return ing.withRetries(ctx, url, func() ([]byte, int, error) {
+// postJSON POSTs payload to url. label identifies this specific request in
+// retry/failure logs — for endpoints like /map/markers where the URL is
+// the same constant for every call (the request is distinguished only by
+// its payload, e.g. which grid square is being queried), passing just url
+// as the label makes every retry/failure log line indistinguishable from
+// any other in-flight request, exactly the "which POST is this?" problem
+// observed in production. Callers with a genuinely unique URL per request
+// (e.g. /charging-locations/{id}) can just pass url again as label.
+func (ing *IziviaIngester) postJSON(ctx context.Context, url, label string, payload map[string]any) ([]byte, error) {
+	return ing.withRetries(ctx, label, func() ([]byte, int, error) {
 		body, _ := json.Marshal(payload)
 		return ing.doRequest(ctx, http.MethodPost, url, strings.NewReader(string(body)))
 	})
@@ -622,13 +640,15 @@ func (ing *IziviaIngester) getJSON(ctx context.Context, url string) ([]byte, err
 // exponential backoff, same pattern as Freshmile's getJSON. do's int
 // return is the HTTP status (0 if the request never got a response at
 // all); a non-zero status below 500 is a definitive client error and
-// stops retrying immediately.
-func (ing *IziviaIngester) withRetries(ctx context.Context, url string, do func() ([]byte, int, error)) ([]byte, error) {
+// stops retrying immediately. label is only used for the retry log line
+// (see postJSON's comment on why it can differ from the request's actual
+// URL); the error doRequest returns always carries the real URL.
+func (ing *IziviaIngester) withRetries(ctx context.Context, label string, do func() ([]byte, int, error)) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= iziviaMaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := (1 << (attempt - 1)) * ing.retryBackoff
-			log.Printf("izivia: retrying %s in %v (attempt %d/%d) after: %v", url, backoff, attempt+1, iziviaMaxRetries+1, lastErr)
+			log.Printf("izivia: retrying %s in %v (attempt %d/%d) after: %v", label, backoff, attempt+1, iziviaMaxRetries+1, lastErr)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
