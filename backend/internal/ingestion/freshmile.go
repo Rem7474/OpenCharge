@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -393,6 +394,11 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 			})
 		}
 	}
+	// See the identical comment in izivia.go's fetchMarkers: without this,
+	// a chronically-timing-out run always gets cut off at the same tail end
+	// of this fixed south-to-north, west-to-east grid, so the same region
+	// of France goes stale run after run instead of the miss rotating.
+	rand.Shuffle(len(initial), func(i, j int) { initial[i], initial[j] = initial[j], initial[i] })
 
 	var (
 		mu   sync.Mutex

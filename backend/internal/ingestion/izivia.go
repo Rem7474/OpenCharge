@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -542,6 +543,18 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 			squares = append(squares, iziviaSquare{CenterLng: lng, CenterLat: lat, Zoom: zoom})
 		}
 	}
+	// The whole run has a hard overall timeout (see cmd/opencharge-ingest's
+	// -timeout), and squares used to always be fed to workers in this same
+	// fixed south-to-north, west-to-east order every run. A run that's
+	// chronically running behind (a slow API, lots of retries) always gets
+	// cut off at the same tail end of that fixed list — i.e. it's always
+	// the same geographic region (the far north of France, last in this
+	// order) that goes stale, run after run, rather than a timeout costing
+	// a different, rotating slice of coverage each time. Shuffling once per
+	// run means a recurring timeout still costs roughly the same *amount*
+	// of coverage, but spreads *which* region gets missed across runs
+	// instead of permanently starving one.
+	rand.Shuffle(len(squares), func(i, j int) { squares[i], squares[j] = squares[j], squares[i] })
 
 	// The grid scan is a small, fixed number of squares (tens, not
 	// thousands), but each is its own HTTP round trip: fan it out with a
