@@ -711,11 +711,36 @@ func (ing *IziviaIngester) doRequest(ctx context.Context, method, url string, bo
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		return nil, resp.StatusCode, fmt.Errorf("izivia http %d for %s: %s", resp.StatusCode, url, string(data))
+		return nil, resp.StatusCode, fmt.Errorf("izivia http %d for %s: %s", resp.StatusCode, url, errorBodySummary(data))
 	}
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("izivia read body from %s: %w", url, err)
 	}
 	return respBody, resp.StatusCode, nil
+}
+
+// errorBodySummary trims a non-2xx response body down to its first
+// non-empty line, capped to a sane length. Izivia's own 500s come back as a
+// full Kotlin/Java stack trace (exception class, then a "\tat ..." line per
+// frame) — every frame after the first is redundant for our purposes (we
+// don't control that backend and can't act on which line of Izivia's code
+// threw), but withRetries logs the full error on every retry attempt, so
+// keeping the whole trace multiplied a single 500 into a wall of repeated
+// stack frames across every attempt. The exception class/message on the
+// first line is already enough to tell "what kind of failure is this"
+// without reproducing the whole trace log after log after log.
+func errorBodySummary(body []byte) string {
+	const maxLen = 200
+	line := strings.TrimSpace(string(body))
+	if idx := strings.IndexAny(line, "\r\n"); idx >= 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
+	if len(line) > maxLen {
+		line = line[:maxLen] + "…"
+	}
+	if line == "" {
+		return "(empty body)"
+	}
+	return line
 }

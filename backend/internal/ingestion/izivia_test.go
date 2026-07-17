@@ -389,3 +389,32 @@ func TestNormalizeCountry(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorBodySummary(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"multi-line Java stack trace is cut to its first line",
+			"com.izivia.emobility.fronts.commons.exception.ExternalTechnicalProblemException: \n\tat com.izivia.emobility.api.impl.mbp.MbpClientHttpHandlerKt.checkOk(MbpClientHttpHandler.kt:55)\n\tat com.izivia.emobility.api.impl.mbp.MbpClientHttpHandlerKt.check(MbpClientHttpHandler.kt:65)",
+			"com.izivia.emobility.fronts.commons.exception.ExternalTechnicalProblemException:",
+		},
+		{"single-line body is kept as-is", "not found", "not found"},
+		{"empty body", "", "(empty body)"},
+		{"whitespace-only body", "   \n\n  ", "(empty body)"},
+		{
+			"a single line longer than the cap is truncated",
+			strings.Repeat("x", 250),
+			strings.Repeat("x", 200) + "…",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := errorBodySummary([]byte(c.body)); got != c.want {
+				t.Errorf("errorBodySummary(%q) = %q, want %q", c.body, got, c.want)
+			}
+		})
+	}
+}
