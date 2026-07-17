@@ -93,8 +93,14 @@ type FreshmileConfig struct {
 	Workers int
 }
 
+// DefaultFreshmileConfig: Workers=24. Each location costs one HTTP round
+// trip (GET /locations/{id}, unlike Izivia's two), so this is the same
+// kind of I/O-bound single-host fan-out as Izivia's worker count, just
+// tuned down a bit given how retry-heavy this API already is (see
+// freshmileMaxRetries) — too high a worker count would only mean more
+// requests piling up in backoff at once against the same flaky gateway.
 func DefaultFreshmileConfig() FreshmileConfig {
-	return FreshmileConfig{Workers: 8}
+	return FreshmileConfig{Workers: 24}
 }
 
 type FreshmileIngester struct {
@@ -115,7 +121,7 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 	}
 	workers := cfg.Workers
 	if workers <= 0 {
-		workers = 8
+		workers = 24
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = max(workers, freshmileScanWorkers)
@@ -143,8 +149,14 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // everything — discovery alone used to take the vast majority of a run's
 // wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
-	idCh := make(chan int, 100)
+	// Sized well above ingestionBulkChunkSize so a slow write-side flush
+	// (up to freshmileFlushTimeout) doesn't immediately start backing up
+	// into the scan goroutines trying to send discovered IDs (see
+	// scanLocationIDs) — it's slack, not a correctness requirement.
+	idCh := make(chan int, 500)
 	resultsCh := make(chan normalizedSourceStation)
+
+	var fetchedOK, fetchFailed int64
 
 	var scanWG sync.WaitGroup
 	scanWG.Add(1)
@@ -160,12 +172,14 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 		for id := range idCh {
 			item, ok, err := ing.fetchAndNormalizeLocation(ctx, id)
 			if err != nil {
+				atomic.AddInt64(&fetchFailed, 1)
 				log.Printf("freshmile: location %d failed: %v", id, err)
 				continue
 			}
 			if !ok {
 				continue
 			}
+			atomic.AddInt64(&fetchedOK, 1)
 			select {
 			case resultsCh <- item:
 			case <-ctx.Done():
@@ -176,7 +190,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 
 	workers := ing.Config.Workers
 	if workers <= 0 {
-		workers = 8
+		workers = 24
 	}
 	for i := 0; i < workers; i++ {
 		workerWG.Add(1)
@@ -187,7 +201,26 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 		close(resultsCh)
 	}()
 
+	// writeResults only logs when a batch actually flushes, so a fetch
+	// phase that's just slow (or backed up behind a flaky API) looks
+	// identical to a hung one in between flushes — this heartbeat gives a
+	// wall-clock signal regardless of whether anything's flushed yet.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(freshmileProgressLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				log.Printf("freshmile: fetch/write in progress, %d fetched ok, %d failed so far", atomic.LoadInt64(&fetchedOK), atomic.LoadInt64(&fetchFailed))
+			case <-heartbeatDone:
+				return
+			}
+		}
+	}()
+
 	processed, err := ing.writeResults(ctx, resultsCh)
+	close(heartbeatDone)
 	scanWG.Wait()
 
 	log.Printf("freshmile: done, %d locations processed", processed)
