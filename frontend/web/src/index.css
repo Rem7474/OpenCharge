@@ -95,6 +95,7 @@ a {
 .map-container {
   flex: 1;
   position: relative;
+  background: var(--color-border);
 }
 
 .map-container .leaflet-container {
@@ -106,9 +107,12 @@ a {
   width: 380px;
   max-width: 42vw;
   overflow-y: auto;
-  border-left: 1px solid var(--color-border);
-  padding: 16px;
+  margin: 12px 12px 12px 0;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  padding: 16px 18px;
   background: var(--color-bg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
 }
 
 .status-banner {
@@ -127,9 +131,14 @@ a {
 .close-btn {
   float: right;
   cursor: pointer;
-  border: none;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
   background: none;
-  font-size: 16px;
+  color: var(--color-text);
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  line-height: 1;
 }
 
 .about-page {
@@ -168,6 +177,18 @@ a {
   letter-spacing: 0.03em;
 }
 
+.onboarding-reopen-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  width: 30px;
+  height: 30px;
+  background: none;
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+
 .show-all-stations-toggle {
   display: flex;
   align-items: center;
@@ -176,13 +197,11 @@ a {
   cursor: pointer;
 }
 
-.operator-filter,
-.connector-filter {
+.operator-filter {
   position: relative;
 }
 
-.operator-filter-toggle,
-.connector-filter-toggle {
+.operator-filter-toggle {
   border: 1px solid var(--color-border);
   border-radius: 999px;
   padding: 4px 12px;
@@ -194,13 +213,11 @@ a {
   text-align: left;
 }
 
-.operator-filter-toggle[aria-expanded="true"],
-.connector-filter-toggle[aria-expanded="true"] {
+.operator-filter-toggle[aria-expanded="true"] {
   border-color: var(--color-accent);
 }
 
-.operator-filter-panel,
-.connector-filter-panel {
+.operator-filter-panel {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
@@ -222,8 +239,7 @@ a {
   margin-bottom: 6px;
 }
 
-.operator-filter-list,
-.connector-filter-list {
+.operator-filter-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -231,13 +247,11 @@ a {
   overflow-y: auto;
 }
 
-.operator-filter-list li,
-.connector-filter-list li {
+.operator-filter-list li {
   padding: 2px 0;
 }
 
-.operator-filter-list label,
-.connector-filter-list label {
+.operator-filter-list label {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -247,8 +261,7 @@ a {
   border-radius: 4px;
 }
 
-.operator-filter-list label:hover,
-.connector-filter-list label:hover {
+.operator-filter-list label:hover {
   background: rgba(128, 128, 128, 0.1);
 }
 
@@ -258,22 +271,136 @@ a {
   padding: 4px;
 }
 
-.min-power-input {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* --- Filter panel (floating "Filtrer par" card) --- */
+
+.filter-toggle-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 6px 16px;
   font-size: 13px;
-  padding: 6px 4px 2px;
-  margin-top: 4px;
-  border-top: 1px solid var(--color-border);
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  color: var(--color-text);
 }
 
-.min-power-input input {
-  width: 56px;
-  padding: 3px 6px;
+.filter-toggle-btn[aria-expanded="true"] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.filter-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 72px 16px 16px;
+  overflow-y: auto;
+}
+
+.filter-panel {
+  width: 100%;
+  max-width: 380px;
+  background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: 18px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.filter-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.filter-panel-header h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.filter-panel-body {
+  padding: 14px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.filter-section {
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.filter-section-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 8px;
+}
+
+.filter-section-label:not(:first-child) {
+  margin-top: 14px;
+}
+
+.filter-price-inputs {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
   font-size: 13px;
+}
+
+/* --- Power slider (discrete steps: 3 / 22 / 50 / 150 / 350+ kW) --- */
+
+.power-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+.power-slider-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--color-muted);
+  padding: 0 2px;
+}
+
+.power-slider-labels .active {
+  color: var(--color-accent);
+  font-weight: 700;
+}
+
+/* --- Connector type pills --- */
+
+.connector-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.connector-pill {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.connector-pill[aria-pressed="true"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
 }
 
 .price-mode-toggle {
@@ -309,14 +436,15 @@ a {
 /* --- Station marker price label --- */
 
 .price-marker {
-  background: #fff;
+  background: var(--color-bg);
+  color: var(--color-text);
   border: 2px solid var(--color-accent);
   border-radius: 999px;
-  padding: 2px 8px;
+  padding: 3px 10px;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 }
 
 .price-marker.no-price {
@@ -324,12 +452,24 @@ a {
   color: var(--color-muted);
 }
 
+.price-marker--low {
+  border-color: var(--color-accent);
+}
+
+.price-marker--mid {
+  border-color: var(--color-accent-mid);
+}
+
+.price-marker--high {
+  border-color: var(--color-accent-high);
+}
+
 /* --- Station detail --- */
 
 .station-price-block {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 14px;
+  padding: 12px 14px;
   margin-bottom: 10px;
 }
 
@@ -346,14 +486,15 @@ a {
 }
 
 .station-price-block .price {
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 700;
+  margin-top: 2px;
 }
 
 .tariff-row {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 10px;
+  border-radius: 14px;
+  padding: 12px 14px;
   margin-bottom: 10px;
 }
 
@@ -365,8 +506,9 @@ a {
 }
 
 .tariff-row .price {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
+  margin-top: 2px;
 }
 
 .tariff-row .raw-text {
@@ -428,7 +570,11 @@ a {
 }
 
 .hourly-price-chart-bar {
-  fill: var(--viz-series-1);
+  fill: var(--viz-baseline);
+}
+
+.hourly-price-chart-bar--now {
+  fill: var(--color-text);
 }
 
 .hourly-price-chart-baseline {
@@ -439,12 +585,107 @@ a {
 .hourly-price-chart-value {
   font-size: 9px;
   font-weight: 600;
+  fill: var(--viz-ink-secondary);
+}
+
+.hourly-price-chart-value--now {
   fill: var(--color-text);
 }
 
 .hourly-price-chart-label {
   font-size: 8px;
   fill: var(--viz-ink-muted);
+}
+
+/* --- Onboarding (operator/plan selection, full-page) --- */
+
+.onboarding-screen {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.onboarding-header {
+  padding: 24px 20px 8px;
+}
+
+.onboarding-header h2 {
+  margin: 0 0 8px;
+}
+
+.onboarding-header p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 520px;
+}
+
+.onboarding-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboarding-empty {
+  color: var(--color-muted);
+  font-size: 13.5px;
+}
+
+.onboarding-item {
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  padding: 4px 14px;
+}
+
+.onboarding-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  cursor: pointer;
+}
+
+.onboarding-item-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.onboarding-item .plan-selector {
+  margin: 0 0 10px;
+}
+
+.onboarding-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.onboarding-skip {
+  border: none;
+  background: none;
+  color: var(--color-muted);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.onboarding-continue {
+  border: none;
+  border-radius: 999px;
+  padding: 12px 20px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .visually-hidden {
@@ -465,22 +706,32 @@ a {
     --color-text: #f0f0f0;
     --color-border: #33363b;
     --color-muted: #9a9a9a;
+    /* Lightened vs. the light-mode values so the price-tier marker borders
+       (section 2, --color-accent-mid/--color-accent-high are only ever
+       used as borders, never as a button background) stay legible against
+       the dark background — the light-mode shades read as near-black on
+       #16181c. --color-accent is left unchanged: it's also used as a
+       button background with white text (.price-mode-toggle,
+       .plan-selector), and its existing shade already has adequate
+       contrast in both themes. */
+    --color-accent-mid: #fbbf24;
+    --color-accent-high: #f87171;
+    --color-gray: #6b7280;
   }
 }
 
 @media (max-width: 720px) {
   .sidebar {
     position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
     top: auto;
-    width: 100%;
+    width: auto;
     max-width: 100%;
     max-height: 60vh;
-    border-left: none;
-    border-top: 1px solid var(--color-border);
-    border-radius: 16px 16px 0 0;
-    padding-bottom: env(safe-area-inset-bottom, 16px);
+    margin: 0;
+    border-radius: 18px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }

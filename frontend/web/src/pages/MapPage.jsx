@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MapContainer, TileLayer } from "react-leaflet";
 import FilterBar from "../components/FilterBar.jsx";
 import StationMarkers from "../components/StationMarkers.jsx";
 import StationDetails from "../components/StationDetails.jsx";
+import OnboardingScreen from "../components/OnboardingScreen.jsx";
 import { PRICE_MODE_PER_KWH } from "../utils/pricing.js";
+import { readStoredFilters, writeStoredFilters } from "../utils/storage.js";
 
 const FRANCE_CENTER = [46.8, 2.5];
 const DEFAULT_CHARGE_KWH = 50;
@@ -31,7 +33,12 @@ const DEFAULT_FILTERS = {
 
 export default function MapPage() {
   const [selectedStationId, setSelectedStationId] = useState(null);
-  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState(() => readStoredFilters() ?? DEFAULT_FILTERS);
+  // Onboarding is shown automatically only the first time the app is
+  // opened (nothing persisted yet) — every later visit goes straight to
+  // the map, using whatever was saved. It stays reachable afterwards via
+  // a button in the filter bar (see onReopenOnboarding below).
+  const [showOnboarding, setShowOnboarding] = useState(() => readStoredFilters() == null);
   const [priceMode, setPriceMode] = useState(PRICE_MODE_PER_KWH);
   const [chargeKWh, setChargeKWh] = useState(DEFAULT_CHARGE_KWH);
   // How long the charging session lasts, in minutes — feeds a tariff's
@@ -67,6 +74,27 @@ export default function MapPage() {
     setFilters((prev) => ({ ...prev, sources: { ...prev.sources, [sourceId]: planId } }));
   };
 
+  // Mirrors every filter change to localStorage, not just the onboarding
+  // step, so later adjustments made from FilterBar also survive a reload.
+  useEffect(() => {
+    writeStoredFilters(filters);
+  }, [filters]);
+
+  const completeOnboarding = (sources) => {
+    setFilters((prev) => ({ ...prev, sources }));
+    setShowOnboarding(false);
+  };
+
+  if (showOnboarding) {
+    return (
+      <OnboardingScreen
+        initialSources={filters.sources}
+        onComplete={completeOnboarding}
+        onSkip={() => setShowOnboarding(false)}
+      />
+    );
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <FilterBar
@@ -85,6 +113,7 @@ export default function MapPage() {
         onToggleConnectorType={toggleConnectorType}
         minPowerKw={filters.minPowerKw}
         onChangeMinPowerKw={setMinPowerKw}
+        onReopenOnboarding={() => setShowOnboarding(true)}
       />
       <div className="app-body" style={{ flex: 1 }}>
         <div className="map-container">

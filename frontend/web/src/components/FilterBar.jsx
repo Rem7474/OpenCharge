@@ -1,97 +1,38 @@
-import OperatorFilter from "./OperatorFilter.jsx";
-import ConnectorFilter from "./ConnectorFilter.jsx";
-import { PRICE_MODE_PER_KWH, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
+import { useState } from "react";
+import FilterPanel from "./FilterPanel.jsx";
 
-export default function FilterBar({
-  selectedSources,
-  onToggleSource,
-  onSelectPlan,
-  priceMode,
-  onChangePriceMode,
-  chargeKWh,
-  onChangeChargeKWh,
-  chargeMinutes,
-  onChangeChargeMinutes,
-  showAllStations,
-  onChangeShowAllStations,
-  selectedConnectorTypes,
-  onToggleConnectorType,
-  minPowerKw,
-  onChangeMinPowerKw,
-}) {
+/**
+ * Top bar: a single "Filtrer" toggle that opens the floating FilterPanel
+ * (grouping every station-list filter), plus the onboarding re-open
+ * shortcut. All the actual filter props are just forwarded to FilterPanel.
+ */
+export default function FilterBar(props) {
+  const { selectedSources, selectedConnectorTypes, minPowerKw, showAllStations, onReopenOnboarding } = props;
+  const [open, setOpen] = useState(false);
+
+  const activeCount =
+    Object.keys(selectedSources).length +
+    selectedConnectorTypes.length +
+    (minPowerKw != null ? 1 : 0) +
+    (showAllStations ? 1 : 0);
+
   return (
     <div className="filter-bar">
-      <div className="filter-group">
-        <span className="filter-label">Réseaux</span>
-        <OperatorFilter selectedSources={selectedSources} onToggleSource={onToggleSource} onSelectPlan={onSelectPlan} />
-      </div>
-
-      <div className="filter-group">
-        <span className="filter-label">Connecteurs</span>
-        <ConnectorFilter
-          selectedConnectorTypes={selectedConnectorTypes}
-          onToggleConnectorType={onToggleConnectorType}
-          minPowerKw={minPowerKw}
-          onChangeMinPowerKw={onChangeMinPowerKw}
-        />
-      </div>
-
-      <div className="filter-group">
-        <span className="filter-label">Prix</span>
-        <div className="price-mode-toggle" role="group" aria-label="Mode d'affichage du prix">
-          <button
-            type="button"
-            aria-pressed={priceMode === PRICE_MODE_PER_KWH}
-            onClick={() => onChangePriceMode(PRICE_MODE_PER_KWH)}
-          >
-            €/kWh
-          </button>
-          <button
-            type="button"
-            aria-pressed={priceMode === PRICE_MODE_RECHARGE}
-            onClick={() => onChangePriceMode(PRICE_MODE_RECHARGE)}
-          >
-            Recharge
-          </button>
-        </div>
-        {priceMode === PRICE_MODE_RECHARGE && (
-          <>
-            <label>
-              <input
-                type="number"
-                min={1}
-                max={200}
-                className="kwh-input"
-                value={chargeKWh}
-                onChange={(e) => onChangeChargeKWh(Number(e.target.value))}
-              />{" "}
-              kWh
-            </label>
-            <label>
-              <input
-                type="number"
-                min={1}
-                max={1440}
-                className="minutes-input"
-                value={chargeMinutes}
-                onChange={(e) => onChangeChargeMinutes(Number(e.target.value))}
-              />{" "}
-              min de charge
-            </label>
-          </>
-        )}
-      </div>
-
-      <div className="filter-group">
-        <label className="show-all-stations-toggle">
-          <input
-            type="checkbox"
-            checked={showAllStations}
-            onChange={(e) => onChangeShowAllStations(e.target.checked)}
-          />
-          Toutes les bornes IRVE (même sans prix)
-        </label>
-      </div>
+      <button type="button" className="filter-toggle-btn" onClick={() => setOpen(true)} aria-expanded={open}>
+        Filtrer{activeCount > 0 ? ` · ${activeCount}` : ""}
+      </button>
+      {onReopenOnboarding && (
+        <button
+          type="button"
+          className="onboarding-reopen-btn"
+          onClick={onReopenOnboarding}
+          aria-label="Configurer mes opérateurs"
+          title="Configurer mes opérateurs"
+        >
+          ⚙
+        </button>
+      )}
+      {open && <FilterPanel {...props} onClose={() => setOpen(false)} />}
     </div>
   );
 }

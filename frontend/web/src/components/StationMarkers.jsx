@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { fetchStationsInBBox } from "../api/stations.js";
-import { pickPriceCentsPerKWh, formatPrice, sourcePlanPairs } from "../utils/pricing.js";
+import { pickPriceCentsPerKWh, formatPrice, priceTier, sourcePlanPairs } from "../utils/pricing.js";
 
 const MIN_ZOOM_TO_LOAD = 10;
 
@@ -10,10 +10,11 @@ function boundsToBBox(bounds) {
   return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
 }
 
-function priceIcon(label, hasPrice) {
+function priceIcon(label, hasPrice, tier) {
+  const tierClass = hasPrice && tier ? ` price-marker--${tier}` : "";
   return L.divIcon({
     className: "",
-    html: `<div class="price-marker${hasPrice ? "" : " no-price"}">${label}</div>`,
+    html: `<div class="price-marker${hasPrice ? "" : " no-price"}${tierClass}">${label}</div>`,
     iconSize: null,
   });
 }
@@ -81,12 +82,13 @@ export default function StationMarkers({
         const pricing = hasSelection ? station.selectedSourcesPricing : station.pricingSummary;
         const priceCents = pickPriceCentsPerKWh(pricing, connectorType);
         const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
+        const tier = priceTier(priceCents);
 
         return (
           <Marker
             key={station.id}
             position={[station.location.lat, station.location.lng]}
-            icon={priceIcon(label, priceCents != null)}
+            icon={priceIcon(label, priceCents != null, tier)}
             eventHandlers={{ click: () => onSelect(station.id) }}
           >
             <Popup>
