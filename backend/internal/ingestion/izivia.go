@@ -50,6 +50,10 @@ func DefaultIziviaConfig() IziviaConfig {
 	return IziviaConfig{Workers: 40, GridStep: 2.0, Zoom: 7}
 }
 
+// iziviaFlushTimeout bounds how long a single batch write is allowed to
+// take — same rationale and value as Freshmile's freshmileFlushTimeout.
+const iziviaFlushTimeout = 2 * time.Minute
+
 // newIziviaHTTPClient returns a client whose transport allows enough
 // concurrent connections to fronts-map.izivia.com to actually make worker
 // concurrency effective. http.DefaultTransport's MaxIdleConnsPerHost is 2:
@@ -181,7 +185,17 @@ func (ing *IziviaIngester) writeResults(ctx context.Context, resultsCh <-chan no
 		if len(batch) == 0 {
 			return nil
 		}
-		n, err := writeSourceStationChunk(ctx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
+		// Decoupled from ctx (context.WithoutCancel), same as Freshmile's
+		// writeResults: this batch is already fully collected in memory by
+		// this point, so once we've committed to writing it, the run's own
+		// -timeout or a SIGINT landing mid-query shouldn't be able to abort
+		// it. Without this, a deadline expiring right at (or just before) a
+		// flush silently drops that whole batch — already-fetched stations
+		// that never make it to the database — instead of just ending the
+		// run one batch earlier.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iziviaFlushTimeout)
+		defer cancel()
+		n, err := writeSourceStationChunk(writeCtx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, batch)
 		processed += n
 		batch = batch[:0]
 		if err != nil {

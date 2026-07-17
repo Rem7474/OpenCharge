@@ -54,12 +54,16 @@ const freshmileScanWorkers = 16
 // run's own ctx — see there for why.
 const freshmileFlushTimeout = 2 * time.Minute
 
-// freshmileProgressLogInterval controls how often fetchAllLocationIDs logs
-// progress while it scans — the discovery phase is a long, purely
-// sequential run of map-locations calls with no other visible activity,
-// so without periodic logging a slow-but-healthy run is indistinguishable
-// from a hang.
-const freshmileProgressLogInterval = 200
+// freshmileProgressLogInterval controls how often scanLocationIDs logs
+// progress while it scans, on a wall-clock ticker rather than a tile
+// count — the discovery phase's tile count can advance in bursts (a big
+// cluster subdivides into many quick sibling requests) or stall for a
+// while (a dense area recursing deeply, or several workers retrying at
+// once), so a fixed "every N tiles" interval leaves long silent stretches
+// where a slow-but-healthy run is indistinguishable from a hung one. A
+// wall-clock heartbeat guarantees a log line on a predictable cadence
+// regardless of how the tile count is moving.
+const freshmileProgressLogInterval = 10 * time.Second
 
 // freshmileMinBBoxDegrees is the minimum width/height a map-locations
 // query bbox is padded out to (~100m at French latitudes). Freshmile's API
@@ -245,7 +249,7 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 // (GET /locations/{id}, then normalization) without touching the
 // database — writes are batched separately, see Run.
 func (ing *FreshmileIngester) fetchAndNormalizeLocation(ctx context.Context, id int) (normalizedSourceStation, bool, error) {
-	body, err := ing.getJSON(ctx, fmt.Sprintf("%s/locations/%d", ing.BaseURL, id))
+	body, err := ing.getJSON(ctx, fmt.Sprintf("%s/locations/%d", ing.BaseURL, id), nil)
 	if err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("fetch location details: %w", err)
 	}
@@ -284,11 +288,17 @@ type freshmileBBox struct {
 // clustered) branch is dropped rather than recursed into forever. Network
 // errors on one tile are logged and skipped, not fatal.
 //
-// The scan tree is fanned out across goroutines (bounded by
-// freshmileScanWorkers via a semaphore) rather than walked sequentially:
-// discovery used to take the vast majority of a run's wall-clock time
-// while producing nothing durable, so both scanning itself and (via
-// idCh) the detail-fetch/write phase that consumes it now overlap.
+// The scan tree is fanned out across goroutines rather than walked
+// sequentially: discovery used to take the vast majority of a run's
+// wall-clock time while producing nothing durable, so both scanning
+// itself and (via idCh) the detail-fetch/write phase that consumes it now
+// overlap. Concurrency is bounded by freshmileScanWorkers via a
+// semaphore, but the semaphore only wraps each individual HTTP attempt
+// (see getJSON) — never the retry backoff sleep, nor feature processing,
+// nor the idCh send below — so a tile that's retrying or a scan()
+// blocked handing an ID to a slow write side doesn't tie up one of the
+// limited concurrent-request slots while it isn't actually using the
+// network.
 func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- int) {
 	const step = 2.0
 	minLng, maxLng := -5.5, 9.8
@@ -312,6 +322,23 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 	sem := make(chan struct{}, freshmileScanWorkers)
 	var wg sync.WaitGroup
 
+	logDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(freshmileProgressLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				mu.Lock()
+				found := len(seen)
+				mu.Unlock()
+				log.Printf("freshmile: scanning map-locations, %d tiles visited so far, %d locations found", atomic.LoadInt64(&visited), found)
+			case <-logDone:
+				return
+			}
+		}
+	}()
+
 	var scan func(bbox freshmileBBox, depth int)
 	scan = func(bbox freshmileBBox, depth int) {
 		defer wg.Done()
@@ -319,10 +346,7 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 			return
 		}
 
-		sem <- struct{}{}
-		defer func() { <-sem }()
-
-		n := atomic.AddInt64(&visited, 1)
+		atomic.AddInt64(&visited, 1)
 
 		// A cluster's own reported bbox can collapse to a single point on
 		// one axis (real data: e.g. several stations at the exact same
@@ -332,14 +356,7 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 		// cluster subdivision.
 		bbox = padDegenerateBBox(bbox)
 
-		if n == 1 || n%freshmileProgressLogInterval == 0 {
-			mu.Lock()
-			found := len(seen)
-			mu.Unlock()
-			log.Printf("freshmile: scanning map-locations, %d tiles visited so far, %d locations found", n, found)
-		}
-
-		features, err := ing.fetchMapLocations(ctx, bbox)
+		features, err := ing.fetchMapLocations(ctx, bbox, sem)
 		if err != nil {
 			log.Printf("freshmile: map-locations bbox %+v failed: %v", bbox, err)
 			return
@@ -392,6 +409,7 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 		go scan(tile, 0)
 	}
 	wg.Wait()
+	close(logDone)
 
 	log.Printf("freshmile: discovery done, %d unique locations across %d map-locations tiles visited", len(seen), atomic.LoadInt64(&visited))
 }
@@ -429,10 +447,10 @@ func subdivideBBox(b freshmileBBox) []freshmileBBox {
 	}
 }
 
-func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox) ([]map[string]any, error) {
+func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox, sem chan struct{}) ([]map[string]any, error) {
 	url := fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
 		ing.BaseURL, bbox.MinLng, bbox.MinLat, bbox.MaxLng, bbox.MaxLat, freshmileZoom)
-	body, err := ing.getJSON(ctx, url)
+	body, err := ing.getJSON(ctx, url, sem)
 	if err != nil {
 		return nil, err
 	}
@@ -463,7 +481,13 @@ func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshm
 // instead of linear.
 const freshmileMaxRetries = 5
 
-func (ing *FreshmileIngester) getJSON(ctx context.Context, url string) ([]byte, error) {
+// getJSON performs a GET with retry/backoff on transient failures. sem, if
+// non-nil, bounds how many of these requests run concurrently across all
+// callers sharing it (see scanLocationIDs) — it's acquired and released
+// around each individual attempt in doGet, not around the whole retry
+// loop, so a request that's sleeping between retries gives up its slot
+// instead of holding it idle for up to freshmileMaxRetries backoffs.
+func (ing *FreshmileIngester) getJSON(ctx context.Context, url string, sem chan struct{}) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= freshmileMaxRetries; attempt++ {
 		if attempt > 0 {
@@ -476,7 +500,7 @@ func (ing *FreshmileIngester) getJSON(ctx context.Context, url string) ([]byte, 
 			}
 		}
 
-		body, status, err := ing.doGet(ctx, url)
+		body, status, err := ing.doGet(ctx, url, sem)
 		if err == nil {
 			return body, nil
 		}
@@ -493,7 +517,16 @@ func (ing *FreshmileIngester) getJSON(ctx context.Context, url string) ([]byte, 
 // doGet performs a single GET, always including the full URL in any
 // returned error so a failure is directly reproducible (e.g. via curl)
 // without having to reconstruct it from a bbox or id logged separately.
-func (ing *FreshmileIngester) doGet(ctx context.Context, url string) ([]byte, int, error) {
+// sem, if non-nil, is acquired for the duration of this one attempt only.
+func (ing *FreshmileIngester) doGet(ctx context.Context, url string, sem chan struct{}) ([]byte, int, error) {
+	if sem != nil {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+		defer func() { <-sem }()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("build request for %s: %w", url, err)

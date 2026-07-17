@@ -394,7 +394,7 @@ func TestGetJSONRetriesOn5xxThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestFreshmileIngester(srv.URL)
-	body, err := ing.getJSON(context.Background(), srv.URL)
+	body, err := ing.getJSON(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatalf("getJSON: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestGetJSONDoesNotRetryOn4xx(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestFreshmileIngester(srv.URL)
-	_, err := ing.getJSON(context.Background(), srv.URL)
+	_, err := ing.getJSON(context.Background(), srv.URL, nil)
 	if err == nil {
 		t.Fatal("getJSON = nil error, want an error for a 404")
 	}
@@ -441,7 +441,7 @@ func TestGetJSONGivesUpAfterMaxRetries(t *testing.T) {
 	defer srv.Close()
 
 	ing := newTestFreshmileIngester(srv.URL)
-	_, err := ing.getJSON(context.Background(), srv.URL)
+	_, err := ing.getJSON(context.Background(), srv.URL, nil)
 	if err == nil {
 		t.Fatal("getJSON = nil error, want an error after exhausting retries")
 	}
