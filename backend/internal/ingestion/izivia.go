@@ -107,6 +107,20 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("izivia: %d unique markers found", len(markers))
 
+	// pipelineCtx governs the marker-feeding loop below and the fetch
+	// workers. writeResults runs concurrently in its own goroutine and can
+	// return early on a flush error, well before every marker has been fed
+	// in — at that point nobody is left to drain resultsCh (workers) or
+	// markerCh (the feeding loop below), and neither is watching plain ctx
+	// (which is still perfectly valid; only the write side gave up). Without
+	// an explicit cancel here, both sides block forever instead of Run()
+	// returning the real error — that's the "context deadline exceeded" /
+	// unrecoverable-crash failure mode this once produced, except with a
+	// write error instead of a timeout it wouldn't even print anything, it
+	// would just hang.
+	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
+	defer cancelPipeline()
+
 	markerCh := make(chan map[string]any)
 	resultsCh := make(chan normalizedSourceStation)
 	var wg sync.WaitGroup
@@ -114,7 +128,7 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	worker := func() {
 		defer wg.Done()
 		for marker := range markerCh {
-			item, ok, err := ing.fetchAndNormalizeMarker(ctx, marker)
+			item, ok, err := ing.fetchAndNormalizeMarker(pipelineCtx, marker)
 			if err != nil {
 				stationID, _ := marker["id"].(string)
 				log.Printf("izivia: station %s failed: %v", stationID, err)
@@ -125,7 +139,7 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 			}
 			select {
 			case resultsCh <- item:
-			case <-ctx.Done():
+			case <-pipelineCtx.Done():
 				return
 			}
 		}
@@ -154,19 +168,24 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 			processed int
 			err       error
 		}{processed, err}
+		// Whether writeResults finished normally or bailed out early on a
+		// flush error, cancel the pipeline so the feeding loop and any
+		// worker still blocked sending unblock instead of leaking forever.
+		cancelPipeline()
 	}()
 
-	var firstErr error
+feedLoop:
 	for _, marker := range markers {
 		select {
 		case markerCh <- marker:
-		case <-ctx.Done():
-			firstErr = ctx.Err()
+		case <-pipelineCtx.Done():
+			break feedLoop
 		}
 	}
 	close(markerCh)
 
 	result := <-writeDone
+	firstErr := ctx.Err()
 	if firstErr == nil {
 		firstErr = result.err
 	}

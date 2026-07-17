@@ -149,6 +149,22 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // everything — discovery alone used to take the vast majority of a run's
 // wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
+	// pipelineCtx (not ctx directly) governs scanLocationIDs and the
+	// detail-fetch workers, so that once writeResults returns — whether
+	// because the pipeline finished normally or because a flush failed —
+	// we can force those two stages to unwind via cancelPipeline below.
+	// Without this, a write error ends writeResults early while workers
+	// are still blocked sending to resultsCh (nobody left to read it) and
+	// scan goroutines are still blocked sending to idCh (workers stopped
+	// draining it): neither side has any reason tied to ctx alone to give
+	// up, since ctx itself hasn't been canceled — only the write side
+	// has stopped consuming. That leaks every remaining goroutine forever
+	// and, worse, wedges Run() itself on scanWG.Wait() below (scanLocationIDs
+	// can never return while its goroutines are stuck), so the real error
+	// from flush() never makes it back to the caller to be logged.
+	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
+	defer cancelPipeline()
+
 	// Sized well above ingestionBulkChunkSize so a slow write-side flush
 	// (up to freshmileFlushTimeout) doesn't immediately start backing up
 	// into the scan goroutines trying to send discovered IDs (see
@@ -163,14 +179,14 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	go func() {
 		defer scanWG.Done()
 		defer close(idCh)
-		ing.scanLocationIDs(ctx, idCh)
+		ing.scanLocationIDs(pipelineCtx, idCh)
 	}()
 
 	var workerWG sync.WaitGroup
 	worker := func() {
 		defer workerWG.Done()
 		for id := range idCh {
-			item, ok, err := ing.fetchAndNormalizeLocation(ctx, id)
+			item, ok, err := ing.fetchAndNormalizeLocation(pipelineCtx, id)
 			if err != nil {
 				atomic.AddInt64(&fetchFailed, 1)
 				log.Printf("freshmile: location %d failed: %v", id, err)
@@ -182,7 +198,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 			atomic.AddInt64(&fetchedOK, 1)
 			select {
 			case resultsCh <- item:
-			case <-ctx.Done():
+			case <-pipelineCtx.Done():
 				return
 			}
 		}
@@ -221,7 +237,15 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 
 	processed, err := ing.writeResults(ctx, resultsCh)
 	close(heartbeatDone)
+	// Whether writeResults finished normally (resultsCh closed once
+	// discovery+fetch both ran dry) or bailed out early on a flush error,
+	// nothing is going to read resultsCh or drain idCh from here on — cancel
+	// pipelineCtx so any worker/scan goroutine still blocked sending to one
+	// of them unblocks via its ctx.Done() case instead of leaking forever
+	// (see the comment above pipelineCtx's declaration).
+	cancelPipeline()
 	scanWG.Wait()
+	workerWG.Wait()
 
 	log.Printf("freshmile: done, %d locations processed", processed)
 	return processed, err
