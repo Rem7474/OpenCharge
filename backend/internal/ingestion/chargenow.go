@@ -35,11 +35,17 @@ const (
 // differs between /query ("clusters", confirmed against a real response)
 // and /tariffs/.../prices (unverified — see doRequest's comment).
 var chargenowHeaders = map[string]string{
-	"Accept":       "application/json, text/plain, */*",
-	"Content-Type": "application/json",
-	"Origin":       "https://chargenow.com",
-	"Referer":      "https://chargenow.com/web/fr/cn-fr/map",
-	"rest-api-path": "clusters",
+	"accept": "application/json, text/plain, */*",
+    "accept-language": "fr,fr-FR;q=0.9,en;q=0.8",
+    "content-type": "application/json",
+    "cookie": "CN_ALLOW_FUNCTIONAL_COOKIES_2=false; CN_ALLOW_GOOGLE_MAPS=true",
+    "dnt": "1",
+    "origin": "https://chargenow.com",
+    "referer": "https://chargenow.com/web/fr/cn-fr/map",
+    "rest-api-path": "clusters",  # header clé pour passer le WAF
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
 	"User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
 
