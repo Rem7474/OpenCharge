@@ -358,6 +358,20 @@ npm run cap:ios       # + ouvre Xcode (macOS uniquement)
 Build et publication sur les stores nécessitent Android Studio/Gradle ou
 Xcode en local — hors périmètre de ce dépôt/CI pour l'instant.
 
+Contrairement au déploiement navigateur/Docker ci-dessus, la coquille
+Capacitor (WebView native) n'a pas d'origine de page contre laquelle
+résoudre un chemin relatif comme `/api` : `cap:sync` a donc besoin d'une
+URL absolue. C'est le rôle de `frontend/web/.env.production` (chargé
+automatiquement par `vite build`, donc par `cap:sync`/`cap:android`/
+`cap:ios` — sans effet sur le build Docker, qui fixe `VITE_API_BASE_URL`
+explicitement en argument de build) :
+
+```
+VITE_API_BASE_URL=https://opencharge.remcorp.fr/api
+```
+
+soit l'instance hébergée à <https://opencharge.remcorp.fr>.
+
 ## Sources
 
 - IRVE (Etalab, consolidé) : GeoJSON republié par transport.data.gouv.fr
