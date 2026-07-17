@@ -31,7 +31,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # @capacitor/cli 8.x refuses to run below Node 22 ("cap sync"
+          # below fails outright on 20, unlike plain vite build/lint in
+          # frontend.yml which doesn't touch the Capacitor CLI).
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/web/package-lock.json
 
