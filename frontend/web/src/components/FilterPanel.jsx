@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { SlidersHorizontal, Radio, Zap, Euro, X } from "lucide-react";
+import { SlidersHorizontal, Radio, Zap, Euro, X, RotateCcw } from "lucide-react";
 import OperatorFilter from "./OperatorFilter.jsx";
 import ConnectorFilter from "./ConnectorFilter.jsx";
 import { PRICE_MODE_PER_KWH, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
@@ -29,6 +29,7 @@ export default function FilterPanel({
   minPowerKw,
   onChangeMinPowerKw,
   onClose,
+  onResetFilters,
 }) {
   const panelRef = useRef(null);
 
@@ -132,6 +133,12 @@ export default function FilterPanel({
             Toutes les bornes IRVE (même sans prix)
           </label>
         </section>
+      </div>
+
+      <div className="filter-panel-footer">
+        <button type="button" className="filter-reset-btn" onClick={onResetFilters}>
+          <RotateCcw size={13} strokeWidth={2.2} /> Réinitialiser les filtres
+        </button>
       </div>
     </div>
   );

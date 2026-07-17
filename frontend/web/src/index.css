@@ -103,16 +103,26 @@ a {
   width: 100%;
 }
 
+/* Floats over the map (top-right — mirrors .filter-panel's left dock),
+   sized to its own content instead of stretching to the map's full
+   height: it used to be a flex sibling of .map-container inside
+   .app-body, which forced it to stretch full-height (align-self: stretch,
+   the flex default) and leave a block of plain background below whatever
+   content it actually had. */
 .sidebar {
+  position: fixed;
+  top: 68px;
+  right: 12px;
+  z-index: 1150;
   width: 380px;
-  max-width: 42vw;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 80px);
   overflow-y: auto;
-  margin: 12px 12px 12px 0;
   border: 1px solid var(--color-border);
   border-radius: 18px;
   padding: 16px 18px;
   background: var(--color-bg);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
 }
 
 .status-banner {
@@ -217,34 +227,67 @@ a {
   border-color: var(--color-accent);
 }
 
-.operator-filter-panel {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 1100;
+/* Centered floating overlay (backdrop + modal card) — a full network
+   picker, not a small anchored dropdown. */
+.operator-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.operator-panel {
+  width: 100%;
+  max-width: 400px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  width: 240px;
-  padding: 8px;
+  border-radius: 18px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.operator-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.operator-panel-header h3 {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.operator-panel-body {
+  padding: 12px 16px 16px;
+  overflow-y: auto;
 }
 
 .operator-filter-search {
   width: 100%;
-  padding: 5px 8px;
+  padding: 8px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 13px;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
 }
 
 .operator-filter-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 220px;
-  overflow-y: auto;
 }
 
 .operator-filter-list li {
@@ -296,7 +339,7 @@ a {
 .filter-panel {
   position: fixed;
   top: 68px;
-  right: 12px;
+  left: 12px;
   z-index: 1150;
   width: 340px;
   max-width: calc(100vw - 24px);
@@ -311,14 +354,18 @@ a {
 }
 
 @media (max-width: 720px) {
+  /* A full-width bar docked under the header, not a floating card — the
+     station detail panel is the one that owns the bottom of the screen on
+     mobile (see .sidebar's own mobile override), so the filter panel takes
+     the top instead of stacking underneath it. */
   .filter-panel {
-    top: auto;
-    bottom: 8px;
+    top: 60px;
     left: 8px;
     right: 8px;
+    bottom: auto;
     width: auto;
     max-width: 100%;
-    max-height: 70vh;
+    max-height: calc(100vh - 76px);
   }
 }
 
@@ -351,6 +398,33 @@ a {
   background: rgba(128, 128, 128, 0.06);
   border-radius: 14px;
   padding: 12px 14px;
+}
+
+.filter-panel-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.filter-reset-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  color: var(--color-text);
+}
+
+.filter-reset-btn:hover {
+  border-color: var(--color-accent-high);
+  color: var(--color-accent-high);
 }
 
 .filter-section-label {

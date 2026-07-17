@@ -74,6 +74,8 @@ export default function MapPage() {
     setFilters((prev) => ({ ...prev, sources: { ...prev.sources, [sourceId]: planId } }));
   };
 
+  const resetFilters = () => setFilters(DEFAULT_FILTERS);
+
   // Mirrors every filter change to localStorage, not just the onboarding
   // step, so later adjustments made from FilterBar also survive a reload.
   useEffect(() => {
@@ -114,6 +116,7 @@ export default function MapPage() {
         minPowerKw={filters.minPowerKw}
         onChangeMinPowerKw={setMinPowerKw}
         onReopenOnboarding={() => setShowOnboarding(true)}
+        onResetFilters={resetFilters}
       />
       <div className="app-body" style={{ flex: 1 }}>
         <div className="map-container">
