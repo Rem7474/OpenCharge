@@ -9,48 +9,68 @@ const FRANCE_CENTER = [46.8, 2.5];
 const DEFAULT_CHARGE_KWH = 50;
 const DEFAULT_CHARGE_MINUTES = 60;
 
+// Every piece of state here determines *which stations get fetched*
+// (see StationMarkers' fetchStationsInBBox call) — grouped into one object
+// with one setter instead of a separate useState per field, so each new
+// station-list filter (this one added a connector-type list and a min-power
+// value on top of the existing source selection) doesn't mean yet another
+// pair of props threaded through FilterBar/StationMarkers. priceMode/
+// chargeKWh/chargeMinutes stay separate: they're display/computation
+// settings that never change which stations come back from the API.
+const DEFAULT_FILTERS = {
+  // { sourceId: planId }, e.g. { electra: "subscription", izivia: "standard" }.
+  sources: {},
+  connectorTypes: [],
+  minPowerKw: null,
+  // Off by default (only priced stations shown): the IRVE referential has
+  // many more stations than ones we've matched a price for, and showing
+  // every one by default would bury the priced ones a user is here to
+  // compare.
+  showAllStations: false,
+};
+
 export default function MapPage() {
   const [selectedStationId, setSelectedStationId] = useState(null);
-  // { sourceId: planId }, e.g. { electra: "subscription", izivia: "standard" }.
-  const [selectedSources, setSelectedSources] = useState({});
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [priceMode, setPriceMode] = useState(PRICE_MODE_PER_KWH);
   const [chargeKWh, setChargeKWh] = useState(DEFAULT_CHARGE_KWH);
   // How long the charging session lasts, in minutes — feeds a tariff's
   // per-minute rate and any flat session fee (see utils/pricing.js#
   // tariffCostBreakdown), alongside chargeKWh for the energy cost.
   const [chargeMinutes, setChargeMinutes] = useState(DEFAULT_CHARGE_MINUTES);
-  // Off by default (only priced stations shown, today's behavior): the
-  // IRVE referential has many more stations than ones we've matched a
-  // price for, and showing every one of them by default would bury the
-  // priced ones a user is actually here to compare.
-  const [showAllStations, setShowAllStations] = useState(false);
-  const [selectedConnectorTypes, setSelectedConnectorTypes] = useState([]);
-  const [minPowerKw, setMinPowerKw] = useState(null);
 
   const toggleConnectorType = (type) => {
-    setSelectedConnectorTypes((prev) => (prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]));
+    setFilters((prev) => ({
+      ...prev,
+      connectorTypes: prev.connectorTypes.includes(type)
+        ? prev.connectorTypes.filter((t) => t !== type)
+        : [...prev.connectorTypes, type],
+    }));
   };
 
+  const setMinPowerKw = (minPowerKw) => setFilters((prev) => ({ ...prev, minPowerKw }));
+  const setShowAllStations = (showAllStations) => setFilters((prev) => ({ ...prev, showAllStations }));
+
   const toggleSource = (source, wasChecked) => {
-    setSelectedSources((prev) => {
-      const next = { ...prev };
+    setFilters((prev) => {
+      const sources = { ...prev.sources };
       if (wasChecked) {
-        delete next[source.id];
+        delete sources[source.id];
       } else {
-        next[source.id] = source.plans[0];
+        sources[source.id] = source.plans[0];
       }
-      return next;
+      return { ...prev, sources };
     });
   };
 
   const selectPlan = (sourceId, planId) => {
-    setSelectedSources((prev) => ({ ...prev, [sourceId]: planId }));
+    setFilters((prev) => ({ ...prev, sources: { ...prev.sources, [sourceId]: planId } }));
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <FilterBar
-        selectedSources={selectedSources}
+        selectedSources={filters.sources}
         onToggleSource={toggleSource}
         onSelectPlan={selectPlan}
         priceMode={priceMode}
@@ -59,11 +79,11 @@ export default function MapPage() {
         onChangeChargeKWh={setChargeKWh}
         chargeMinutes={chargeMinutes}
         onChangeChargeMinutes={setChargeMinutes}
-        showAllStations={showAllStations}
+        showAllStations={filters.showAllStations}
         onChangeShowAllStations={setShowAllStations}
-        selectedConnectorTypes={selectedConnectorTypes}
+        selectedConnectorTypes={filters.connectorTypes}
         onToggleConnectorType={toggleConnectorType}
-        minPowerKw={minPowerKw}
+        minPowerKw={filters.minPowerKw}
         onChangeMinPowerKw={setMinPowerKw}
       />
       <div className="app-body" style={{ flex: 1 }}>
@@ -75,12 +95,12 @@ export default function MapPage() {
             />
             <StationMarkers
               onSelect={setSelectedStationId}
-              selectedSources={selectedSources}
+              selectedSources={filters.sources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}
-              showAllStations={showAllStations}
-              selectedConnectorTypes={selectedConnectorTypes}
-              minPowerKw={minPowerKw}
+              showAllStations={filters.showAllStations}
+              selectedConnectorTypes={filters.connectorTypes}
+              minPowerKw={filters.minPowerKw}
             />
           </MapContainer>
         </div>
@@ -88,7 +108,7 @@ export default function MapPage() {
           <StationDetails
             stationId={selectedStationId}
             onClose={() => setSelectedStationId(null)}
-            selectedSources={selectedSources}
+            selectedSources={filters.sources}
             priceMode={priceMode}
             chargeKWh={chargeKWh}
             chargeMinutes={chargeMinutes}
