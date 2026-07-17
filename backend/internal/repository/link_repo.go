@@ -32,19 +32,53 @@ type NearestStationCandidate struct {
 	DistanceMeters float64
 }
 
+// metersPerDegreeLat approximates how many meters one degree of latitude
+// covers — effectively constant everywhere, unlike longitude, which
+// shrinks with cos(latitude).
+const metersPerDegreeLat = 111320.0
+
+// minCosLatFrance is a deliberately conservative (small) lower bound for
+// cos(latitude) across metropolitan France's operating range (~41°N to
+// ~51.5°N, where cos ranges from ~0.755 down to ~0.622) — used to size the
+// longitude side of a bounding-box pre-filter so it's never too narrow.
+// Underestimating it could silently exclude a true nearest match; erring
+// generous only costs a slightly larger (but still index-bounded) scan,
+// so that's the safe direction to round in.
+const minCosLatFrance = 0.6
+
+// bboxDeltas returns how many degrees of longitude/latitude a
+// maxDistanceMeters radius needs as a generous (never-too-small)
+// rectangular envelope around a point. It exists to give PostGIS's GiST
+// index on stations.location a cheap way (the && overlap operator) to
+// rule out "nothing anywhere nearby" up front, instead of relying solely
+// on ORDER BY <-> LIMIT 1 combined with a WHERE ST_DWithin filter: for a
+// point with no true match within range, that combination forces the KNN
+// scan to walk the whole index in distance order before it can conclude
+// there's no candidate — observed in production to take minutes per
+// 200-point batch once a source's coverage includes points IRVE (France
+// only) has nothing near, e.g. a source that also returns stations just
+// across the border.
+func bboxDeltas(maxDistanceMeters float64) (lngDelta, latDelta float64) {
+	latDelta = maxDistanceMeters / metersPerDegreeLat
+	lngDelta = maxDistanceMeters / (metersPerDegreeLat * minCosLatFrance)
+	return lngDelta, latDelta
+}
+
 // FindNearestStation returns the closest IRVE station within maxDistanceMeters
 // of the given source station location, using PostGIS ST_DWithin/KNN.
 func (r *LinkRepository) FindNearestStation(ctx context.Context, lat, lng, maxDistanceMeters float64) (*NearestStationCandidate, error) {
+	lngDelta, latDelta := bboxDeltas(maxDistanceMeters)
 	const query = `
 		SELECT id, operator_name, name,
 			ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS distance_m
 		FROM stations
-		WHERE ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $3)
+		WHERE location && ST_MakeEnvelope($1 - $4, $2 - $5, $1 + $4, $2 + $5, 4326)
+			AND ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $3)
 		ORDER BY location <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)
 		LIMIT 1`
 
 	var c NearestStationCandidate
-	err := r.db.QueryRow(ctx, query, lng, lat, maxDistanceMeters).Scan(&c.StationID, &c.OperatorName, &c.Name, &c.DistanceMeters)
+	err := r.db.QueryRow(ctx, query, lng, lat, maxDistanceMeters, lngDelta, latDelta).Scan(&c.StationID, &c.OperatorName, &c.Name, &c.DistanceMeters)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -79,10 +113,16 @@ func (r *LinkRepository) FindNearestStations(ctx context.Context, points []Neare
 		idxs[i] = int32(i)
 	}
 
+	lngDelta, latDelta := bboxDeltas(maxDistanceMeters)
+
 	// LEFT JOIN LATERAL (not CROSS JOIN) so a point with no candidate in
 	// range still produces a row (with NULL station columns) instead of
 	// disappearing from the result — otherwise "no neighbor" would be
-	// indistinguishable from "never queried".
+	// indistinguishable from "never queried". The && bbox pre-filter (see
+	// bboxDeltas) matters even more here than in FindNearestStation: this
+	// runs the LATERAL subquery once per point in the batch, so a handful
+	// of points with no true match nearby forcing a full-index KNN walk
+	// each multiplies straight into total batch time.
 	const query = `
 		SELECT q.idx, s.id, s.operator_name, s.name, s.distance_m
 		FROM unnest($1::float8[], $2::float8[], $3::int[]) AS q(lng, lat, idx)
@@ -90,12 +130,13 @@ func (r *LinkRepository) FindNearestStations(ctx context.Context, points []Neare
 			SELECT st.id, st.operator_name, st.name,
 				ST_Distance(st.location::geography, ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)::geography) AS distance_m
 			FROM stations st
-			WHERE ST_DWithin(st.location::geography, ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)::geography, $4)
+			WHERE st.location && ST_MakeEnvelope(q.lng - $5, q.lat - $6, q.lng + $5, q.lat + $6, 4326)
+				AND ST_DWithin(st.location::geography, ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)::geography, $4)
 			ORDER BY st.location <-> ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)
 			LIMIT 1
 		) s ON true`
 
-	rows, err := r.db.Query(ctx, query, lngs, lats, idxs, maxDistanceMeters)
+	rows, err := r.db.Query(ctx, query, lngs, lats, idxs, maxDistanceMeters, lngDelta, latDelta)
 	if err != nil {
 		return nil, fmt.Errorf("find nearest stations (bulk): %w", err)
 	}
