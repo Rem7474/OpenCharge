@@ -17,7 +17,7 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
@@ -113,24 +113,41 @@ go run ./cmd/opencharge-ingest -source tesla      # Superchargers Tesla, corrél
 go run ./cmd/opencharge-ingest -source freshmile  # stations + tarifs Freshmile, corrélation
 go run ./cmd/opencharge-ingest -source fastned    # tarifs fixes Fastned sur les stations IRVE déjà taguées
 go run ./cmd/opencharge-ingest -source lidl       # tarif fixe Lidl sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source all        # les sept, dans cet ordre
+go run ./cmd/opencharge-ingest -source chargenow  # stations + tarifs ChargeNow (DCS), corrélation
+go run ./cmd/opencharge-ingest -source all        # les huit, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
-`-electra-url`, `-tesla-url`, `-freshmile-url`, `-link-max-distance-m`.
+`-electra-url`, `-tesla-url`, `-freshmile-url`, `-chargenow-url`,
+`-link-max-distance-m`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra, Izivia, Tesla, Freshmile, Fastned et Lidl sont corrélés
-(pour Fastned et Lidl, la "corrélation" est directe : leurs stations sont
-déjà les lignes IRVE elles-mêmes, identifiées par `operator_name`/
-`enseigne` contenant "fastned"/"lidl" — voir
-`backend/internal/ingestion/fastned.go` et `lidl.go`).
+lequel Electra, Izivia, Tesla, Freshmile et ChargeNow sont corrélés, et
+que Fastned/Lidl tagguent directement (leurs stations sont déjà les lignes
+IRVE elles-mêmes, identifiées par `operator_name`/`enseigne` contenant
+"fastned"/"lidl" — voir `backend/internal/ingestion/fastned.go` et
+`lidl.go`).
 
 **Fastned et Lidl n'ont pas d'API de tarifs publique scrapable** : leurs
 tarifs (Fastned : 0,61 €/kWh standard, 0,43 €/kWh abonné ; Lidl : 0,29 €/kWh
 unique, AC comme DC) sont des constantes fixes dans le code, à mettre à
 jour manuellement si l'un de ces réseaux change ses prix. Aucune requête
 réseau n'est faite pour ces deux runs.
+
+**ChargeNow** (`backend/internal/ingestion/chargenow.go`) scanne toute la
+France via son API de clusters/pools (`/api/map/v1/fr/query`, même logique
+de subdivision par bounding box que Freshmile), puis interroge son API de
+tarifs (`/tariffs/CHARGENOW_PRIME/prices`) pour chaque pool trouvé.
+Particularité : l'API de découverte de ChargeNow ne renvoie ni le type de
+connecteur ni la puissance de chaque point de charge (seulement son id),
+alors que l'API de tarifs a besoin de `power_type`/`power` pour répondre —
+l'ingester corrèle donc chaque pool avec la station IRVE la plus proche
+*avant* même d'interroger les tarifs, uniquement pour lire ce
+`connector_type`/`power_kw` déjà connu d'IRVE. Nécessite le header WAF
+`rest-api-path` sur chaque requête (`clusters` pour `/query`, confirmé ;
+`prices` pour `/tariffs/.../prices` est une supposition non vérifiée en
+conditions réelles — voir le commentaire sur `doRequest` si ce endpoint se
+met à échouer de façon suspecte).
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux

@@ -139,6 +139,12 @@ func TestLinkRepository_FindNearestStationsForKind(t *testing.T) {
 	if dcCandidate.DistanceMeters < 0 {
 		t.Errorf("dcResults[0].DistanceMeters = %v, want >= 0", dcCandidate.DistanceMeters)
 	}
+	if dcCandidate.ConnectorType != "CCS" {
+		t.Errorf("dcResults[0].ConnectorType = %q, want CCS", dcCandidate.ConnectorType)
+	}
+	if dcCandidate.PowerKW == nil || *dcCandidate.PowerKW != 50.0 {
+		t.Errorf("dcResults[0].PowerKW = %v, want 50.0", dcCandidate.PowerKW)
+	}
 
 	acResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindAC, 150)
 	if err != nil {
@@ -147,6 +153,9 @@ func TestLinkRepository_FindNearestStationsForKind(t *testing.T) {
 	acCandidate, ok := acResults[0]
 	if !ok {
 		t.Fatal("acResults[0] missing, want the ac station")
+	}
+	if acCandidate.ConnectorType != "T2" {
+		t.Errorf("acResults[0].ConnectorType = %q, want T2", acCandidate.ConnectorType)
 	}
 
 	if dcCandidate.StationID == acCandidate.StationID {

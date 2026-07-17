@@ -16,19 +16,20 @@ import (
 func main() {
 	var (
 		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, or all")
+		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, or all")
 		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
 		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
 		teslaChrome  = flag.String("tesla-chrome-path", getEnv("TESLA_CHROME_PATH", ""), "path to the Chromium/Chrome binary used to fetch tesla.com (empty = chromedp's own PATH lookup)")
 		freshmileURL = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
+		chargenowURL = flag.String("chargenow-url", ingestion.DefaultChargenowBaseURL, "ChargeNow map API base URL")
 		linkMaxM     = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
 		timeout      = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
 	)
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, or all")
 	}
 
 	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
@@ -117,6 +118,15 @@ func main() {
 		}
 		log.Printf("lidl ingestion complete: %d stations", count)
 	}
+	runChargenow := func() {
+		ingester := ingestion.NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *chargenowURL, ingestion.DefaultChargenowConfig())
+		ingester.MaxLinkDistanceM = *linkMaxM
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("chargenow ingestion failed: %v", err)
+		}
+		log.Printf("chargenow ingestion complete: %d stations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -133,10 +143,13 @@ func main() {
 		runFastned()
 	case "lidl":
 		runLidl()
+	case "chargenow":
+		runChargenow()
 	case "all":
 		// IRVE first: it's the canonical referential that electra/izivia/
-		// tesla/freshmile correlate against, and that fastned/lidl tag
-		// directly — so it must exist before those run too.
+		// tesla/freshmile/chargenow correlate against, and that
+		// fastned/lidl tag directly — so it must exist before any of
+		// those run too.
 		runIRVE()
 		runElectra()
 		runIzivia()
@@ -144,8 +157,9 @@ func main() {
 		runFreshmile()
 		runFastned()
 		runLidl()
+		runChargenow()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, or all", *source)
 	}
 }
 

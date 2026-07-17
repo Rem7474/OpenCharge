@@ -24,11 +24,17 @@ func (r *LinkRepository) WithTx(tx pgx.Tx) *LinkRepository {
 }
 
 // NearestStationCandidate is the closest IRVE station to a source station,
-// used to decide how a StationLink should be created.
+// used to decide how a StationLink should be created. ConnectorType/PowerKW
+// carry the matched IRVE station's own connector data — needed by sources
+// (e.g. ChargeNow) whose own discovery API doesn't return per-connector
+// power/type, so IRVE's already-known value for the physical location is
+// the only signal available to query that source's own pricing API with.
 type NearestStationCandidate struct {
 	StationID      uuid.UUID
 	OperatorName   string
 	Name           string
+	ConnectorType  string
+	PowerKW        *float64
 	DistanceMeters float64
 }
 
@@ -217,10 +223,10 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 	lngDelta, latDelta := bboxDeltas(maxDistanceMeters)
 
 	query := fmt.Sprintf(`
-		SELECT q.idx, s.id, s.operator_name, s.name, s.distance_m, s.candidate_kind
+		SELECT q.idx, s.id, s.operator_name, s.name, s.connector_type, s.power_kw, s.distance_m, s.candidate_kind
 		FROM unnest($1::float8[], $2::float8[], $3::int[]) AS q(lng, lat, idx)
 		LEFT JOIN LATERAL (
-			SELECT st.id, st.operator_name, st.name,
+			SELECT st.id, st.operator_name, st.name, st.connector_type, st.power_kw,
 				ST_Distance(st.location::geography, ST_SetSRID(ST_MakePoint(q.lng, q.lat), 4326)::geography) AS distance_m,
 				(%s) AS candidate_kind
 			FROM stations st
@@ -245,21 +251,25 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 	for rows.Next() {
 		var idx int32
 		var id *uuid.UUID
-		var operatorName, name *string
+		var operatorName, name, connectorType *string
+		var powerKW *float64
 		var distance *float64
 		var candidateKind *string
-		if err := rows.Scan(&idx, &id, &operatorName, &name, &distance, &candidateKind); err != nil {
+		if err := rows.Scan(&idx, &id, &operatorName, &name, &connectorType, &powerKW, &distance, &candidateKind); err != nil {
 			return nil, fmt.Errorf("scan nearest station for kind %s (bulk): %w", kind, err)
 		}
 		if id == nil {
 			continue
 		}
-		c := NearestStationCandidate{StationID: *id, DistanceMeters: *distance}
+		c := NearestStationCandidate{StationID: *id, DistanceMeters: *distance, PowerKW: powerKW}
 		if operatorName != nil {
 			c.OperatorName = *operatorName
 		}
 		if name != nil {
 			c.Name = *name
+		}
+		if connectorType != nil {
+			c.ConnectorType = *connectorType
 		}
 		ck := ""
 		if candidateKind != nil {
