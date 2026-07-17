@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -110,6 +111,37 @@ const stationListSelectPrefix = `
 const stationListFrom = `
 	FROM stations s
 	LEFT JOIN station_tariffs t ON t.station_id = s.id`
+
+// stationBestPriceACFragment/stationBestPriceDCFragment mirror
+// stationListSelectPrefix's own ac_min/dc_min COALESCE expressions
+// exactly (kept in sync by hand — see that prefix's comment for why the
+// exact-connector-match preference exists). Factored out here so
+// stationBestPriceFragment (below) doesn't hand-duplicate the whole thing
+// a second time.
+const stationBestPriceACFragment = `COALESCE(
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed'))
+)`
+
+const stationBestPriceDCFragment = `COALESCE(
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed'))
+)`
+
+// stationBestPriceFragment picks the same price a client would display for
+// a station via utils/pricing.js#pickPriceCentsPerKWh: prefer whichever of
+// ac/dc matches the station's own connector kind, falling back to
+// whichever is available. Used by ListByBBox's price-range filter, which
+// — unlike ORDER BY/GROUP BY — cannot reference a SELECT-list alias and
+// must repeat the aggregate expression verbatim in its HAVING clause.
+var stationBestPriceFragment = fmt.Sprintf(`COALESCE(
+	CASE
+		WHEN s.connector_type IN ('CCS', 'CHAdeMO') THEN (%[2]s)
+		WHEN s.connector_type IN ('T2', 'EF') THEN (%[1]s)
+		ELSE NULL
+	END,
+	(%[1]s), (%[2]s)
+)`, stationBestPriceACFragment, stationBestPriceDCFragment)
 
 // BulkUpsertStations upserts a slice of IRVE stations in a single round trip
 // via a multi-row INSERT ... SELECT FROM unnest(...), the same bulk form as
@@ -278,8 +310,25 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	query += `
 		GROUP BY s.id`
 
+	// Every condition here depends on an aggregate (COUNT/MIN ... FILTER),
+	// so it must live in HAVING, not WHERE — and unlike ORDER BY/GROUP BY,
+	// HAVING can't reference a SELECT-list output alias, so
+	// stationBestPriceFragment's aggregate expression has to be repeated
+	// verbatim rather than referenced by name.
+	var having []string
 	if f.HasTariffs != nil && *f.HasTariffs {
-		query += ` HAVING COUNT(t.id) > 0`
+		having = append(having, "COUNT(t.id) > 0")
+	}
+	if f.MinPriceCentsPerKWh != nil {
+		args = append(args, *f.MinPriceCentsPerKWh)
+		having = append(having, fmt.Sprintf("%s >= $%d", stationBestPriceFragment, len(args)))
+	}
+	if f.MaxPriceCentsPerKWh != nil {
+		args = append(args, *f.MaxPriceCentsPerKWh)
+		having = append(having, fmt.Sprintf("%s <= $%d", stationBestPriceFragment, len(args)))
+	}
+	if len(having) > 0 {
+		query += " HAVING " + strings.Join(having, " AND ")
 	}
 
 	args = append(args, limit, f.Offset)

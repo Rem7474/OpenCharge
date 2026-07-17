@@ -27,6 +27,8 @@ export default function StationMarkers({
   showAllStations,
   selectedConnectorTypes,
   minPowerKw,
+  minPriceCentsPerKwh,
+  maxPriceCentsPerKwh,
 }) {
   const [stations, setStations] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -49,6 +51,8 @@ export default function StationMarkers({
       hasTariffs: showAllStations ? undefined : true,
       connectorTypes: selectedConnectorTypes,
       minPowerKw,
+      minPriceCentsPerKwh,
+      maxPriceCentsPerKwh,
       signal: controller.signal,
     })
       .then((data) => setStations(data ?? []))
@@ -68,7 +72,7 @@ export default function StationMarkers({
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw]);
+  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw, minPriceCentsPerKwh, maxPriceCentsPerKwh]);
 
   const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
 

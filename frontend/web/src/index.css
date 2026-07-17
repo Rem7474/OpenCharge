@@ -450,6 +450,41 @@ a {
   font-size: 13px;
 }
 
+.filter-price-range {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.filter-price-range-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-muted);
+  margin-bottom: 6px;
+}
+
+.filter-price-range-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-price-range-inputs input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.filter-price-range-inputs span {
+  color: var(--color-muted);
+  flex-shrink: 0;
+}
+
 /* --- Power slider (discrete steps: 3 / 22 / 50 / 150 / 350+ kW) --- */
 
 .power-slider input[type="range"] {

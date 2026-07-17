@@ -24,6 +24,11 @@ const DEFAULT_FILTERS = {
   sources: {},
   connectorTypes: [],
   minPowerKw: null,
+  // In cents/kWh, matching the API's minPriceCentsPerKwh/maxPriceCentsPerKwh
+  // params and every other price value in this app (see utils/pricing.js) —
+  // the filter UI itself shows/accepts euros and converts at the edge.
+  minPriceCentsPerKwh: null,
+  maxPriceCentsPerKwh: null,
   // Off by default (only priced stations shown): the IRVE referential has
   // many more stations than ones we've matched a price for, and showing
   // every one by default would bury the priced ones a user is here to
@@ -56,6 +61,8 @@ export default function MapPage() {
   };
 
   const setMinPowerKw = (minPowerKw) => setFilters((prev) => ({ ...prev, minPowerKw }));
+  const setMinPriceCentsPerKwh = (minPriceCentsPerKwh) => setFilters((prev) => ({ ...prev, minPriceCentsPerKwh }));
+  const setMaxPriceCentsPerKwh = (maxPriceCentsPerKwh) => setFilters((prev) => ({ ...prev, maxPriceCentsPerKwh }));
   const setShowAllStations = (showAllStations) => setFilters((prev) => ({ ...prev, showAllStations }));
 
   const toggleSource = (source, wasChecked) => {
@@ -115,6 +122,10 @@ export default function MapPage() {
         onToggleConnectorType={toggleConnectorType}
         minPowerKw={filters.minPowerKw}
         onChangeMinPowerKw={setMinPowerKw}
+        minPriceCentsPerKwh={filters.minPriceCentsPerKwh}
+        onChangeMinPriceCentsPerKwh={setMinPriceCentsPerKwh}
+        maxPriceCentsPerKwh={filters.maxPriceCentsPerKwh}
+        onChangeMaxPriceCentsPerKwh={setMaxPriceCentsPerKwh}
         onReopenOnboarding={() => setShowOnboarding(true)}
         onResetFilters={resetFilters}
       />
@@ -133,6 +144,8 @@ export default function MapPage() {
               showAllStations={filters.showAllStations}
               selectedConnectorTypes={filters.connectorTypes}
               minPowerKw={filters.minPowerKw}
+              minPriceCentsPerKwh={filters.minPriceCentsPerKwh}
+              maxPriceCentsPerKwh={filters.maxPriceCentsPerKwh}
             />
           </MapContainer>
         </div>

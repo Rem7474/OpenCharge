@@ -23,7 +23,7 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 	return &StationsHandler{Stations: stations, Tariffs: tariffs}
 }
 
-// ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&connectorType=&minPowerKw=&limit=&offset=
+// ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&connectorType=&minPowerKw=&minPriceCentsPerKwh=&maxPriceCentsPerKwh=&limit=&offset=
 // It never loads the whole dataset: bbox is mandatory, and the map/frontend
 // is expected to re-query on every viewport change.
 //
@@ -76,6 +76,16 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("minPowerKw"); v != "" {
 		if p, err := strconv.ParseFloat(v, 64); err == nil {
 			filter.MinPowerKW = &p
+		}
+	}
+	if v := q.Get("minPriceCentsPerKwh"); v != "" {
+		if p, err := strconv.ParseFloat(v, 64); err == nil {
+			filter.MinPriceCentsPerKWh = &p
+		}
+	}
+	if v := q.Get("maxPriceCentsPerKwh"); v != "" {
+		if p, err := strconv.ParseFloat(v, 64); err == nil {
+			filter.MaxPriceCentsPerKWh = &p
 		}
 	}
 	if v := q.Get("limit"); v != "" {

@@ -28,6 +28,10 @@ export default function FilterPanel({
   onToggleConnectorType,
   minPowerKw,
   onChangeMinPowerKw,
+  minPriceCentsPerKwh,
+  onChangeMinPriceCentsPerKwh,
+  maxPriceCentsPerKwh,
+  onChangeMaxPriceCentsPerKwh,
   onClose,
   onResetFilters,
 }) {
@@ -121,6 +125,35 @@ export default function FilterPanel({
               </label>
             </div>
           )}
+
+          <div className="filter-price-range">
+            <span className="filter-price-range-label">Fourchette de prix (€/kWh)</span>
+            <div className="filter-price-range-inputs">
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                placeholder="Min"
+                aria-label="Prix minimum en €/kWh"
+                value={minPriceCentsPerKwh != null ? minPriceCentsPerKwh / 100 : ""}
+                onChange={(e) =>
+                  onChangeMinPriceCentsPerKwh(e.target.value === "" ? null : Math.round(Number(e.target.value) * 100))
+                }
+              />
+              <span>–</span>
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                placeholder="Max"
+                aria-label="Prix maximum en €/kWh"
+                value={maxPriceCentsPerKwh != null ? maxPriceCentsPerKwh / 100 : ""}
+                onChange={(e) =>
+                  onChangeMaxPriceCentsPerKwh(e.target.value === "" ? null : Math.round(Number(e.target.value) * 100))
+                }
+              />
+            </div>
+          </div>
         </section>
 
         <section className="filter-section">

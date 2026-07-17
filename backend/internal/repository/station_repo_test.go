@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"opencharge/internal/domain"
 )
 
@@ -406,6 +408,72 @@ func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	}
 	if len(results[0].TariffSources) != 1 || results[0].TariffSources[0] != "izivia" {
 		t.Errorf("TariffSources = %v, want [izivia]", results[0].TariffSources)
+	}
+}
+
+func TestStationRepository_ListByBBox_PriceRange(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	cheap := testStation("FRPRICE001", 45.90, 6.10)
+	mid := testStation("FRPRICE002", 45.91, 6.11)
+	expensive := testStation("FRPRICE003", 45.92, 6.12)
+	noPrice := testStation("FRPRICE004", 45.93, 6.13)
+
+	cheapID, err := stationRepo.UpsertStation(ctx, cheap)
+	if err != nil {
+		t.Fatalf("UpsertStation cheap: %v", err)
+	}
+	midID, err := stationRepo.UpsertStation(ctx, mid)
+	if err != nil {
+		t.Fatalf("UpsertStation mid: %v", err)
+	}
+	expensiveID, err := stationRepo.UpsertStation(ctx, expensive)
+	if err != nil {
+		t.Fatalf("UpsertStation expensive: %v", err)
+	}
+	if _, err := stationRepo.UpsertStation(ctx, noPrice); err != nil {
+		t.Fatalf("UpsertStation noPrice: %v", err)
+	}
+
+	cheapPrice, midPrice, expensivePrice := 20.0, 30.0, 60.0
+	for id, price := range map[uuid.UUID]*float64{cheapID: &cheapPrice, midID: &midPrice, expensiveID: &expensivePrice} {
+		if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+			StationID: id, Source: "izivia", Kind: domain.TariffKindMixed, Model: "izivia_text",
+			Currency: "EUR", EnergyPriceCentsPerKWh: price,
+		}); err != nil {
+			t.Fatalf("Tariffs.Upsert: %v", err)
+		}
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	minPrice, maxPrice := 25.0, 40.0
+	bbox.MinPriceCentsPerKWh = &minPrice
+	bbox.MaxPriceCentsPerKWh = &maxPrice
+
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox price range: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRPRICE002" {
+		t.Fatalf("ListByBBox price range [25,40] = %+v, want only FRPRICE002 (30 cts)", results)
+	}
+
+	// A station with no known price must never match a price-range filter,
+	// same as it never matches HasTariffs=true.
+	minOnly := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	zero := 0.0
+	minOnly.MinPriceCentsPerKWh = &zero
+	results, err = stationRepo.ListByBBox(ctx, minOnly)
+	if err != nil {
+		t.Fatalf("ListByBBox minPrice=0: %v", err)
+	}
+	for _, r := range results {
+		if r.Station.IRVEIDPDC == "FRPRICE004" {
+			t.Error("station with no known price matched a minPrice filter, want excluded")
+		}
 	}
 }
 

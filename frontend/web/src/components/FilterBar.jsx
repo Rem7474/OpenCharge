@@ -7,13 +7,23 @@ import FilterPanel from "./FilterPanel.jsx";
  * shortcut. All the actual filter props are just forwarded to FilterPanel.
  */
 export default function FilterBar(props) {
-  const { selectedSources, selectedConnectorTypes, minPowerKw, showAllStations, onReopenOnboarding } = props;
+  const {
+    selectedSources,
+    selectedConnectorTypes,
+    minPowerKw,
+    minPriceCentsPerKwh,
+    maxPriceCentsPerKwh,
+    showAllStations,
+    onReopenOnboarding,
+  } = props;
   const [open, setOpen] = useState(false);
 
   const activeCount =
     Object.keys(selectedSources).length +
     selectedConnectorTypes.length +
     (minPowerKw != null ? 1 : 0) +
+    (minPriceCentsPerKwh != null ? 1 : 0) +
+    (maxPriceCentsPerKwh != null ? 1 : 0) +
     (showAllStations ? 1 : 0);
 
   return (
