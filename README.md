@@ -355,8 +355,44 @@ npm run cap:android   # + ouvre Android Studio
 npm run cap:ios       # + ouvre Xcode (macOS uniquement)
 ```
 
-Build et publication sur les stores nécessitent Android Studio/Gradle ou
-Xcode en local — hors périmètre de ce dépôt/CI pour l'instant.
+Xcode (iOS) reste local uniquement — hors périmètre de ce dépôt/CI pour
+l'instant (nécessite macOS + un compte développeur Apple).
+
+Contrairement au déploiement navigateur/Docker ci-dessus, la coquille
+Capacitor (WebView native) n'a pas d'origine de page contre laquelle
+résoudre un chemin relatif comme `/api` : `cap:sync` a donc besoin d'une
+URL absolue. C'est le rôle de `frontend/web/.env.production` (chargé
+automatiquement par `vite build`, donc par `cap:sync`/`cap:android`/
+`cap:ios` — sans effet sur le build Docker, qui fixe `VITE_API_BASE_URL`
+explicitement en argument de build) :
+
+```
+VITE_API_BASE_URL=https://opencharge.remcorp.fr/api
+```
+
+soit l'instance hébergée à <https://opencharge.remcorp.fr>.
+
+#### CI — build Android automatique sur tag
+
+`.github/workflows/mobile-android.yml` build l'app Android (build web →
+`cap sync android` → Gradle) à chaque tag `v*.*.*`, comme
+`docker-publish.yml` le fait pour les images Docker, et attache le(s)
+APK à la Release GitHub correspondante :
+
+- un **APK debug** est toujours produit et publié (signé avec la clé
+  debug par défaut de Gradle — installable directement pour tester, pas
+  pour le Play Store) ;
+- un **APK release signé** est produit et publié en plus si les secrets
+  de signature sont configurés sur le dépôt (`ANDROID_KEYSTORE_BASE64`
+  — le keystore encodé en base64 avec `base64 -w0 release.keystore` —,
+  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`).
+  Sans ces secrets, seul l'APK debug est publié.
+
+Pour un build release signé en local, copier
+`frontend/web/android/keystore.properties.example` vers
+`keystore.properties` (gitignored) dans le même dossier et y placer le
+keystore ainsi que les mots de passe — `frontend/web/android/app/build.gradle`
+active automatiquement la signature s'il détecte ce fichier.
 
 ## Sources
 

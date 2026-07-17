@@ -13,14 +13,19 @@ import { formatSourceLabel, formatPlanLabel } from "../utils/format.js";
 export default function OnboardingScreen({ initialSources, onComplete, onSkip }) {
   const [allSources, setAllSources] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selected, setSelected] = useState(initialSources ?? {});
 
   useEffect(() => {
     const controller = new AbortController();
+    setError(null);
     fetchSources({ signal: controller.signal })
       .then((sources) => setAllSources(sources ?? []))
       .catch((err) => {
-        if (err.name !== "AbortError") console.error(err);
+        if (err.name !== "AbortError") {
+          console.error(err);
+          setError(err.message);
+        }
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
@@ -53,14 +58,19 @@ export default function OnboardingScreen({ initialSources, onComplete, onSkip })
 
       <div className="onboarding-list">
         {loading && <p className="onboarding-empty">Chargement des réseaux…</p>}
-        {!loading && allSources.length === 0 && <p className="onboarding-empty">Aucun réseau disponible.</p>}
+        {!loading && error && (
+          <p className="onboarding-empty">
+            Impossible de contacter le serveur ({error}). Vérifiez votre connexion, puis réessayez.
+          </p>
+        )}
+        {!loading && !error && allSources.length === 0 && <p className="onboarding-empty">Aucun réseau disponible.</p>}
         {allSources.map((source) => {
           const checked = source.id in selected;
           return (
             <div key={source.id} className="onboarding-item">
-              <label className="onboarding-item-row" onClick={() => toggleSource(source)}>
+              <label className="onboarding-item-row">
                 <span className="onboarding-item-name">{formatSourceLabel(source.id)}</span>
-                <input type="checkbox" checked={checked} readOnly />
+                <input type="checkbox" checked={checked} onChange={() => toggleSource(source)} />
               </label>
               {checked && source.plans.length > 1 && (
                 <div className="plan-selector" role="group" aria-label={`Palier tarifaire ${source.id}`}>

@@ -20,13 +20,17 @@ export default function OperatorFilter({ selectedSources, onToggleSource, onSele
   const [allSources, setAllSources] = useState([]);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     const controller = new AbortController();
     fetchSources({ signal: controller.signal })
       .then((sources) => setAllSources(sources ?? []))
       .catch((err) => {
-        if (err.name !== "AbortError") console.error(err);
+        if (err.name !== "AbortError") {
+          console.error(err);
+          setError(err.message);
+        }
       });
     return () => controller.abort();
   }, []);
@@ -38,10 +42,14 @@ export default function OperatorFilter({ selectedSources, onToggleSource, onSele
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
+    setError(null);
     fetchSources({ signal: controller.signal })
       .then((sources) => setAllSources(sources ?? []))
       .catch((err) => {
-        if (err.name !== "AbortError") console.error(err);
+        if (err.name !== "AbortError") {
+          console.error(err);
+          setError(err.message);
+        }
       });
     return () => controller.abort();
   }, [open]);
@@ -82,7 +90,10 @@ export default function OperatorFilter({ selectedSources, onToggleSource, onSele
                 autoFocus
               />
               <ul className="operator-filter-list">
-                {filtered.length === 0 && <li className="operator-filter-empty">Aucun réseau trouvé</li>}
+                {error && (
+                  <li className="operator-filter-empty">Impossible de contacter le serveur ({error}).</li>
+                )}
+                {!error && filtered.length === 0 && <li className="operator-filter-empty">Aucun réseau trouvé</li>}
                 {filtered.map((source) => {
                   const checked = source.id in selectedSources;
                   return (
