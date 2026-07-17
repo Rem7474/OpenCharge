@@ -211,7 +211,7 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	// nothing looking identical to "no Tesla stations exist" and wiping the
 	// entire known dataset — see the same guard in izivia.go.
 	if firstErr == nil && result.processed > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart); err != nil {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
 			return result.processed, err
 		}
 	}

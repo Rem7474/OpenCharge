@@ -111,7 +111,7 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 	// to "Electra has zero stations" and wiping the entire known dataset —
 	// see the same guard in izivia.go.
 	if linked > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "electra", runStart); err != nil {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "electra", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
 			return linked, err
 		}
 	}

@@ -218,7 +218,7 @@ feedLoop:
 	// just skipping a bad run. See also fetchMarkers' own all-squares-failed
 	// check, which catches the total-scan-failure case earlier.
 	if firstErr == nil && result.processed > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "izivia", runStart); err != nil {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "izivia", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
 			return result.processed, err
 		}
 	}

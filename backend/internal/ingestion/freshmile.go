@@ -268,7 +268,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	// entire known dataset — see the same guard in izivia.go for the
 	// production incident that motivated it.
 	if err == nil && processed > 0 {
-		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart); sweepErr != nil {
+		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart.Add(-repository.StaleSourceDataGracePeriod)); sweepErr != nil {
 			return processed, sweepErr
 		}
 	}
