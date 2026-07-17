@@ -21,6 +21,11 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # `secrets` isn't a valid context inside `if:` conditions (job- or
+    # step-level) — only `env` is. Read it once here, where secrets *are*
+    # allowed, so the steps below can gate on env.HAS_SIGNING instead.
+    env:
+      HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +64,7 @@ jobs:
       # installable as-is) and only the debug APK is published. See
       # frontend/web/android/keystore.properties.example.
       - name: Write release keystore
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.HAS_SIGNING == 'true'
         working-directory: frontend/web/android
         run: |
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.keystore
@@ -97,7 +102,7 @@ jobs:
           files: frontend/web/android/app/build/outputs/apk/debug/*.apk
 
       - name: Attach signed release APK to the release
-        if: startsWith(github.ref, 'refs/tags/') && secrets.ANDROID_KEYSTORE_BASE64 != ''
+        if: startsWith(github.ref, 'refs/tags/') && env.HAS_SIGNING == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: frontend/web/android/app/build/outputs/apk/release/*.apk
