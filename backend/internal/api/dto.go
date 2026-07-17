@@ -105,17 +105,20 @@ type sourcePlansDTO struct {
 }
 
 type tariffDTO struct {
-	Source                     string         `json:"source"`
-	Plan                       string         `json:"plan"`
-	Kind                       string         `json:"kind"`
-	Model                      string         `json:"model"`
-	Currency                   string         `json:"currency"`
-	EnergyPriceCentsPerKWh     *float64       `json:"energy_price_cents_per_kwh,omitempty"`
-	SessionPriceCentsPerMin    *float64       `json:"session_price_cents_per_min,omitempty"`
-	CongestionPriceCentsPerMin *float64       `json:"congestion_price_cents_per_min,omitempty"`
-	ServiceFeePercent          *float64       `json:"service_fee_percent,omitempty"`
-	RawText                    string         `json:"raw_text,omitempty"`
-	Extra                      map[string]any `json:"extra,omitempty"`
+	Source                     string   `json:"source"`
+	Plan                       string   `json:"plan"`
+	Kind                       string   `json:"kind"`
+	Model                      string   `json:"model"`
+	Currency                   string   `json:"currency"`
+	EnergyPriceCentsPerKWh     *float64 `json:"energy_price_cents_per_kwh,omitempty"`
+	SessionPriceCentsPerMin    *float64 `json:"session_price_cents_per_min,omitempty"`
+	CongestionPriceCentsPerMin *float64 `json:"congestion_price_cents_per_min,omitempty"`
+	ServiceFeePercent          *float64 `json:"service_fee_percent,omitempty"`
+	// SessionFeeCents is a flat, one-time fee for starting a session,
+	// distinct from SessionPriceCentsPerMin (a per-minute rate).
+	SessionFeeCents *float64       `json:"session_fee_cents,omitempty"`
+	RawText         string         `json:"raw_text,omitempty"`
+	Extra           map[string]any `json:"extra,omitempty"`
 	// UpdatedAt is when an ingestion run last wrote this tariff. Every run
 	// rewrites it whether or not the price moved, so it reads as "last
 	// checked" (how fresh the data is) rather than "price changed on".
@@ -168,6 +171,7 @@ func toTariffDTO(t domain.StationTariff) tariffDTO {
 		SessionPriceCentsPerMin:    t.SessionPriceCentsPerMin,
 		CongestionPriceCentsPerMin: t.CongestionPriceCentsPerMin,
 		ServiceFeePercent:          t.ServiceFeePercent,
+		SessionFeeCents:            t.SessionFeeCents,
 		RawText:                    t.RawText,
 		Extra:                      extra,
 	}

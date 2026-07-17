@@ -33,12 +33,17 @@ type StationTariff struct {
 	SessionPriceCentsPerMin    *float64
 	CongestionPriceCentsPerMin *float64
 	ServiceFeePercent          *float64
-	ValidFrom                  *time.Time
-	ValidTo                    *time.Time
-	RawText                    string
-	Extra                      map[string]any
-	CreatedAt                  time.Time
-	UpdatedAt                  time.Time
+	// SessionFeeCents is a flat, one-time fee for starting a charging
+	// session, independent of energy or duration (e.g. Izivia's "2,3€ la
+	// session de charge"). Not to be confused with SessionPriceCentsPerMin,
+	// which despite the similar name is a per-minute rate.
+	SessionFeeCents *float64
+	ValidFrom       *time.Time
+	ValidTo         *time.Time
+	RawText         string
+	Extra           map[string]any
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // SourcePlans lists the price plans available for a tariff source, e.g.

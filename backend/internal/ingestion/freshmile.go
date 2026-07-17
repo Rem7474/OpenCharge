@@ -655,13 +655,26 @@ func freshmileConnectorType(standard string) string {
 	}
 }
 
-// normalizeFreshmileTariffs walks every evse/connector's tariff and turns
-// each into a StationTariff. Unlike Electra/Tesla (a handful of fixed
-// plans per station), Freshmile can expose many distinct tariff products
-// per station — one per connector's pricebook, identified by
-// custom_ref/origin_ref — so each becomes its own Plan rather than being
-// collapsed: they're genuinely different prices depending which connector/
-// contract applies, not variations of the same handful of plans.
+// freshmileTariffCandidate pairs a normalized tariff with whether it came
+// from a preferential (partner/member-only) price tier, so
+// normalizeFreshmileTariffs can rank candidates for the same Kind without
+// re-deriving that from Extra.
+type freshmileTariffCandidate struct {
+	tariff         domain.StationTariff
+	isPreferential bool
+}
+
+// normalizeFreshmileTariffs walks every evse/connector's tariff and keeps,
+// per price Kind (ac/dc), a single representative StationTariff — see
+// freshmileBetterCandidate for how "representative" is chosen. Earlier
+// versions kept every connector's tariff as its own Plan, using Freshmile's
+// per-tariff custom_ref (e.g. "lidl-interop-hastobe") as the Plan value.
+// In production that turned out to be a partner/venue contract identifier,
+// not a small, meaningful set of price tiers the way Electra's
+// public/app/subscription is — every newly-ingested partner contract added
+// another entry to the network-wide plan selector, growing it unbounded.
+// Freshmile tariffs now always use the single "standard" Plan, matching
+// how every other single-tier source (Izivia, IRVE text, ...) behaves.
 func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 	bestPowerCategory := ""
 	if connectorsSummary, ok := details["connectors"].(map[string]any); ok {
@@ -670,7 +683,7 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 		}
 	}
 
-	var tariffs []domain.StationTariff
+	best := map[string]freshmileTariffCandidate{}
 	evses, _ := details["evses"].([]any)
 	for _, rawEvse := range evses {
 		evse, ok := rawEvse.(map[string]any)
@@ -687,19 +700,56 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 			if !ok {
 				continue
 			}
-			tariffs = append(tariffs, normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory))
+			candidate := freshmileTariffCandidate{
+				tariff:         normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory),
+				isPreferential: parseBooleanLoose(stringValue(tariffRaw["is_preferential"])),
+			}
+			current, exists := best[candidate.tariff.Kind]
+			if !exists || freshmileBetterCandidate(candidate, current) {
+				best[candidate.tariff.Kind] = candidate
+			}
 		}
+	}
+
+	if len(best) == 0 {
+		return nil
+	}
+	tariffs := make([]domain.StationTariff, 0, len(best))
+	for _, c := range best {
+		tariffs = append(tariffs, c.tariff)
 	}
 	return tariffs
 }
 
-func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string) domain.StationTariff {
-	customRef := firstNonEmpty(stringValue(tariffRaw["custom_ref"]), domain.TariffPlanStandard)
-	plan := customRef
-	if parseBooleanLoose(stringValue(tariffRaw["is_preferential"])) {
-		plan = customRef + ":preferential"
+// freshmileBetterCandidate decides which of two same-Kind tariff
+// candidates should represent a Freshmile station now that every
+// connector's tariff collapses onto the single "standard" Plan: a
+// publicly-available (non-preferential) price always wins over a
+// partner/member-only preferential one — showing a discount most visitors
+// can't actually get would be misleading — and within the same tier, the
+// cheaper known price wins. A candidate with no parseable price never
+// displaces one that has a price, but is kept if it's the only one seen
+// for that Kind so far.
+func freshmileBetterCandidate(candidate, current freshmileTariffCandidate) bool {
+	if candidate.isPreferential != current.isPreferential {
+		return !candidate.isPreferential
 	}
+	if candidate.tariff.EnergyPriceCentsPerKWh == nil && candidate.tariff.SessionPriceCentsPerMin == nil {
+		return false
+	}
+	if current.tariff.EnergyPriceCentsPerKWh == nil && current.tariff.SessionPriceCentsPerMin == nil {
+		return true
+	}
+	if candidate.tariff.EnergyPriceCentsPerKWh != nil && current.tariff.EnergyPriceCentsPerKWh != nil {
+		return *candidate.tariff.EnergyPriceCentsPerKWh < *current.tariff.EnergyPriceCentsPerKWh
+	}
+	// One priced per kWh, the other per minute (or the comparison is
+	// otherwise not apples-to-apples): keep the incumbent rather than
+	// guess which is actually cheaper.
+	return false
+}
 
+func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string) domain.StationTariff {
 	power, _ := floatValue(conn["power"])
 	kind := domain.TariffKindAC
 	if (power != nil && *power >= 50) || bestPowerCategory == "fast" || bestPowerCategory == "superfast" {
@@ -713,7 +763,7 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 
 	t := domain.StationTariff{
 		Source:   "freshmile",
-		Plan:     plan,
+		Plan:     domain.TariffPlanStandard,
 		Kind:     kind,
 		Model:    "freshmile_kwh",
 		Currency: firstNonEmpty(stringValue(tariffRaw["currency"]), "EUR"),
@@ -731,15 +781,31 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 		return t
 	}
 
-	price, lang, text, ok := freshmilePriceFromDescription(tariffRaw["description"])
-	if !ok {
-		log.Printf("freshmile: could not extract a €/kWh price from tariff %v description: %v", tariffRaw["id"], tariffRaw["description"])
+	if price, lang, text, ok := freshmilePriceFromDescription(tariffRaw["description"]); ok {
+		t.EnergyPriceCentsPerKWh = price
+		extra["parsedLang"] = lang
+		extra["parsedText"] = text
+		extra["energyPriceEuro"] = *price / 100
 		return t
 	}
-	t.EnergyPriceCentsPerKWh = price
-	extra["parsedLang"] = lang
-	extra["parsedText"] = text
-	extra["energyPriceEuro"] = *price / 100
+
+	// Not priced by energy — some Freshmile tariffs are priced by time
+	// instead (a simple "0,40 € par minute" rate, or a tiered "6 € les 5
+	// premières heures puis 2 € toutes les 15 minutes" structure). The
+	// simple per-minute case is common enough to be worth extracting;
+	// tiered ones don't reduce to a single €/min figure and are
+	// deliberately left unmatched (both prices nil) rather than reporting
+	// a misleading number — freshmileSessionPricePattern's tight "par
+	// minute"/"/min" adjacency requirement already keeps it from
+	// accidentally matching a tiered description's trailing rate.
+	if sessionPrice, text, ok := freshmileSessionPriceFromDescription(tariffRaw["description"]); ok {
+		t.SessionPriceCentsPerMin = sessionPrice
+		t.Model = "freshmile_per_minute"
+		extra["parsedText"] = text
+		return t
+	}
+
+	log.Printf("freshmile: could not extract a €/kWh or €/min price from tariff %v description: %v", tariffRaw["id"], tariffRaw["description"])
 	return t
 }
 
@@ -802,4 +868,41 @@ func extractFreshmilePriceCents(t string) (*float64, bool) {
 	// (e.g. 0.55 * 100 = 55.00000000000001).
 	cents := math.Round(euros*10000) / 100
 	return &cents, true
+}
+
+// freshmileSessionPriceFromDescription extracts a simple €/minute price
+// (in cents) from a Freshmile tariff's description, for tariffs priced by
+// time rather than energy (e.g. "0,40 € par minute"). Reuses
+// pricePerMinutePattern (common.go, shared with Izivia's free-text price
+// parsing) and the same JSON-vs-plain-text description shapes as
+// freshmilePriceFromDescription. A genuinely tiered time tariff (a flat
+// fee for the first N hours, then a rate per subsequent block — e.g. "6 €
+// les 5 premières heures puis 2 € toutes les 15 minutes") doesn't reduce
+// to a single €/min figure; pricePerMinutePattern requires the amount and
+// "par minute"/"/min" to be directly adjacent, so it correctly leaves
+// those unmatched instead of latching onto an unrelated trailing rate.
+func freshmileSessionPriceFromDescription(raw any) (cents *float64, text string, ok bool) {
+	descText := stringValue(raw)
+	if descText == "" {
+		return nil, "", false
+	}
+
+	var byLang map[string]string
+	if err := json.Unmarshal([]byte(descText), &byLang); err == nil {
+		for _, l := range []string{"fr", "en"} {
+			t := byLang[l]
+			if t == "" {
+				continue
+			}
+			if c := matchEuroCentsFirstNonZero(pricePerMinutePattern, t); c != nil {
+				return c, t, true
+			}
+		}
+		return nil, "", false
+	}
+
+	if c := matchEuroCentsFirstNonZero(pricePerMinutePattern, descText); c != nil {
+		return c, descText, true
+	}
+	return nil, "", false
 }

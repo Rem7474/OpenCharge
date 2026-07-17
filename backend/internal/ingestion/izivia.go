@@ -443,8 +443,8 @@ func iziviaPricingTexts(pricing []any) []string {
 // of only ever looking at the first nested entry.
 func normalizeIziviaTariffs(station map[string]any, pricing []any) []domain.StationTariff {
 	for _, rawText := range iziviaPricingTexts(pricing) {
-		price, sessionPrice, fee := parsePriceText(rawText)
-		if price == nil && sessionPrice == nil && fee == nil {
+		price, sessionPrice, sessionFee, fee := parsePriceText(rawText)
+		if price == nil && sessionPrice == nil && sessionFee == nil && fee == nil {
 			continue
 		}
 		return []domain.StationTariff{{
@@ -455,6 +455,7 @@ func normalizeIziviaTariffs(station map[string]any, pricing []any) []domain.Stat
 			Currency:                "EUR",
 			EnergyPriceCentsPerKWh:  price,
 			SessionPriceCentsPerMin: sessionPrice,
+			SessionFeeCents:         sessionFee,
 			ServiceFeePercent:       fee,
 			RawText:                 rawText,
 			Extra:                   map[string]any{},

@@ -9,6 +9,8 @@ export default function FilterBar({
   onChangePriceMode,
   chargeKWh,
   onChangeChargeKWh,
+  chargeMinutes,
+  onChangeChargeMinutes,
 }) {
   return (
     <div className="filter-bar">
@@ -36,17 +38,30 @@ export default function FilterBar({
           </button>
         </div>
         {priceMode === PRICE_MODE_RECHARGE && (
-          <label>
-            <input
-              type="number"
-              min={1}
-              max={200}
-              className="kwh-input"
-              value={chargeKWh}
-              onChange={(e) => onChangeChargeKWh(Number(e.target.value))}
-            />{" "}
-            kWh
-          </label>
+          <>
+            <label>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                className="kwh-input"
+                value={chargeKWh}
+                onChange={(e) => onChangeChargeKWh(Number(e.target.value))}
+              />{" "}
+              kWh
+            </label>
+            <label>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                className="minutes-input"
+                value={chargeMinutes}
+                onChange={(e) => onChangeChargeMinutes(Number(e.target.value))}
+              />{" "}
+              min de charge
+            </label>
+          </>
         )}
       </div>
     </div>

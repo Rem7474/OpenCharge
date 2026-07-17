@@ -42,8 +42,8 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 		INSERT INTO station_tariffs (
 			station_id, source, plan, kind, model, currency,
 			energy_price_cents_per_kwh, session_price_cents_per_min, congestion_price_cents_per_min,
-			service_fee_percent, valid_from, valid_to, raw_text, extra, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+			service_fee_percent, session_fee_cents, valid_from, valid_to, raw_text, extra, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 		ON CONFLICT (station_id, source, kind, plan) DO UPDATE SET
 			model = EXCLUDED.model,
 			currency = EXCLUDED.currency,
@@ -51,6 +51,7 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 			session_price_cents_per_min = EXCLUDED.session_price_cents_per_min,
 			congestion_price_cents_per_min = EXCLUDED.congestion_price_cents_per_min,
 			service_fee_percent = EXCLUDED.service_fee_percent,
+			session_fee_cents = EXCLUDED.session_fee_cents,
 			valid_from = EXCLUDED.valid_from,
 			valid_to = EXCLUDED.valid_to,
 			raw_text = EXCLUDED.raw_text,
@@ -60,7 +61,7 @@ func (r *TariffRepository) Upsert(ctx context.Context, t domain.StationTariff) e
 	_, err = r.db.Exec(ctx, query,
 		t.StationID, t.Source, plan, t.Kind, t.Model, t.Currency,
 		t.EnergyPriceCentsPerKWh, t.SessionPriceCentsPerMin, t.CongestionPriceCentsPerMin,
-		t.ServiceFeePercent, t.ValidFrom, t.ValidTo, t.RawText, extra,
+		t.ServiceFeePercent, t.SessionFeeCents, t.ValidFrom, t.ValidTo, t.RawText, extra,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert station tariff: %w", err)
@@ -105,6 +106,7 @@ func (r *TariffRepository) BulkUpsert(ctx context.Context, tariffs []domain.Stat
 	sessionPrices := make([]*float64, n)
 	congestionPrices := make([]*float64, n)
 	serviceFees := make([]*float64, n)
+	sessionFees := make([]*float64, n)
 	validFroms := make([]*time.Time, n)
 	validTos := make([]*time.Time, n)
 	rawTexts := make([]string, n)
@@ -128,6 +130,7 @@ func (r *TariffRepository) BulkUpsert(ctx context.Context, tariffs []domain.Stat
 		sessionPrices[i] = t.SessionPriceCentsPerMin
 		congestionPrices[i] = t.CongestionPriceCentsPerMin
 		serviceFees[i] = t.ServiceFeePercent
+		sessionFees[i] = t.SessionFeeCents
 		validFroms[i] = t.ValidFrom
 		validTos[i] = t.ValidTo
 		rawTexts[i] = t.RawText
@@ -138,18 +141,18 @@ func (r *TariffRepository) BulkUpsert(ctx context.Context, tariffs []domain.Stat
 		INSERT INTO station_tariffs (
 			station_id, source, plan, kind, model, currency,
 			energy_price_cents_per_kwh, session_price_cents_per_min, congestion_price_cents_per_min,
-			service_fee_percent, valid_from, valid_to, raw_text, extra, updated_at
+			service_fee_percent, session_fee_cents, valid_from, valid_to, raw_text, extra, updated_at
 		)
 		SELECT s.station_id, s.source, s.plan, s.kind, s.model, s.currency,
 			s.energy_price_cents_per_kwh, s.session_price_cents_per_min, s.congestion_price_cents_per_min,
-			s.service_fee_percent, s.valid_from, s.valid_to, s.raw_text, s.extra::jsonb, now()
+			s.service_fee_percent, s.session_fee_cents, s.valid_from, s.valid_to, s.raw_text, s.extra::jsonb, now()
 		FROM unnest(
 			$1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
 			$7::float8[], $8::float8[], $9::float8[],
-			$10::float8[], $11::timestamptz[], $12::timestamptz[], $13::text[], $14::text[]
+			$10::float8[], $11::float8[], $12::timestamptz[], $13::timestamptz[], $14::text[], $15::text[]
 		) AS s(station_id, source, plan, kind, model, currency,
 			energy_price_cents_per_kwh, session_price_cents_per_min, congestion_price_cents_per_min,
-			service_fee_percent, valid_from, valid_to, raw_text, extra)
+			service_fee_percent, session_fee_cents, valid_from, valid_to, raw_text, extra)
 		ON CONFLICT (station_id, source, kind, plan) DO UPDATE SET
 			model = EXCLUDED.model,
 			currency = EXCLUDED.currency,
@@ -157,6 +160,7 @@ func (r *TariffRepository) BulkUpsert(ctx context.Context, tariffs []domain.Stat
 			session_price_cents_per_min = EXCLUDED.session_price_cents_per_min,
 			congestion_price_cents_per_min = EXCLUDED.congestion_price_cents_per_min,
 			service_fee_percent = EXCLUDED.service_fee_percent,
+			session_fee_cents = EXCLUDED.session_fee_cents,
 			valid_from = EXCLUDED.valid_from,
 			valid_to = EXCLUDED.valid_to,
 			raw_text = EXCLUDED.raw_text,
@@ -166,7 +170,7 @@ func (r *TariffRepository) BulkUpsert(ctx context.Context, tariffs []domain.Stat
 	_, err := r.db.Exec(ctx, query,
 		stationIDs, sources, plans, kinds, models, currencies,
 		energyPrices, sessionPrices, congestionPrices,
-		serviceFees, validFroms, validTos, rawTexts, extras,
+		serviceFees, sessionFees, validFroms, validTos, rawTexts, extras,
 	)
 	if err != nil {
 		return fmt.Errorf("bulk upsert station tariffs: %w", err)
@@ -224,7 +228,7 @@ func (r *TariffRepository) ListByStation(ctx context.Context, stationID uuid.UUI
 	const query = `
 		SELECT id, station_id, source, plan, kind, model, currency,
 			energy_price_cents_per_kwh, session_price_cents_per_min, congestion_price_cents_per_min,
-			service_fee_percent, valid_from, valid_to, raw_text, extra, created_at, updated_at
+			service_fee_percent, session_fee_cents, valid_from, valid_to, raw_text, extra, created_at, updated_at
 		FROM station_tariffs WHERE station_id = $1 ORDER BY source, plan, kind`
 
 	rows, err := r.db.Query(ctx, query, stationID)
@@ -240,7 +244,7 @@ func (r *TariffRepository) ListByStation(ctx context.Context, stationID uuid.UUI
 		if err := rows.Scan(
 			&t.ID, &t.StationID, &t.Source, &t.Plan, &t.Kind, &t.Model, &t.Currency,
 			&t.EnergyPriceCentsPerKWh, &t.SessionPriceCentsPerMin, &t.CongestionPriceCentsPerMin,
-			&t.ServiceFeePercent, &t.ValidFrom, &t.ValidTo, &t.RawText, &extra, &t.CreatedAt, &t.UpdatedAt,
+			&t.ServiceFeePercent, &t.SessionFeeCents, &t.ValidFrom, &t.ValidTo, &t.RawText, &extra, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan tariff: %w", err)
 		}

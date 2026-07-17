@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchStationDetails } from "../api/stations.js";
-import { connectorPriceKind, formatPrice, hasHourlyPricing } from "../utils/pricing.js";
+import { connectorPriceKind, formatPrice, hasHourlyPricing, tariffCostBreakdown, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatUpdatedAt } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 
@@ -23,7 +23,40 @@ function cheapestTariff(tariffs, connectorKind) {
   return from.reduce((min, t) => (t.energy_price_cents_per_kwh < min.energy_price_cents_per_kwh ? t : min));
 }
 
-function TariffRow({ tariff, priceMode, chargeKWh }) {
+// TariffCost renders a tariff's price for the active mode: in "recharge"
+// mode, a breakdown of every cost component the tariff actually carries
+// (energy for chargeKWh, a per-minute rate for chargeMinutes, and any flat
+// session fee) plus their total, since a session's real cost can combine
+// all three (e.g. Izivia's "2,3€ la session de charge puis 0,51€/kWh").
+// In "€/kWh" mode, just the headline energy rate — a blended total doesn't
+// make sense as a per-unit figure.
+function TariffCost({ tariff, priceMode, chargeKWh, chargeMinutes }) {
+  if (priceMode !== PRICE_MODE_RECHARGE) {
+    return tariff.energy_price_cents_per_kwh != null ? (
+      <div className="price">{formatPrice(tariff.energy_price_cents_per_kwh, priceMode, chargeKWh)}</div>
+    ) : null;
+  }
+  const { energy, time, fee, total } = tariffCostBreakdown(tariff, chargeKWh, chargeMinutes);
+  if (total == null) return null;
+  return (
+    <div className="tariff-cost-breakdown">
+      {energy != null && (
+        <div>
+          Énergie ({chargeKWh} kWh) : {energy.toFixed(2)} €
+        </div>
+      )}
+      {time != null && (
+        <div>
+          Temps ({chargeMinutes} min) : {time.toFixed(2)} €
+        </div>
+      )}
+      {fee != null && <div>Frais de session : {fee.toFixed(2)} €</div>}
+      <div className="price">Total estimé : {total.toFixed(2)} €</div>
+    </div>
+  );
+}
+
+function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
   const updatedAt = formatUpdatedAt(tariff.updated_at);
   return (
     <div className="tariff-row">
@@ -33,13 +66,14 @@ function TariffRow({ tariff, priceMode, chargeKWh }) {
       {hasHourlyPricing(tariff) ? (
         <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
       ) : (
-        tariff.energy_price_cents_per_kwh != null && (
-          <div className="price">{formatPrice(tariff.energy_price_cents_per_kwh, priceMode, chargeKWh)}</div>
-        )
+        <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
       )}
       {tariff.service_fee_percent != null && <div>Frais de service : {tariff.service_fee_percent}%</div>}
-      {tariff.session_price_cents_per_min != null && (
+      {priceMode !== PRICE_MODE_RECHARGE && tariff.session_price_cents_per_min != null && (
         <div>{(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min</div>
+      )}
+      {priceMode !== PRICE_MODE_RECHARGE && tariff.session_fee_cents != null && (
+        <div>{(tariff.session_fee_cents / 100).toFixed(2)} € / session</div>
       )}
       {tariff.raw_text && <div className="raw-text">{tariff.raw_text}</div>}
       {updatedAt && <div className="updated-at">Mis à jour le {updatedAt}</div>}
@@ -47,7 +81,7 @@ function TariffRow({ tariff, priceMode, chargeKWh }) {
   );
 }
 
-export default function StationDetails({ stationId, onClose, selectedSources, priceMode, chargeKWh }) {
+export default function StationDetails({ stationId, onClose, selectedSources, priceMode, chargeKWh, chargeMinutes }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
 
@@ -125,7 +159,7 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
               {hasHourlyPricing(tariff) ? (
                 <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
               ) : (
-                <div className="price">{formatPrice(tariff.energy_price_cents_per_kwh, priceMode, chargeKWh)}</div>
+                <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
               )}
             </div>
           ))}
@@ -138,7 +172,7 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
               {hasHourlyPricing(overallBest) ? (
                 <HourlyPriceChart tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} />
               ) : (
-                <div className="price">{formatPrice(overallBest.energy_price_cents_per_kwh, priceMode, chargeKWh)}</div>
+                <TariffCost tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
               )}
             </div>
           )}
@@ -147,7 +181,7 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
           <h3>Tous les tarifs</h3>
           {data.tariffs.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
           {data.tariffs.map((t, i) => (
-            <TariffRow tariff={t} priceMode={priceMode} chargeKWh={chargeKWh} key={i} />
+            <TariffRow tariff={t} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} key={i} />
           ))}
         </>
       )}

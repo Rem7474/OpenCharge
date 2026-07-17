@@ -263,7 +263,8 @@ a {
   color: #fff;
 }
 
-.kwh-input {
+.kwh-input,
+.minutes-input {
   width: 64px;
   padding: 3px 6px;
   border: 1px solid var(--color-border);

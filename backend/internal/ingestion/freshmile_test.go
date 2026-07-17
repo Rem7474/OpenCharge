@@ -141,7 +141,16 @@ func TestFreshmilePriceFromDescription(t *testing.T) {
 	}
 }
 
-func TestNormalizeFreshmileTariffs(t *testing.T) {
+// TestNormalizeFreshmileTariffsDedupesToOnePerKind exercises the same
+// three-connector fixture the old per-plan version of this test used
+// (before every connector's custom_ref became its own Plan, see
+// normalizeFreshmileTariffs), but now expects a single collapsed "dc"
+// tariff: all three connectors resolve to Kind=dc here (best_power
+// category "fast" forces every connector to dc regardless of its own
+// power), and among them the two non-preferential candidates (70.0 and
+// the free one) beat the preferential 51.0 one on tier alone, then the
+// free (0.0) one wins on price within that tier.
+func TestNormalizeFreshmileTariffsDedupesToOnePerKind(t *testing.T) {
 	details := map[string]any{
 		"connectors": map[string]any{
 			"best_power": map[string]any{"category": "fast", "kw": 50},
@@ -193,52 +202,115 @@ func TestNormalizeFreshmileTariffs(t *testing.T) {
 	}
 
 	tariffs := normalizeFreshmileTariffs(details)
-	if len(tariffs) != 3 {
-		t.Fatalf("got %d tariffs, want 3", len(tariffs))
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1 (every connector here resolves to Kind=dc, so they collapse into one)", len(tariffs))
 	}
 
-	byPlan := map[string]domain.StationTariff{}
+	got := tariffs[0]
+	if got.Source != "freshmile" {
+		t.Errorf("Source = %q, want freshmile", got.Source)
+	}
+	if got.Plan != domain.TariffPlanStandard {
+		t.Errorf("Plan = %q, want %q (custom_ref is no longer surfaced as Plan)", got.Plan, domain.TariffPlanStandard)
+	}
+	if got.Kind != domain.TariffKindDC {
+		t.Errorf("Kind = %q, want dc (best_power_category=fast)", got.Kind)
+	}
+	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 0 (the free, non-preferential candidate wins: non-preferential beats preferential regardless of price, then cheapest wins within that tier)", got.EnergyPriceCentsPerKWh)
+	}
+	if got.Extra["is_free"] != true {
+		t.Errorf("Extra[is_free] = %v, want true", got.Extra["is_free"])
+	}
+}
+
+// TestNormalizeFreshmileTariffsNonPreferentialAlwaysWins pins that a
+// non-preferential (publicly available) price is picked over a
+// preferential (partner/member-only) one even when the preferential price
+// is cheaper — showing a discount most visitors can't access would be
+// misleading.
+func TestNormalizeFreshmileTariffsNonPreferentialAlwaysWins(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":        "EUR",
+							"is_preferential": true,
+							"custom_ref":      "cheap-partner-deal",
+							"description":     `{"fr": "0,10 € / kWh entamé."}`,
+						},
+					},
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"custom_ref":  "public-price",
+							"description": `{"fr": "0,80 € / kWh entamé."}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	if got := tariffs[0].EnergyPriceCentsPerKWh; got == nil || *got != 80.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 80.0 (the more expensive but non-preferential price)", got)
+	}
+}
+
+// TestNormalizeFreshmileTariffsSeparatesACAndDC confirms the per-Kind
+// dedup keeps AC and DC as two distinct tariffs rather than collapsing
+// everything down to a single row per station.
+func TestNormalizeFreshmileTariffsSeparatesACAndDC(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"custom_ref":  "ac-tariff",
+							"description": `{"fr": "0,40 € / kWh entamé."}`,
+						},
+					},
+					map[string]any{
+						"power":    100.0,
+						"standard": "IEC_62196_T2_COMBO",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"custom_ref":  "dc-tariff",
+							"description": `{"fr": "0,60 € / kWh entamé."}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 2 {
+		t.Fatalf("got %d tariffs, want 2 (one ac, one dc)", len(tariffs))
+	}
+	byKind := map[string]domain.StationTariff{}
 	for _, tariff := range tariffs {
-		if tariff.Source != "freshmile" {
-			t.Errorf("tariff %s: Source = %q, want freshmile", tariff.Plan, tariff.Source)
-		}
-		byPlan[tariff.Plan] = tariff
+		byKind[tariff.Kind] = tariff
 	}
-
-	standard, ok := byPlan["normal-k-wh-interop-20"]
-	if !ok {
-		t.Fatal("missing plan normal-k-wh-interop-20 (non-preferential)")
+	if ac, ok := byKind[domain.TariffKindAC]; !ok || ac.EnergyPriceCentsPerKWh == nil || *ac.EnergyPriceCentsPerKWh != 40.0 {
+		t.Errorf("ac tariff = %+v, want EnergyPriceCentsPerKWh=40.0", ac)
 	}
-	if standard.Kind != domain.TariffKindDC {
-		t.Errorf("standard.Kind = %q, want dc (best_power_category=fast)", standard.Kind)
-	}
-	if standard.EnergyPriceCentsPerKWh == nil || *standard.EnergyPriceCentsPerKWh != 70.0 {
-		t.Errorf("standard.EnergyPriceCentsPerKWh = %v, want 70.0", standard.EnergyPriceCentsPerKWh)
-	}
-	if standard.Extra["connectorType"] != "CCS" {
-		t.Errorf("standard.Extra[connectorType] = %v, want CCS", standard.Extra["connectorType"])
-	}
-
-	preferential, ok := byPlan["normal-k-wh-interop-20:preferential"]
-	if !ok {
-		t.Fatal("missing plan normal-k-wh-interop-20:preferential")
-	}
-	if preferential.EnergyPriceCentsPerKWh == nil || *preferential.EnergyPriceCentsPerKWh != 51.0 {
-		t.Errorf("preferential.EnergyPriceCentsPerKWh = %v, want 51.0", preferential.EnergyPriceCentsPerKWh)
-	}
-	if preferential.Extra["connectorType"] != "T2" {
-		t.Errorf("preferential.Extra[connectorType] = %v, want T2", preferential.Extra["connectorType"])
-	}
-
-	free, ok := byPlan["free-charging"]
-	if !ok {
-		t.Fatal("missing plan free-charging")
-	}
-	if free.EnergyPriceCentsPerKWh == nil || *free.EnergyPriceCentsPerKWh != 0 {
-		t.Errorf("free.EnergyPriceCentsPerKWh = %v, want 0 (is_free is a real 0 €/kWh price)", free.EnergyPriceCentsPerKWh)
-	}
-	if free.Extra["is_free"] != true {
-		t.Errorf("free.Extra[is_free] = %v, want true", free.Extra["is_free"])
+	if dc, ok := byKind[domain.TariffKindDC]; !ok || dc.EnergyPriceCentsPerKWh == nil || *dc.EnergyPriceCentsPerKWh != 60.0 {
+		t.Errorf("dc tariff = %+v, want EnergyPriceCentsPerKWh=60.0", dc)
 	}
 }
 

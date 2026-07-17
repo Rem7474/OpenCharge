@@ -7,6 +7,7 @@ import { PRICE_MODE_PER_KWH } from "../utils/pricing.js";
 
 const FRANCE_CENTER = [46.8, 2.5];
 const DEFAULT_CHARGE_KWH = 50;
+const DEFAULT_CHARGE_MINUTES = 60;
 
 export default function MapPage() {
   const [selectedStationId, setSelectedStationId] = useState(null);
@@ -14,6 +15,10 @@ export default function MapPage() {
   const [selectedSources, setSelectedSources] = useState({});
   const [priceMode, setPriceMode] = useState(PRICE_MODE_PER_KWH);
   const [chargeKWh, setChargeKWh] = useState(DEFAULT_CHARGE_KWH);
+  // How long the charging session lasts, in minutes — feeds a tariff's
+  // per-minute rate and any flat session fee (see utils/pricing.js#
+  // tariffCostBreakdown), alongside chargeKWh for the energy cost.
+  const [chargeMinutes, setChargeMinutes] = useState(DEFAULT_CHARGE_MINUTES);
 
   const toggleSource = (source, wasChecked) => {
     setSelectedSources((prev) => {
@@ -41,6 +46,8 @@ export default function MapPage() {
         onChangePriceMode={setPriceMode}
         chargeKWh={chargeKWh}
         onChangeChargeKWh={setChargeKWh}
+        chargeMinutes={chargeMinutes}
+        onChangeChargeMinutes={setChargeMinutes}
       />
       <div className="app-body" style={{ flex: 1 }}>
         <div className="map-container">
@@ -64,6 +71,7 @@ export default function MapPage() {
             selectedSources={selectedSources}
             priceMode={priceMode}
             chargeKWh={chargeKWh}
+            chargeMinutes={chargeMinutes}
           />
         )}
       </div>

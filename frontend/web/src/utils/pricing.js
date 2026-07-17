@@ -49,7 +49,9 @@ export const PRICE_MODE_RECHARGE = "recharge";
 /**
  * Format a €/kWh price (in cents) according to the active display mode.
  * In "recharge" mode, returns the total price for chargeKWh kWh of energy
- * (energy price only — session/congestion fees are not included).
+ * (energy price only — session/congestion fees are not included; for a
+ * tariff's full cost including its per-minute rate and flat session fee,
+ * see tariffCostBreakdown).
  */
 export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
   if (priceCentsPerKWh == null) return null;
@@ -58,4 +60,25 @@ export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
     return `${total.toFixed(2)} €`;
   }
   return `${(priceCentsPerKWh / 100).toFixed(2)} €/kWh`;
+}
+
+/**
+ * Break a tariff's estimated cost for a chargeKWh/chargeMinutes session
+ * down into its known components — energy (€/kWh × kWh), time (a
+ * per-minute rate × minutes charging, e.g. Freshmile's "0,40 € par
+ * minute"), and a flat session fee (a one-time amount just for starting,
+ * e.g. Izivia's "2,3€ la session de charge") — plus their sum. Each
+ * component is null when the tariff doesn't carry that kind of price, so
+ * callers can render only the lines that apply; total is null only when
+ * none of the three are known at all.
+ */
+export function tariffCostBreakdown(tariff, chargeKWh, chargeMinutes) {
+  const energy = tariff.energy_price_cents_per_kwh != null ? (tariff.energy_price_cents_per_kwh / 100) * chargeKWh : null;
+  const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * chargeMinutes : null;
+  const fee = tariff.session_fee_cents != null ? tariff.session_fee_cents / 100 : null;
+  if (energy == null && time == null && fee == null) {
+    return { energy, time, fee, total: null };
+  }
+  const total = (energy ?? 0) + (time ?? 0) + (fee ?? 0);
+  return { energy, time, fee, total };
 }
