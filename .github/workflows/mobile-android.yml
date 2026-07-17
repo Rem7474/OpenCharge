@@ -53,7 +53,11 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          # @capacitor/android's own build.gradle sets sourceCompatibility/
+          # targetCompatibility to Java 21 (see
+          # android/app/capacitor.build.gradle) — javac --release 21 fails
+          # ("invalid source release: 21") on any older JDK.
+          java-version: "21"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
