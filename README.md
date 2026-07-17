@@ -17,7 +17,7 @@ opencharge/
   backend/
     cmd/
       opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, all)
+      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, all)
     internal/
       api/                 # handlers HTTP + DTOs JSON
       domain/               # modèle métier (Station, SourceStation, Tariff, Link)
@@ -111,14 +111,23 @@ go run ./cmd/opencharge-ingest -source electra    # stations + tarifs Electra, c
 go run ./cmd/opencharge-ingest -source izivia     # stations + tarifs Izivia, corrélation
 go run ./cmd/opencharge-ingest -source tesla      # Superchargers Tesla, corrélation
 go run ./cmd/opencharge-ingest -source freshmile  # stations + tarifs Freshmile, corrélation
-go run ./cmd/opencharge-ingest -source all        # les cinq, dans cet ordre
+go run ./cmd/opencharge-ingest -source fastned    # tarifs fixes Fastned sur les stations IRVE déjà taguées
+go run ./cmd/opencharge-ingest -source all        # les six, dans cet ordre
 ```
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 `-electra-url`, `-tesla-url`, `-freshmile-url`, `-link-max-distance-m`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra, Izivia, Tesla et Freshmile sont corrélés.
+lequel Electra, Izivia, Tesla, Freshmile et Fastned sont corrélés (pour
+Fastned, la "corrélation" est directe : ses stations sont déjà les lignes
+IRVE elles-mêmes, identifiées par `operator_name`/`enseigne` contenant
+"fastned" — voir `backend/internal/ingestion/fastned.go`).
+
+**Fastned n'a pas d'API de tarifs publique scrapable** : ses deux tarifs
+(0,61 €/kWh standard, 0,43 €/kWh abonné) sont des constantes fixes dans le
+code, à mettre à jour manuellement si Fastned change ses prix. Aucune
+requête réseau n'est faite pour ce run.
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux

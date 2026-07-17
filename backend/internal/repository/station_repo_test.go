@@ -137,6 +137,51 @@ func TestStationRepository_GetByIRVEID_NotFound(t *testing.T) {
 	}
 }
 
+func TestStationRepository_ListByOperatorLike(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	repo := NewStationRepository(pool)
+
+	viaOperator := testStation("FROPLIKE01", 45.9, 6.1)
+	viaOperator.OperatorName = "FASTNED"
+	viaOperator.Enseigne = "FASTNED"
+	if _, err := repo.UpsertStation(ctx, viaOperator); err != nil {
+		t.Fatalf("UpsertStation viaOperator: %v", err)
+	}
+
+	// Matched via enseigne, not operator_name, and with different casing —
+	// IRVE data isn't consistent about which column carries a network's
+	// brand name for a given station.
+	viaEnseigne := testStation("FROPLIKE02", 45.91, 6.11)
+	viaEnseigne.OperatorName = "Some Legal Entity SAS"
+	viaEnseigne.Enseigne = "Fastned"
+	if _, err := repo.UpsertStation(ctx, viaEnseigne); err != nil {
+		t.Fatalf("UpsertStation viaEnseigne: %v", err)
+	}
+
+	other := testStation("FROPLIKE03", 45.92, 6.12)
+	other.OperatorName = "Electra"
+	other.Enseigne = "Electra"
+	if _, err := repo.UpsertStation(ctx, other); err != nil {
+		t.Fatalf("UpsertStation other: %v", err)
+	}
+
+	got, err := repo.ListByOperatorLike(ctx, "fastned")
+	if err != nil {
+		t.Fatalf("ListByOperatorLike: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByOperatorLike(\"fastned\") = %d stations, want 2", len(got))
+	}
+	ids := map[string]bool{}
+	for _, s := range got {
+		ids[s.IRVEIDPDC] = true
+	}
+	if !ids["FROPLIKE01"] || !ids["FROPLIKE02"] {
+		t.Errorf("ListByOperatorLike(\"fastned\") = %v, want FROPLIKE01 and FROPLIKE02", ids)
+	}
+}
+
 func TestStationRepository_ListByBBox(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

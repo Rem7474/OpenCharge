@@ -16,7 +16,7 @@ import (
 func main() {
 	var (
 		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, or all")
+		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, or all")
 		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
 		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
 		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
@@ -28,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, or all")
+		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, or all")
 	}
 
 	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
@@ -97,6 +97,16 @@ func main() {
 		}
 		log.Printf("freshmile ingestion complete: %d locations", count)
 	}
+	runFastned := func() {
+		// No source URL/config: Fastned's stations are already in IRVE,
+		// this only tags them with fixed tariffs — see fastned.go.
+		ingester := ingestion.NewFastnedIngester(pool, stationRepo, tariffRepo)
+		count, err := ingester.Run(ctx)
+		if err != nil {
+			log.Fatalf("fastned ingestion failed: %v", err)
+		}
+		log.Printf("fastned ingestion complete: %d stations", count)
+	}
 
 	switch *source {
 	case "irve":
@@ -109,16 +119,20 @@ func main() {
 		runTesla()
 	case "freshmile":
 		runFreshmile()
+	case "fastned":
+		runFastned()
 	case "all":
 		// IRVE first: it's the canonical referential that electra/izivia/
-		// tesla/freshmile correlate against.
+		// tesla/freshmile correlate against, and that fastned tags
+		// directly — so it must exist before fastned runs too.
 		runIRVE()
 		runElectra()
 		runIzivia()
 		runTesla()
 		runFreshmile()
+		runFastned()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, or all", *source)
+		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, or all", *source)
 	}
 }
 

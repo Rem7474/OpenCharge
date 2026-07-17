@@ -329,6 +329,47 @@ func (r *StationRepository) GetByIRVEID(ctx context.Context, irveID string) (*do
 	return &s, nil
 }
 
+// ListByOperatorLike returns every IRVE station whose operator_name or
+// enseigne case-insensitively contains needle — for ingesters (Fastned)
+// whose whole network is already present in the IRVE referential, so there
+// is no external station list to fetch/correlate: the "source" is just a
+// tag applied directly to matching IRVE rows, no source_stations/
+// station_links involved at all. Matches on either column since IRVE data
+// entry isn't consistent about which of the two carries a network's brand
+// name for a given station.
+func (r *StationRepository) ListByOperatorLike(ctx context.Context, needle string) ([]domain.Station, error) {
+	const query = `
+		SELECT id, irve_id_station, irve_id_pdc, operator_name, amenageur, enseigne, name,
+			address_street, address_postal_code, address_city, address_country_code,
+			ST_Y(location), ST_X(location), power_kw, connector_type, access_type, is_24_7,
+			metadata, created_at, updated_at
+		FROM stations
+		WHERE operator_name ILIKE '%' || $1 || '%' OR enseigne ILIKE '%' || $1 || '%'`
+
+	rows, err := r.pool.Query(ctx, query, needle)
+	if err != nil {
+		return nil, fmt.Errorf("list stations by operator like %q: %w", needle, err)
+	}
+	defer rows.Close()
+
+	var stations []domain.Station
+	for rows.Next() {
+		var s domain.Station
+		var metadata []byte
+		if err := rows.Scan(
+			&s.ID, &s.IRVEIDStation, &s.IRVEIDPDC, &s.OperatorName, &s.Amenageur, &s.Enseigne, &s.Name,
+			&s.AddressStreet, &s.AddressPostal, &s.AddressCity, &s.AddressCountry,
+			&s.Lat, &s.Lng, &s.PowerKW, &s.ConnectorType, &s.AccessType, &s.Is24_7,
+			&metadata, &s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan station by operator like %q: %w", needle, err)
+		}
+		_ = json.Unmarshal(metadata, &s.Metadata)
+		stations = append(stations, s)
+	}
+	return stations, rows.Err()
+}
+
 func scanStationSummary(rows pgx.Rows, hasSourcesFilter bool) (domain.StationSummary, error) {
 	var s domain.Station
 	var metadata []byte
