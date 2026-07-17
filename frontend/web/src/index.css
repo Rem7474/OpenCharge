@@ -289,47 +289,61 @@ a {
   color: var(--color-accent);
 }
 
-.filter-panel-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1200;
-  background: rgba(0, 0, 0, 0.25);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 72px 16px 16px;
-  overflow-y: auto;
-}
-
+/* Docked to the top-right of the viewport, below the header/filter bar —
+   fixed (not absolute: FilterPanel is rendered from FilterBar, which sits
+   above .map-container as a header, not inside it) so it floats over the
+   map without covering it, instead of a centered modal + backdrop. */
 .filter-panel {
-  width: 100%;
-  max-width: 380px;
+  position: fixed;
+  top: 68px;
+  right: 12px;
+  z-index: 1150;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: 18px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
   overflow: hidden;
+}
+
+@media (max-width: 720px) {
+  .filter-panel {
+    top: auto;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: 100%;
+    max-height: 70vh;
+  }
 }
 
 .filter-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 18px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
 }
 
 .filter-panel-header h3 {
   margin: 0;
-  font-size: 17px;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .filter-panel-body {
-  padding: 14px 18px 18px;
+  padding: 12px 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  max-height: 70vh;
+  gap: 12px;
   overflow-y: auto;
 }
 
@@ -340,6 +354,9 @@ a {
 }
 
 .filter-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 700;
   color: var(--color-muted);
@@ -466,6 +483,80 @@ a {
 
 /* --- Station detail --- */
 
+.station-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.station-header-text h2 {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.station-header-sub {
+  font-size: 13px;
+  color: var(--color-muted);
+  margin-top: 2px;
+}
+
+.station-header .close-btn {
+  float: none;
+  flex-shrink: 0;
+}
+
+.station-meta-card {
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.station-meta-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.station-meta-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--color-muted);
+}
+
+.connector-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.connector-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
 .station-price-block {
   border: 1px solid var(--color-border);
   border-radius: 14px;
@@ -479,10 +570,17 @@ a {
 }
 
 .station-price-block .source-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-weight: 600;
   text-transform: uppercase;
   font-size: 11px;
   color: var(--color-muted);
+}
+
+.station-price-block.best-overall .source-name {
+  color: var(--color-accent);
 }
 
 .station-price-block .price {

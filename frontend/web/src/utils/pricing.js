@@ -59,6 +59,41 @@ export function hasHourlyPricing(tariff) {
   return Array.isArray(windows) && windows.length > 1;
 }
 
+// Mirrors backend/db/migrations/008_add_current_window_price_fn.up.sql's
+// current_window_price SQL function: half-open [start, end) in HH:MM,
+// wrapping past midnight (e.g. 22:00-06:00). Kept in sync by hand — same
+// reason as the connector-kind sets above, this can't share code with SQL
+// or Go. Exported so HourlyPriceChart can reuse it (it needs the price at
+// every hour of the day, not just "now").
+export function timeInWindow(hm, start, end) {
+  if (!start || !end) return false;
+  if (start <= end) return hm >= start && hm < end;
+  return hm >= start || hm < end;
+}
+
+/**
+ * A tariff's live €/kWh price right now, for tariffs whose price varies by
+ * time of day (currently only Electra — see hasHourlyPricing). Falls back
+ * to the tariff's own energy_price_cents_per_kwh when it has no (or only
+ * one) window: that field is already the live/only price for those.
+ *
+ * tariff.energy_price_cents_per_kwh itself is a snapshot the backend fixes
+ * once per ingestion run (whichever window covered "now" at that moment —
+ * see electra.go's withPlan) and never updates until the next run, so
+ * comparing/ranking tariffs by that raw field can pick a stale "best" price
+ * once real time has moved into a different window. Always prefer this
+ * function over the raw field when a full tariff object (with .extra) is
+ * available.
+ */
+export function currentEnergyPriceCentsPerKWh(tariff) {
+  if (!hasHourlyPricing(tariff)) return tariff?.energy_price_cents_per_kwh ?? null;
+  const priced = tariff.extra.windows.filter((w) => w.energyPriceCentsPerKwh != null);
+  if (priced.length === 0) return tariff.energy_price_cents_per_kwh ?? null;
+  const hm = new Date().toTimeString().slice(0, 5);
+  const match = priced.find((w) => timeInWindow(hm, w.startTime, w.endTime));
+  return (match ?? priced[0]).energyPriceCentsPerKwh;
+}
+
 export const PRICE_MODE_PER_KWH = "per_kwh";
 export const PRICE_MODE_RECHARGE = "recharge";
 

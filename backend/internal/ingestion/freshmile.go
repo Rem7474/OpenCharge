@@ -36,9 +36,18 @@ const freshmileZoom = 14
 const freshmileMaxSubdivisionDepth = 8
 
 // freshmileMaxTilesVisited is a hard safety cap on the total number of
-// map-locations calls in one Run, independent of depth, in case pathological
-// cluster geometry causes an explosion in sibling tiles.
-const freshmileMaxTilesVisited = 20000
+// map-locations calls in one Run, in case pathological cluster geometry
+// causes an explosion in sibling tiles. It must stay well above what a real
+// full-France scan needs: freshmileMaxSubdivisionDepth (8) and
+// subdivideBBox's strict quadrant-halving already bound the worst case per
+// initial grid tile to a fixed geometric series (sum of 4^0..4^8 ≈ 87k), so
+// this counter's only job is to catch true runaway growth, not to throttle
+// legitimate coverage. It used to be 20000 — a single shared counter across
+// every initial grid tile — which meant dense clusters (e.g. Île-de-France)
+// exhausted the whole budget through deep subdivision before goroutines for
+// other, later-scheduled regions of France got to visit a single tile,
+// silently truncating national coverage rather than slowing it down.
+const freshmileMaxTilesVisited = 500000
 
 // freshmileScanWorkers bounds how many map-locations requests the
 // discovery scan (fetchAllLocationIDs) has in flight at once. The scan is
@@ -252,7 +261,12 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	log.Printf("freshmile: done, %d locations processed", processed)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
-	if err == nil {
+	// processed > 0 guards against a scan that silently found/fetched
+	// nothing (e.g. Freshmile's map-locations API down for the whole run)
+	// looking identical to "France has zero stations" and wiping the
+	// entire known dataset — see the same guard in izivia.go for the
+	// production incident that motivated it.
+	if err == nil && processed > 0 {
 		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart); sweepErr != nil {
 			return processed, sweepErr
 		}

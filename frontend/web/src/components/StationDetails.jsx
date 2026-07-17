@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
+import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star } from "lucide-react";
 import { fetchStationDetails } from "../api/stations.js";
-import { connectorPriceKind, formatPrice, hasHourlyPricing, tariffCostBreakdown, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
-import { formatSourceLabel, formatPlanLabel, formatUpdatedAt } from "../utils/format.js";
+import {
+  connectorPriceKind,
+  currentEnergyPriceCentsPerKWh,
+  formatPrice,
+  hasHourlyPricing,
+  tariffCostBreakdown,
+  PRICE_MODE_RECHARGE,
+} from "../utils/pricing.js";
+import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 
 // Pick, among a (source, plan)'s tariffs, the one matching the station's
@@ -15,12 +23,17 @@ function bestTariffForSource(tariffs, source, plan, connectorKind) {
   return matching ?? candidates[0];
 }
 
+// Ranks by currentEnergyPriceCentsPerKWh, not the raw
+// energy_price_cents_per_kwh field: for a windowed tariff (Electra) that
+// field is a snapshot fixed at the last ingestion run, so ranking by it
+// directly can pick a tariff that was cheapest at ingestion time but isn't
+// live right now.
 function cheapestTariff(tariffs, connectorKind) {
   const candidates = tariffs.filter((t) => t.energy_price_cents_per_kwh != null);
   if (candidates.length === 0) return null;
   const pool = connectorKind ? candidates.filter((t) => t.kind === connectorKind) : candidates;
   const from = pool.length > 0 ? pool : candidates;
-  return from.reduce((min, t) => (t.energy_price_cents_per_kwh < min.energy_price_cents_per_kwh ? t : min));
+  return from.reduce((min, t) => (currentEnergyPriceCentsPerKWh(t) < currentEnergyPriceCentsPerKWh(min) ? t : min));
 }
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
@@ -110,52 +123,87 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
   const cheapestSelected =
     selectedTariffs.length > 0
       ? selectedTariffs.reduce((min, e) =>
-          e.tariff.energy_price_cents_per_kwh < min.tariff.energy_price_cents_per_kwh ? e : min
+          currentEnergyPriceCentsPerKWh(e.tariff) < currentEnergyPriceCentsPerKWh(min.tariff) ? e : min
         )
       : null;
   const overallBest = data ? cheapestTariff(data.tariffs, connectorKind) : null;
   const overallBeatsSelection =
     overallBest &&
-    (!cheapestSelected || overallBest.energy_price_cents_per_kwh < cheapestSelected.tariff.energy_price_cents_per_kwh);
+    (!cheapestSelected ||
+      currentEnergyPriceCentsPerKWh(overallBest) < currentEnergyPriceCentsPerKWh(cheapestSelected.tariff));
 
   return (
     <div className="sidebar">
-      <button className="close-btn" onClick={onClose} aria-label="Fermer">
-        ✕
-      </button>
       {error && <p>Erreur : {error}</p>}
       {!data && !error && <p>Chargement…</p>}
       {data && (
         <>
-          <h2>{data.station.name || "Station sans nom"}</h2>
-          <p>
-            {data.station.address.street}
-            <br />
-            {data.station.address.postalCode} {data.station.address.city}
-          </p>
-          <p>
-            Opérateur : {data.station.operator || "—"}
-            {data.station.enseigne ? ` (${data.station.enseigne})` : ""}
-          </p>
-          <p>
-            Connecteurs :{" "}
-            {data.station.connectors
-              .map((c) => `${c.kind}${c.maxPowerKw ? ` ${c.maxPowerKw}kW` : ""}`)
-              .join(", ") || "inconnu"}
-          </p>
-          <p>
-            Accès : {data.station.accessType || "inconnu"} · 24/7 : {data.station.is24_7 ? "oui" : "non"}
-          </p>
-          {data.station.openingHours && data.station.openingHours !== "24/7" && (
-            <p>Horaires : {data.station.openingHours}</p>
-          )}
-          {data.station.pdcCount != null && <p>Points de charge sur site : {data.station.pdcCount}</p>}
-          {data.station.accessibilityPmr && <p>Accessibilité PMR : {data.station.accessibilityPmr}</p>}
-          {data.station.cableT2Attached != null && (
-            <p>Câble T2 attaché : {data.station.cableT2Attached ? "oui" : "non"}</p>
-          )}
+          <div className="station-header">
+            <div className="station-header-text">
+              <h2>{data.station.name || "Station sans nom"}</h2>
+              <div className="station-header-sub">
+                {data.station.operator || "Opérateur inconnu"}
+                {data.station.enseigne ? ` · ${data.station.enseigne}` : ""}
+              </div>
+            </div>
+            <button className="close-btn" onClick={onClose} aria-label="Fermer">
+              <X size={15} strokeWidth={2.2} />
+            </button>
+          </div>
 
-          <h3>Prix</h3>
+          <div className="station-meta-card">
+            <div className="station-meta-row">
+              <MapPin size={15} strokeWidth={2} className="station-meta-icon" />
+              <span>
+                {data.station.address.street}
+                <br />
+                {data.station.address.postalCode} {data.station.address.city}
+              </span>
+            </div>
+
+            {data.station.connectors.length > 0 && (
+              <div className="connector-badges">
+                {data.station.connectors.map((c, i) => (
+                  <span className="connector-badge" key={i}>
+                    <Zap size={13} strokeWidth={2.2} />
+                    {formatConnectorLabel(c.kind)}
+                    {c.maxPowerKw ? ` · ${c.maxPowerKw}kW` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="station-meta-row">
+              <Clock size={15} strokeWidth={2} className="station-meta-icon" />
+              <span>
+                {data.station.accessType || "Accès inconnu"} · {data.station.is24_7 ? "24/7" : "horaires limités"}
+                {data.station.openingHours && data.station.openingHours !== "24/7" && ` (${data.station.openingHours})`}
+              </span>
+            </div>
+
+            {data.station.pdcCount != null && (
+              <div className="station-meta-row">
+                <Building2 size={15} strokeWidth={2} className="station-meta-icon" />
+                <span>{data.station.pdcCount} point(s) de charge sur site</span>
+              </div>
+            )}
+            {data.station.accessibilityPmr && (
+              <div className="station-meta-row">
+                <Accessibility size={15} strokeWidth={2} className="station-meta-icon" />
+                <span>{data.station.accessibilityPmr}</span>
+              </div>
+            )}
+            {data.station.cableT2Attached != null && (
+              <div className="station-meta-row">
+                <Cable size={15} strokeWidth={2} className="station-meta-icon" />
+                <span>Câble T2 {data.station.cableT2Attached ? "attaché" : "non attaché"}</span>
+              </div>
+            )}
+          </div>
+
+          <h3 className="section-heading">
+            <Tag size={15} strokeWidth={2.2} /> Prix
+          </h3>
           {selectedTariffs.length === 0 && selectedEntries.length > 0 && (
             <p>Aucun tarif connu à cette station pour les réseaux sélectionnés.</p>
           )}
@@ -174,8 +222,8 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
           {overallBest && overallBeatsSelection && (
             <div className="station-price-block best-overall">
               <div className="source-name">
-                Meilleur prix toutes sources · {formatSourceLabel(overallBest.source)} ·{" "}
-                {formatPlanLabel(overallBest.plan)}
+                <Star size={12} strokeWidth={2.4} /> Meilleur prix toutes sources · {formatSourceLabel(overallBest.source)}{" "}
+                · {formatPlanLabel(overallBest.plan)}
               </div>
               {hasHourlyPricing(overallBest) ? (
                 <HourlyPriceChart tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} />
@@ -186,7 +234,7 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
           )}
           {!overallBest && selectedEntries.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
 
-          <h3>Tous les tarifs</h3>
+          <h3 className="section-heading">Tous les tarifs</h3>
           {data.tariffs.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
           {data.tariffs.map((t, i) => (
             <TariffRow tariff={t} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} key={i} />

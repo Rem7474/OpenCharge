@@ -207,7 +207,10 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	log.Printf("tesla: done, %d stations processed", result.processed)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
-	if firstErr == nil {
+	// result.processed > 0 guards against a run that silently processed
+	// nothing looking identical to "no Tesla stations exist" and wiping the
+	// entire known dataset — see the same guard in izivia.go.
+	if firstErr == nil && result.processed > 0 {
 		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart); err != nil {
 			return result.processed, err
 		}

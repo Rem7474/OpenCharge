@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -207,8 +208,15 @@ feedLoop:
 	log.Printf("izivia: done, %d stations processed", result.processed)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData) —
-	// firstErr covers both ctx cancellation and a write failure.
-	if firstErr == nil {
+	// firstErr covers both ctx cancellation and a write failure. result.processed
+	// > 0 is a second, independent guard: every healthy run re-touches
+	// thousands of stations, so zero processed with no error is itself a
+	// sign something upstream failed silently (e.g. every marker's detail
+	// fetch failing while the marker scan itself reported success) —
+	// sweeping in that case would wipe the entire known dataset instead of
+	// just skipping a bad run. See also fetchMarkers' own all-squares-failed
+	// check, which catches the total-scan-failure case earlier.
+	if firstErr == nil && result.processed > 0 {
 		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "izivia", runStart); err != nil {
 			return result.processed, err
 		}
@@ -549,6 +557,15 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 	if scanWorkers > len(squares) {
 		scanWorkers = len(squares)
 	}
+	// succeeded/failed count per-square outcomes so a total scan failure
+	// (every square erroring, e.g. Izivia's backend returning gRPC 500s for
+	// the whole run) can be told apart from a scan that genuinely found zero
+	// markers. Without this, fetchMarkers used to return an empty slice with
+	// a nil error either way — indistinguishable from Run()'s point of view,
+	// which then went on to sweep every previously-known Izivia
+	// source_station/tariff as "stale", wiping the entire dataset on what
+	// was actually a total upstream outage, not an empty France.
+	var succeeded, failed int64
 	for i := 0; i < scanWorkers; i++ {
 		wg.Add(1)
 		go func() {
@@ -566,13 +583,16 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 				label := fmt.Sprintf("%s (square centerLng=%g centerLat=%g zoom=%d)", markersURL, square.CenterLng, square.CenterLat, square.Zoom)
 				body, err := ing.postJSON(ctx, markersURL, label, payload)
 				if err != nil {
+					atomic.AddInt64(&failed, 1)
 					log.Printf("izivia: markers square failed: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
 					continue
 				}
 				var markers []map[string]any
 				if err := json.Unmarshal(body, &markers); err != nil {
+					atomic.AddInt64(&failed, 1)
 					continue
 				}
+				atomic.AddInt64(&succeeded, 1)
 				select {
 				case resultsCh <- markers:
 				case <-ctx.Done():
@@ -611,6 +631,11 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 			all = append(all, marker)
 		}
 	}
+
+	if succeeded == 0 && len(squares) > 0 {
+		return nil, fmt.Errorf("izivia: all %d marker-scan squares failed (%d errors) — aborting run rather than treating a total scan failure as \"France has zero stations\"", len(squares), failed)
+	}
+
 	return all, nil
 }
 

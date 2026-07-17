@@ -92,13 +92,19 @@ const stationListSelectPrefix = `
 		-- s.connector_type also being '' (unknown) — that must never look like
 		-- an "exact match" against every generic (non-connector-specific)
 		-- tariff row.
+		--
+		-- current_window_price(t.extra, t.energy_price_cents_per_kwh) instead
+		-- of the bare column: for tariffs with time-of-day windows (Electra),
+		-- the column is a snapshot fixed at the last ingestion run, not live —
+		-- see migration 008 for why that goes stale between runs. Non-windowed
+		-- tariffs (everything else) fall through to the same column value.
 		COALESCE(
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed'))
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed'))
 		),
 		COALESCE(
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed'))
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed'))
 		)`
 
 const stationListFrom = `
@@ -244,12 +250,12 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	sourcesParamIdx := len(args)
 	query := stationListSelectPrefix + fmt.Sprintf(`,
 		COALESCE(
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
 		),
 		COALESCE(
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(t.energy_price_cents_per_kwh) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
 		)`, sourcesParamIdx)
 	query += stationListFrom + `
 		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`

@@ -1,4 +1,4 @@
-import { formatPrice } from "../utils/pricing.js";
+import { formatPrice, timeInWindow } from "../utils/pricing.js";
 
 const CHART_WIDTH = 280;
 const CHART_HEIGHT = 64;
@@ -6,16 +6,10 @@ const BAR_GAP = 2;
 const MIN_BAR_HEIGHT = 10;
 const HOURS = 24;
 const TICK_HOURS = [0, 6, 12, 18, 23];
-
-// Mirrors backend/internal/ingestion/electra.go's timeInWindow: half-open
-// [start, end) in HH:MM, wrapping past midnight (e.g. 22:00-06:00). Kept in
-// sync by hand — same reason as utils/pricing.js's connector-kind sets,
-// this can't import Go.
-function timeInWindow(hm, start, end) {
-  if (!start || !end) return false;
-  if (start <= end) return hm >= start && hm < end;
-  return hm >= start || hm < end;
-}
+// Reserved above the tallest possible bar for its price label — without
+// this, a bar close to CHART_HEIGHT pushes its label to y<=0, overlapping
+// or clipping against the figcaption above the chart.
+const LABEL_MARGIN_TOP = 14;
 
 // The price a tariff's windows say applies at a given hour of the day —
 // always computed against the real current time at render time (never a
@@ -69,21 +63,22 @@ export default function HourlyPriceChart({ tariff, priceMode, chargeKWh }) {
     const height = heightRatio * CHART_HEIGHT;
     return { ...b, x, height, isNow: i === nowIdx, showLabel: labeledIdxs.has(i) };
   });
+  const baselineY = LABEL_MARGIN_TOP + CHART_HEIGHT;
 
   return (
     <figure className="hourly-price-chart">
       <figcaption>Prix par heure · maintenant {String(nowHour).padStart(2, "0")}h</figcaption>
       <svg
-        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT + 14}`}
+        viewBox={`0 0 ${CHART_WIDTH} ${LABEL_MARGIN_TOP + CHART_HEIGHT + 14}`}
         role="img"
         aria-label={`Prix par heure, de ${formatPrice(minPrice, priceMode, chargeKWh)} à ${formatPrice(maxPrice, priceMode, chargeKWh)}, actuellement ${formatPrice(priceAtHour(priced, nowHour), priceMode, chargeKWh)}`}
       >
-        <line x1={0} y1={CHART_HEIGHT} x2={CHART_WIDTH} y2={CHART_HEIGHT} className="hourly-price-chart-baseline" />
+        <line x1={0} y1={baselineY} x2={CHART_WIDTH} y2={baselineY} className="hourly-price-chart-baseline" />
         {bars.map((bar) => (
           <g key={bar.hour}>
             <rect
               x={bar.x}
-              y={CHART_HEIGHT - bar.height}
+              y={baselineY - bar.height}
               width={barWidth}
               height={bar.height}
               rx={2}
@@ -92,7 +87,7 @@ export default function HourlyPriceChart({ tariff, priceMode, chargeKWh }) {
             {bar.showLabel && (
               <text
                 x={bar.x + barWidth / 2}
-                y={CHART_HEIGHT - bar.height - 4}
+                y={Math.max(baselineY - bar.height - 4, LABEL_MARGIN_TOP - 2)}
                 textAnchor="middle"
                 className={`hourly-price-chart-value${bar.isNow ? " hourly-price-chart-value--now" : ""}`}
               >
@@ -105,7 +100,7 @@ export default function HourlyPriceChart({ tariff, priceMode, chargeKWh }) {
           <text
             key={h}
             x={(h / HOURS) * CHART_WIDTH + barWidth / 2}
-            y={CHART_HEIGHT + 12}
+            y={baselineY + 12}
             textAnchor="middle"
             className="hourly-price-chart-label"
           >

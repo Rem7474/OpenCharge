@@ -105,9 +105,15 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 
 	// Only sweep after every station in this run was written successfully
 	// (see repository.SweepStaleSourceData) — a run that returned early on error above
-	// never reaches this point.
-	if err := repository.SweepStaleSourceData(ctx, ing.Pool, "electra", runStart); err != nil {
-		return linked, err
+	// never reaches this point. linked > 0 additionally guards against a
+	// download that "succeeded" but returned an empty/malformed station
+	// list (e.g. Electra changed their JS payload shape) looking identical
+	// to "Electra has zero stations" and wiping the entire known dataset —
+	// see the same guard in izivia.go.
+	if linked > 0 {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "electra", runStart); err != nil {
+			return linked, err
+		}
 	}
 	return linked, nil
 }
