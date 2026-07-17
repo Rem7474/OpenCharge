@@ -18,7 +18,15 @@ function priceIcon(label, hasPrice) {
   });
 }
 
-export default function StationMarkers({ onSelect, selectedSources, priceMode, chargeKWh, showAllStations }) {
+export default function StationMarkers({
+  onSelect,
+  selectedSources,
+  priceMode,
+  chargeKWh,
+  showAllStations,
+  selectedConnectorTypes,
+  minPowerKw,
+}) {
   const [stations, setStations] = useState([]);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef(null);
@@ -38,6 +46,8 @@ export default function StationMarkers({ onSelect, selectedSources, priceMode, c
       // special-cases the true value (see ListStations), so leaving it
       // undefined here returns every station regardless of pricing.
       hasTariffs: showAllStations ? undefined : true,
+      connectorTypes: selectedConnectorTypes,
+      minPowerKw,
       signal: controller.signal,
     })
       .then((data) => setStations(data ?? []))
@@ -53,10 +63,11 @@ export default function StationMarkers({ onSelect, selectedSources, priceMode, c
   });
 
   const sourcesKey = sourcePlanPairs(selectedSources).join(",");
+  const connectorTypesKey = selectedConnectorTypes.join(",");
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourcesKey, showAllStations]);
+  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw]);
 
   const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
 

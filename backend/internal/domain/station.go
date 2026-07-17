@@ -44,8 +44,16 @@ type StationFilter struct {
 	Operator                       string
 	HasTariffs                     *bool
 	Sources                        []string
-	Limit                          int
-	Offset                         int
+	// ConnectorTypes, when non-empty, restricts results to stations whose
+	// own connector_type is one of these (e.g. ["CCS", "CHAdeMO"]) — see
+	// domain.ConnectorType* for the vocabulary.
+	ConnectorTypes []string
+	// MinPowerKW, when set, restricts results to stations with power_kw at
+	// least this value. A station with power_kw unknown (NULL) never
+	// matches — an unknown power shouldn't pass a "≥X kW" filter.
+	MinPowerKW *float64
+	Limit      int
+	Offset     int
 }
 
 // Connector is an aggregated connector group exposed by the API

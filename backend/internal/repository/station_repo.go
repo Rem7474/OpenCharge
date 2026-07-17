@@ -236,6 +236,16 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 		query += fmt.Sprintf(" AND s.operator_name = $%d", len(args))
 	}
 
+	if len(f.ConnectorTypes) > 0 {
+		args = append(args, f.ConnectorTypes)
+		query += fmt.Sprintf(" AND s.connector_type = ANY($%d::text[])", len(args))
+	}
+
+	if f.MinPowerKW != nil {
+		args = append(args, *f.MinPowerKW)
+		query += fmt.Sprintf(" AND s.power_kw >= $%d", len(args))
+	}
+
 	query += `
 		GROUP BY s.id`
 

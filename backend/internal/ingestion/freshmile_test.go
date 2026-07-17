@@ -150,7 +150,15 @@ func TestFreshmilePriceFromDescription(t *testing.T) {
 // power), and among them the two non-preferential candidates (70.0 and
 // the free one) beat the preferential 51.0 one on tier alone, then the
 // free (0.0) one wins on price within that tier.
-func TestNormalizeFreshmileTariffsDedupesToOnePerKind(t *testing.T) {
+// TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType exercises a
+// three-connector fixture where every connector resolves to Kind=dc
+// (best_power category "fast" forces that regardless of each connector's
+// own power), but two distinct connector types are present (CCS and T2).
+// Dedup groups by (Kind, ConnectorType), not Kind alone, so this must
+// produce two tariffs: the lone CCS candidate survives as-is, and the two
+// T2 candidates resolve via freshmileBetterCandidate (free non-preferential
+// beats preferential regardless of price).
+func TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType(t *testing.T) {
 	details := map[string]any{
 		"connectors": map[string]any{
 			"best_power": map[string]any{"category": "fast", "kw": 50},
@@ -202,25 +210,41 @@ func TestNormalizeFreshmileTariffsDedupesToOnePerKind(t *testing.T) {
 	}
 
 	tariffs := normalizeFreshmileTariffs(details)
-	if len(tariffs) != 1 {
-		t.Fatalf("got %d tariffs, want 1 (every connector here resolves to Kind=dc, so they collapse into one)", len(tariffs))
+	if len(tariffs) != 2 {
+		t.Fatalf("got %d tariffs, want 2 (CCS and T2 stay separate within the dc kind)", len(tariffs))
 	}
 
-	got := tariffs[0]
-	if got.Source != "freshmile" {
-		t.Errorf("Source = %q, want freshmile", got.Source)
+	byConnector := map[string]domain.StationTariff{}
+	for _, tariff := range tariffs {
+		if tariff.Source != "freshmile" {
+			t.Errorf("tariff %s: Source = %q, want freshmile", tariff.ConnectorType, tariff.Source)
+		}
+		if tariff.Plan != domain.TariffPlanStandard {
+			t.Errorf("tariff %s: Plan = %q, want %q (custom_ref is no longer surfaced as Plan)", tariff.ConnectorType, tariff.Plan, domain.TariffPlanStandard)
+		}
+		if tariff.Kind != domain.TariffKindDC {
+			t.Errorf("tariff %s: Kind = %q, want dc (best_power_category=fast)", tariff.ConnectorType, tariff.Kind)
+		}
+		byConnector[tariff.ConnectorType] = tariff
 	}
-	if got.Plan != domain.TariffPlanStandard {
-		t.Errorf("Plan = %q, want %q (custom_ref is no longer surfaced as Plan)", got.Plan, domain.TariffPlanStandard)
+
+	ccs, ok := byConnector[domain.ConnectorTypeCCS]
+	if !ok {
+		t.Fatal("missing CCS tariff")
 	}
-	if got.Kind != domain.TariffKindDC {
-		t.Errorf("Kind = %q, want dc (best_power_category=fast)", got.Kind)
+	if ccs.EnergyPriceCentsPerKWh == nil || *ccs.EnergyPriceCentsPerKWh != 70.0 {
+		t.Errorf("CCS EnergyPriceCentsPerKWh = %v, want 70.0 (only candidate for this connector type)", ccs.EnergyPriceCentsPerKWh)
 	}
-	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 0 {
-		t.Errorf("EnergyPriceCentsPerKWh = %v, want 0 (the free, non-preferential candidate wins: non-preferential beats preferential regardless of price, then cheapest wins within that tier)", got.EnergyPriceCentsPerKWh)
+
+	t2, ok := byConnector[domain.ConnectorTypeT2]
+	if !ok {
+		t.Fatal("missing T2 tariff")
 	}
-	if got.Extra["is_free"] != true {
-		t.Errorf("Extra[is_free] = %v, want true", got.Extra["is_free"])
+	if t2.EnergyPriceCentsPerKWh == nil || *t2.EnergyPriceCentsPerKWh != 0 {
+		t.Errorf("T2 EnergyPriceCentsPerKWh = %v, want 0 (the free, non-preferential candidate wins over the preferential 51 one)", t2.EnergyPriceCentsPerKWh)
+	}
+	if t2.Extra["is_free"] != true {
+		t.Errorf("T2 Extra[is_free] = %v, want true", t2.Extra["is_free"])
 	}
 }
 

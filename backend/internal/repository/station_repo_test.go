@@ -194,6 +194,80 @@ func TestStationRepository_ListByBBox(t *testing.T) {
 	}
 }
 
+func TestStationRepository_ListByBBox_ConnectorTypeAndMinPower(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	repo := NewStationRepository(pool)
+
+	ccsFast := testStation("FRCONN0001", 45.90, 6.10)
+	ccsFast.ConnectorType = "CCS"
+	power := 150.0
+	ccsFast.PowerKW = &power
+
+	t2Slow := testStation("FRCONN0002", 45.91, 6.12)
+	t2Slow.ConnectorType = "T2"
+	slowPower := 22.0
+	t2Slow.PowerKW = &slowPower
+
+	unknownPower := testStation("FRCONN0003", 45.92, 6.13)
+	unknownPower.ConnectorType = "CHAdeMO"
+	unknownPower.PowerKW = nil
+
+	for _, s := range []domain.Station{ccsFast, t2Slow, unknownPower} {
+		if _, err := repo.UpsertStation(ctx, s); err != nil {
+			t.Fatalf("UpsertStation(%s): %v", s.IRVEIDPDC, err)
+		}
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+
+	// Connector type filter, single value.
+	ccsOnly := bbox
+	ccsOnly.ConnectorTypes = []string{"CCS"}
+	results, err := repo.ListByBBox(ctx, ccsOnly)
+	if err != nil {
+		t.Fatalf("ListByBBox connectorType=CCS: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRCONN0001" {
+		t.Errorf("connectorType=CCS returned %+v, want only FRCONN0001", results)
+	}
+
+	// Connector type filter, multiple values.
+	ccsOrChademo := bbox
+	ccsOrChademo.ConnectorTypes = []string{"CCS", "CHAdeMO"}
+	results, err = repo.ListByBBox(ctx, ccsOrChademo)
+	if err != nil {
+		t.Fatalf("ListByBBox connectorType=CCS,CHAdeMO: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("got %d stations for connectorType=CCS,CHAdeMO, want 2", len(results))
+	}
+
+	// Min power filter: excludes the slow T2 and the unknown-power station.
+	fastOnly := bbox
+	minPower := 50.0
+	fastOnly.MinPowerKW = &minPower
+	results, err = repo.ListByBBox(ctx, fastOnly)
+	if err != nil {
+		t.Fatalf("ListByBBox minPowerKw=50: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRCONN0001" {
+		t.Errorf("minPowerKw=50 returned %+v, want only FRCONN0001 (unknown power must not pass)", results)
+	}
+
+	// Combined: connector type AND min power.
+	combined := bbox
+	combined.ConnectorTypes = []string{"CCS", "T2"}
+	combined.MinPowerKW = &minPower
+	results, err = repo.ListByBBox(ctx, combined)
+	if err != nil {
+		t.Fatalf("ListByBBox combined filter: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRCONN0001" {
+		t.Errorf("combined filter returned %+v, want only FRCONN0001", results)
+	}
+}
+
 func TestStationRepository_ListByBBox_HasTariffs(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

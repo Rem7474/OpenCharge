@@ -24,6 +24,12 @@ export default function MapPage() {
   // price for, and showing every one of them by default would bury the
   // priced ones a user is actually here to compare.
   const [showAllStations, setShowAllStations] = useState(false);
+  const [selectedConnectorTypes, setSelectedConnectorTypes] = useState([]);
+  const [minPowerKw, setMinPowerKw] = useState(null);
+
+  const toggleConnectorType = (type) => {
+    setSelectedConnectorTypes((prev) => (prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]));
+  };
 
   const toggleSource = (source, wasChecked) => {
     setSelectedSources((prev) => {
@@ -55,6 +61,10 @@ export default function MapPage() {
         onChangeChargeMinutes={setChargeMinutes}
         showAllStations={showAllStations}
         onChangeShowAllStations={setShowAllStations}
+        selectedConnectorTypes={selectedConnectorTypes}
+        onToggleConnectorType={toggleConnectorType}
+        minPowerKw={minPowerKw}
+        onChangeMinPowerKw={setMinPowerKw}
       />
       <div className="app-body" style={{ flex: 1 }}>
         <div className="map-container">
@@ -69,6 +79,8 @@ export default function MapPage() {
               priceMode={priceMode}
               chargeKWh={chargeKWh}
               showAllStations={showAllStations}
+              selectedConnectorTypes={selectedConnectorTypes}
+              minPowerKw={minPowerKw}
             />
           </MapContainer>
         </div>

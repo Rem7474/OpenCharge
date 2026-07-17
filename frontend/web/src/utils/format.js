@@ -20,6 +20,18 @@ export function formatPlanLabel(planId) {
   return PLAN_LABELS[planId] ?? formatSourceLabel(planId);
 }
 
+// Connector type ids (see backend/internal/domain/connector.go) are mostly
+// already display-ready acronyms (CCS, CHAdeMO, T2, EF); "other" is the
+// one that needs a French label.
+const CONNECTOR_LABELS = {
+  other: "Autre",
+};
+
+export function formatConnectorLabel(connectorType) {
+  if (!connectorType) return "";
+  return CONNECTOR_LABELS[connectorType] ?? connectorType;
+}
+
 /**
  * Format a tariff's `updated_at` (RFC 3339, as sent by the API) for display.
  * Ingestion rewrites that timestamp on every run whether or not the price

@@ -1,0 +1,12 @@
+-- Pre-fix ingestion wrote per-venue-contract custom_ref values (e.g.
+-- "lidl-interop-hastobe", "hotel-mercure-loudenville") into
+-- station_tariffs.plan for Freshmile, blowing up the network filter's
+-- plan selector with one entry per partner contract ever ingested.
+-- Ingestion now always writes plan='standard' for Freshmile; these old
+-- rows are orphaned and would otherwise sit here forever (a fresh
+-- ingestion run writes new (source, kind, plan) keys, it never revisits
+-- or overwrites the old ones). The mark-and-sweep added alongside this
+-- migration also cleans these up going forward, but this migration clears
+-- the existing backlog immediately rather than waiting for the next full
+-- Freshmile run.
+DELETE FROM station_tariffs WHERE source = 'freshmile' AND plan != 'standard';

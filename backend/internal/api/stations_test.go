@@ -104,6 +104,58 @@ func TestListStations_ReturnsStationsInBBox(t *testing.T) {
 	}
 }
 
+func TestListStations_FiltersByConnectorTypeAndMinPower(t *testing.T) {
+	h := setupHandler(t)
+	router := newRouter(h)
+	ctx := context.Background()
+
+	fastCCS := domain.Station{
+		IRVEIDPDC: "FRAPICONN01", OperatorName: "Izivia", Name: "Fast CCS",
+		AddressCountry: "FR", Lat: 45.90, Lng: 6.10,
+		PowerKW: floatPtr(150), ConnectorType: "CCS", AccessType: "paid", Metadata: map[string]any{},
+	}
+	slowT2 := domain.Station{
+		IRVEIDPDC: "FRAPICONN02", OperatorName: "Izivia", Name: "Slow T2",
+		AddressCountry: "FR", Lat: 45.91, Lng: 6.11,
+		PowerKW: floatPtr(22), ConnectorType: "T2", AccessType: "paid", Metadata: map[string]any{},
+	}
+	for _, s := range []domain.Station{fastCCS, slowT2} {
+		if _, err := h.Stations.UpsertStation(ctx, s); err != nil {
+			t.Fatalf("seed station %s: %v", s.IRVEIDPDC, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/stations?bbox=6.0,45.8,6.3,46.0&connectorType=CCS", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var items []stationListItemDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "irve:FRAPICONN01" {
+		t.Errorf("connectorType=CCS returned %+v, want only FRAPICONN01", items)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/stations?bbox=6.0,45.8,6.3,46.0&minPowerKw=50", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	items = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "irve:FRAPICONN01" {
+		t.Errorf("minPowerKw=50 returned %+v, want only FRAPICONN01", items)
+	}
+}
+
+func floatPtr(v float64) *float64 { return &v }
+
 func TestGetStation_NotFound(t *testing.T) {
 	h := setupHandler(t)
 	router := newRouter(h)

@@ -654,11 +654,11 @@ func normalizeFreshmileStation(details map[string]any) (domain.SourceStation, bo
 func freshmileConnectorType(standard string) string {
 	switch strings.ToUpper(standard) {
 	case "IEC_62196_T2_COMBO":
-		return "CCS"
+		return domain.ConnectorTypeCCS
 	case "CHADEMO":
-		return "CHAdeMO"
+		return domain.ConnectorTypeCHAdeMO
 	case "IEC_62196_T2":
-		return "T2"
+		return domain.ConnectorTypeT2
 	default:
 		return standard
 	}
@@ -674,16 +674,20 @@ type freshmileTariffCandidate struct {
 }
 
 // normalizeFreshmileTariffs walks every evse/connector's tariff and keeps,
-// per price Kind (ac/dc), a single representative StationTariff — see
-// freshmileBetterCandidate for how "representative" is chosen. Earlier
-// versions kept every connector's tariff as its own Plan, using Freshmile's
-// per-tariff custom_ref (e.g. "lidl-interop-hastobe") as the Plan value.
-// In production that turned out to be a partner/venue contract identifier,
-// not a small, meaningful set of price tiers the way Electra's
-// public/app/subscription is — every newly-ingested partner contract added
-// another entry to the network-wide plan selector, growing it unbounded.
-// Freshmile tariffs now always use the single "standard" Plan, matching
-// how every other single-tier source (Izivia, IRVE text, ...) behaves.
+// per (Kind, ConnectorType) pair, a single representative StationTariff —
+// see freshmileBetterCandidate for how "representative" is chosen within a
+// pair. Earlier versions kept every connector's tariff as its own Plan,
+// using Freshmile's per-tariff custom_ref (e.g. "lidl-interop-hastobe") as
+// the Plan value. In production that turned out to be a partner/venue
+// contract identifier, not a small, meaningful set of price tiers the way
+// Electra's public/app/subscription is — every newly-ingested partner
+// contract added another entry to the network-wide plan selector, growing
+// it unbounded. Freshmile tariffs now always use the single "standard"
+// Plan, matching how every other single-tier source (Izivia, IRVE text,
+// ...) behaves; ConnectorType (ingestion/freshmile.go's own
+// freshmileConnectorType, mapped to domain.ConnectorType* where possible)
+// carries the per-connector precision instead, as a real column rather
+// than folded into Plan.
 func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 	bestPowerCategory := ""
 	if connectorsSummary, ok := details["connectors"].(map[string]any); ok {
@@ -713,9 +717,10 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 				tariff:         normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory),
 				isPreferential: parseBooleanLoose(stringValue(tariffRaw["is_preferential"])),
 			}
-			current, exists := best[candidate.tariff.Kind]
+			key := candidate.tariff.Kind + "\x00" + candidate.tariff.ConnectorType
+			current, exists := best[key]
 			if !exists || freshmileBetterCandidate(candidate, current) {
-				best[candidate.tariff.Kind] = candidate
+				best[key] = candidate
 			}
 		}
 	}
@@ -766,17 +771,17 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 	}
 
 	extra := map[string]any{
-		"tariff":        tariffRaw,
-		"connectorType": freshmileConnectorType(stringValue(conn["standard"])),
+		"tariff": tariffRaw,
 	}
 
 	t := domain.StationTariff{
-		Source:   "freshmile",
-		Plan:     domain.TariffPlanStandard,
-		Kind:     kind,
-		Model:    "freshmile_kwh",
-		Currency: firstNonEmpty(stringValue(tariffRaw["currency"]), "EUR"),
-		Extra:    extra,
+		Source:        "freshmile",
+		Plan:          domain.TariffPlanStandard,
+		Kind:          kind,
+		Model:         "freshmile_kwh",
+		Currency:      firstNonEmpty(stringValue(tariffRaw["currency"]), "EUR"),
+		ConnectorType: freshmileConnectorType(stringValue(conn["standard"])),
+		Extra:         extra,
 	}
 
 	if parseBooleanLoose(stringValue(tariffRaw["is_free"])) {

@@ -176,11 +176,13 @@ a {
   cursor: pointer;
 }
 
-.operator-filter {
+.operator-filter,
+.connector-filter {
   position: relative;
 }
 
-.operator-filter-toggle {
+.operator-filter-toggle,
+.connector-filter-toggle {
   border: 1px solid var(--color-border);
   border-radius: 999px;
   padding: 4px 12px;
@@ -192,11 +194,13 @@ a {
   text-align: left;
 }
 
-.operator-filter-toggle[aria-expanded="true"] {
+.operator-filter-toggle[aria-expanded="true"],
+.connector-filter-toggle[aria-expanded="true"] {
   border-color: var(--color-accent);
 }
 
-.operator-filter-panel {
+.operator-filter-panel,
+.connector-filter-panel {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
@@ -218,7 +222,8 @@ a {
   margin-bottom: 6px;
 }
 
-.operator-filter-list {
+.operator-filter-list,
+.connector-filter-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -226,11 +231,13 @@ a {
   overflow-y: auto;
 }
 
-.operator-filter-list li {
+.operator-filter-list li,
+.connector-filter-list li {
   padding: 2px 0;
 }
 
-.operator-filter-list label {
+.operator-filter-list label,
+.connector-filter-list label {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -240,7 +247,8 @@ a {
   border-radius: 4px;
 }
 
-.operator-filter-list label:hover {
+.operator-filter-list label:hover,
+.connector-filter-list label:hover {
   background: rgba(128, 128, 128, 0.1);
 }
 
@@ -248,6 +256,24 @@ a {
   font-size: 13px;
   color: var(--color-muted);
   padding: 4px;
+}
+
+.min-power-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 6px 4px 2px;
+  margin-top: 4px;
+  border-top: 1px solid var(--color-border);
+}
+
+.min-power-input input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
 }
 
 .price-mode-toggle {

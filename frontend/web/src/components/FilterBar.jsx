@@ -1,4 +1,5 @@
 import OperatorFilter from "./OperatorFilter.jsx";
+import ConnectorFilter from "./ConnectorFilter.jsx";
 import { PRICE_MODE_PER_KWH, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
 
 export default function FilterBar({
@@ -13,12 +14,26 @@ export default function FilterBar({
   onChangeChargeMinutes,
   showAllStations,
   onChangeShowAllStations,
+  selectedConnectorTypes,
+  onToggleConnectorType,
+  minPowerKw,
+  onChangeMinPowerKw,
 }) {
   return (
     <div className="filter-bar">
       <div className="filter-group">
         <span className="filter-label">Réseaux</span>
         <OperatorFilter selectedSources={selectedSources} onToggleSource={onToggleSource} onSelectPlan={onSelectPlan} />
+      </div>
+
+      <div className="filter-group">
+        <span className="filter-label">Connecteurs</span>
+        <ConnectorFilter
+          selectedConnectorTypes={selectedConnectorTypes}
+          onToggleConnectorType={onToggleConnectorType}
+          minPowerKw={minPowerKw}
+          onChangeMinPowerKw={onChangeMinPowerKw}
+        />
       </div>
 
       <div className="filter-group">

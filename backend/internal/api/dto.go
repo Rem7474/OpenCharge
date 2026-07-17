@@ -116,9 +116,13 @@ type tariffDTO struct {
 	ServiceFeePercent          *float64 `json:"service_fee_percent,omitempty"`
 	// SessionFeeCents is a flat, one-time fee for starting a session,
 	// distinct from SessionPriceCentsPerMin (a per-minute rate).
-	SessionFeeCents *float64       `json:"session_fee_cents,omitempty"`
-	RawText         string         `json:"raw_text,omitempty"`
-	Extra           map[string]any `json:"extra,omitempty"`
+	SessionFeeCents *float64 `json:"session_fee_cents,omitempty"`
+	// ConnectorType is set only when the source differentiates price by
+	// actual connector (today: only Freshmile) — empty means this tariff
+	// applies to the whole Kind bucket regardless of connector.
+	ConnectorType string         `json:"connector_type,omitempty"`
+	RawText       string         `json:"raw_text,omitempty"`
+	Extra         map[string]any `json:"extra,omitempty"`
 	// UpdatedAt is when an ingestion run last wrote this tariff. Every run
 	// rewrites it whether or not the price moved, so it reads as "last
 	// checked" (how fresh the data is) rather than "price changed on".
@@ -172,6 +176,7 @@ func toTariffDTO(t domain.StationTariff) tariffDTO {
 		CongestionPriceCentsPerMin: t.CongestionPriceCentsPerMin,
 		ServiceFeePercent:          t.ServiceFeePercent,
 		SessionFeeCents:            t.SessionFeeCents,
+		ConnectorType:              t.ConnectorType,
 		RawText:                    t.RawText,
 		Extra:                      extra,
 	}

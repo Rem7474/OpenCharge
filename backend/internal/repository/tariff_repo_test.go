@@ -198,6 +198,76 @@ func TestTariffRepository_BulkUpsert(t *testing.T) {
 	}
 }
 
+// TestTariffRepository_ConnectorTypeDistinguishesConflictKey confirms the
+// unique index now includes connector_type: two tariffs with the same
+// (station, source, kind, plan) but different connector_type must coexist
+// rather than overwrite each other, and connector_type round-trips through
+// Upsert/BulkUpsert/ListByStation correctly.
+func TestTariffRepository_ConnectorTypeDistinguishesConflictKey(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	stationID, err := stationRepo.UpsertStation(ctx, testStation("FRCONNTAR1", 45.9, 6.1))
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	ccsPrice := 70.0
+	t2Price := 40.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &ccsPrice,
+		ConnectorType: domain.ConnectorTypeCCS, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert CCS: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &t2Price,
+		ConnectorType: domain.ConnectorTypeT2, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert T2: %v", err)
+	}
+
+	got, err := tariffRepo.ListByStation(ctx, stationID)
+	if err != nil {
+		t.Fatalf("ListByStation: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tariffs, want 2 (same station/source/kind/plan, different connector_type must not collide)", len(got))
+	}
+	byConnector := map[string]domain.StationTariff{}
+	for _, tar := range got {
+		byConnector[tar.ConnectorType] = tar
+	}
+	if p := byConnector[domain.ConnectorTypeCCS].EnergyPriceCentsPerKWh; p == nil || *p != 70.0 {
+		t.Errorf("CCS price = %v, want 70.0", p)
+	}
+	if p := byConnector[domain.ConnectorTypeT2].EnergyPriceCentsPerKWh; p == nil || *p != 40.0 {
+		t.Errorf("T2 price = %v, want 40.0", p)
+	}
+
+	// Re-upserting the same (station, source, kind, plan, connector_type)
+	// must update in place, not duplicate.
+	newCCSPrice := 75.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &newCCSPrice,
+		ConnectorType: domain.ConnectorTypeCCS, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert CCS (update): %v", err)
+	}
+	got, err = tariffRepo.ListByStation(ctx, stationID)
+	if err != nil {
+		t.Fatalf("ListByStation after update: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d tariffs after update, want 2 (upsert must not duplicate)", len(got))
+	}
+}
+
 func TestTariffRepository_BulkUpsert_Empty(t *testing.T) {
 	pool := setupTestPool(t)
 	tariffRepo := NewTariffRepository(pool)

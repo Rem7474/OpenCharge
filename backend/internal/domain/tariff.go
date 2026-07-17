@@ -38,12 +38,19 @@ type StationTariff struct {
 	// session de charge"). Not to be confused with SessionPriceCentsPerMin,
 	// which despite the similar name is a per-minute rate.
 	SessionFeeCents *float64
-	ValidFrom       *time.Time
-	ValidTo         *time.Time
-	RawText         string
-	Extra           map[string]any
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// ConnectorType, when set, is the specific connector (see
+	// domain.ConnectorType*) this tariff applies to — populated only by
+	// sources whose raw data actually differentiates price by connector
+	// (today: only Freshmile). "" means this tariff applies to the whole
+	// Kind bucket (ac/dc/mixed) regardless of which connector a station
+	// exposes, which is every other source's behavior.
+	ConnectorType string
+	ValidFrom     *time.Time
+	ValidTo       *time.Time
+	RawText       string
+	Extra         map[string]any
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // SourcePlans lists the price plans available for a tariff source, e.g.

@@ -2,6 +2,8 @@
 // the ac/dc "kind" vocabulary used by station_tariffs.kind, so we know
 // whether to read ac_min_cents_per_kwh or dc_min_cents_per_kwh for a given
 // station's own connector.
+// Mirrors backend/internal/domain/connector.go's TariffKindForConnector —
+// keep these two in sync by hand (JS can't import Go constants).
 const DC_CONNECTOR_TYPES = new Set(["CCS", "CHAdeMO"]);
 const AC_CONNECTOR_TYPES = new Set(["T2", "EF"]);
 
