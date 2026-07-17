@@ -25,6 +25,20 @@ func TestParsePriceText(t *testing.T) {
 		},
 		{"only a zero price present", "0.00 €/kWh", nil, nil, nil},
 		{"only a zero per-minute price present", "0,0€/min", nil, nil, nil},
+		// Both texts below are verbatim Izivia production strings. They pin
+		// the euros-vs-cents scaling: a price left unscaled (0.663 in a
+		// cents field) surfaces as "0.01 €/kWh" once the frontend divides by
+		// 100 again, which is how the unit bug hid in plain sight.
+		{
+			"three-decimal price is scaled to cents, not left in euros",
+			"0,663€/kWh \n (Dont 15% de frais de service)",
+			ptr(66.3), nil, ptr(15.0),
+		},
+		{
+			"a per-session amount is not read as a kWh or per-minute price",
+			"0,4€ par session \n +0,663€/kWh \n (Dont 15% de frais de service)",
+			ptr(66.3), nil, ptr(15.0),
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
