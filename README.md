@@ -122,7 +122,33 @@ go run ./cmd/opencharge-ingest -source all        # les onze, dans cet ordre
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 `-electra-url`, `-tesla-url`, `-freshmile-url`, `-chargenow-url`,
-`-link-max-distance-m`.
+`-link-max-distance-m`, `-failed-dir` (ou `INGEST_FAILED_DIR`),
+`-retry-failed`.
+
+### Rejouer les URLs en échec
+
+Les sources qui fannent sur de nombreuses URLs (Izivia, Tesla, Freshmile,
+ChargeNow) sauvegardent en fin de run — même interrompu — chaque requête
+définitivement en échec (après épuisement de leurs retries HTTP) dans un
+JSON local par source : `<failed-dir>/<source>.json` (défaut :
+`ingest-failures/`, surchargeable via `-failed-dir` ou `INGEST_FAILED_DIR`).
+Chaque entrée garde l'URL, les paramètres nécessaires pour rejouer la
+requête (marker/square Izivia, slug Tesla, id de location ou tuile
+Freshmile, bbox ou pool ChargeNow) et l'erreur rencontrée.
+
+```bash
+go run ./cmd/opencharge-ingest -source freshmile -retry-failed  # ne rejoue que les échecs du run précédent
+```
+
+`-retry-failed` ne rescanne pas toute la France : il ne rejoue que les
+requêtes listées dans le fichier. Le fichier est réécrit à chaque passe
+avec les échecs restants (et supprimé quand tout a fini par passer), donc
+la commande peut être relancée jusqu'à convergence. Aucun sweep de données
+périmées n'est fait dans ce mode (la passe ne rafraîchit qu'un
+sous-ensemble des stations, le reste est légitimement non touché). Via
+Docker, le dossier est monté depuis l'hôte (`./ingest-failures`, voir
+`docker-compose.yml`), donc les fichiers survivent au conteneur `--rm` :
+`docker compose run --rm ingest -source freshmile -retry-failed`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra, Izivia, Tesla, Freshmile et ChargeNow sont corrélés, et

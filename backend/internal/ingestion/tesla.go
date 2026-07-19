@@ -60,7 +60,11 @@ type TeslaIngester struct {
 	// non-standard (e.g. the ingest Docker image's /usr/bin/chromium, or
 	// a local dev machine's Playwright-managed Chromium).
 	ChromeExecPath string
-	detailsURLFmt  string // get-charger-details endpoint, derived from URL's host
+	// Failures, when set, records every supercharger whose detail fetch
+	// failed for good so a later -retry-failed pass can replay just
+	// those — see FailureLog.
+	Failures      *FailureLog
+	detailsURLFmt string // get-charger-details endpoint, derived from URL's host
 }
 
 func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, teslaURL string, cfg TeslaConfig) *TeslaIngester {
@@ -104,25 +108,10 @@ func teslaDetailsURLFmtFor(locationsURL string) string {
 // Electra/Izivia/Freshmile, just with browser tabs instead of HTTP
 // connections as the concurrency unit.
 func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
+	defer ing.Failures.saveAndLog()
 	runStart := time.Now()
 
-	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
-		// headless Chrome and serves an "Access Denied" page instead of
-		// JSON (confirmed empirically — --headless=true and --headless=new
-		// both get denied; the working Playwright prototype this was
-		// ported from used headless=False for the same reason). Run a real
-		// "headed" Chrome instead, pointed at a virtual display (Xvfb) in
-		// the ingest Docker image — see its entrypoint.
-		chromedp.Flag("headless", false),
-		// Most container runtimes (including this project's Docker image)
-		// run as root, where Chromium's sandbox refuses to start at all.
-		chromedp.Flag("no-sandbox", true),
-	)
-	if ing.ChromeExecPath != "" {
-		allocOpts = append(allocOpts, chromedp.ExecPath(ing.ChromeExecPath))
-	}
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, allocOpts...)
+	allocCtx, cancelAlloc := ing.newChromeAllocator(ctx)
 	defer cancelAlloc()
 
 	locations, err := ing.fetchLocations(allocCtx)
@@ -141,6 +130,88 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("tesla: %d locations downloaded, %d open superchargers", len(locations), len(slugs))
 
+	processed, firstErr := ing.processSlugs(ctx, allocCtx, slugs)
+
+	log.Printf("tesla: done, %d stations processed", processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	// processed > 0 guards against a run that silently processed
+	// nothing looking identical to "no Tesla stations exist" and wiping the
+	// entire known dataset — see the same guard in izivia.go.
+	if firstErr == nil && processed > 0 {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
+			return processed, err
+		}
+	}
+	return processed, firstErr
+}
+
+// RetryFailed replays only the superchargers a previous run recorded as
+// failed (see FailureLog), skipping the full get-locations download.
+// Slugs that fail again are re-recorded, so the failure file always
+// reflects what's still outstanding. No stale-data sweep happens here: a
+// retry pass only touches the previously-failed subset, so most known
+// stations legitimately go un-refreshed.
+func (ing *TeslaIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
+	defer ing.Failures.saveAndLog()
+
+	var slugs []string
+	seen := map[string]struct{}{}
+	for _, f := range failures {
+		if f.Kind != failKindTeslaSupercharger {
+			log.Printf("tesla: skipping failure of unknown kind %q", f.Kind)
+			continue
+		}
+		var params struct {
+			Slug string `json:"slug"`
+		}
+		if err := json.Unmarshal(f.Params, &params); err != nil || params.Slug == "" {
+			log.Printf("tesla: skipping unreadable %s failure: %v", f.Kind, err)
+			continue
+		}
+		if _, dup := seen[params.Slug]; dup {
+			continue
+		}
+		seen[params.Slug] = struct{}{}
+		slugs = append(slugs, params.Slug)
+	}
+
+	log.Printf("tesla: retrying %d superchargers from %d recorded failure(s)", len(slugs), len(failures))
+
+	allocCtx, cancelAlloc := ing.newChromeAllocator(ctx)
+	defer cancelAlloc()
+
+	processed, err := ing.processSlugs(ctx, allocCtx, slugs)
+	log.Printf("tesla: retry done, %d stations processed", processed)
+	return processed, err
+}
+
+// newChromeAllocator builds the shared chromedp exec allocator every fetch
+// in a run goes through.
+func (ing *TeslaIngester) newChromeAllocator(ctx context.Context) (context.Context, context.CancelFunc) {
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
+		// headless Chrome and serves an "Access Denied" page instead of
+		// JSON (confirmed empirically — --headless=true and --headless=new
+		// both get denied; the working Playwright prototype this was
+		// ported from used headless=False for the same reason). Run a real
+		// "headed" Chrome instead, pointed at a virtual display (Xvfb) in
+		// the ingest Docker image — see its entrypoint.
+		chromedp.Flag("headless", false),
+		// Most container runtimes (including this project's Docker image)
+		// run as root, where Chromium's sandbox refuses to start at all.
+		chromedp.Flag("no-sandbox", true),
+	)
+	if ing.ChromeExecPath != "" {
+		allocOpts = append(allocOpts, chromedp.ExecPath(ing.ChromeExecPath))
+	}
+	return chromedp.NewExecAllocator(ctx, allocOpts...)
+}
+
+// processSlugs fetches details/pricing for every supercharger slug and
+// writes the results, concurrently — the shared pipeline behind both a
+// full Run and a RetryFailed pass.
+func (ing *TeslaIngester) processSlugs(ctx, allocCtx context.Context, slugs []string) (int, error) {
 	slugCh := make(chan string)
 	resultsCh := make(chan normalizedSourceStation)
 	var wg sync.WaitGroup
@@ -151,6 +222,12 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 			item, ok, err := ing.fetchAndNormalizeSupercharger(allocCtx, slug)
 			if err != nil {
 				log.Printf("tesla: supercharger %s failed: %v", slug, err)
+				// Not recorded when the run itself is shutting down: those
+				// slugs didn't fail on their own — see the same guard in
+				// izivia.go's worker.
+				if ctx.Err() == nil {
+					ing.Failures.Record(failKindTeslaSupercharger, fmt.Sprintf(ing.detailsURLFmt, url.QueryEscape(slug)), map[string]string{"slug": slug}, err)
+				}
 				continue
 			}
 			if !ok {
@@ -202,18 +279,6 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	result := <-writeDone
 	if firstErr == nil {
 		firstErr = result.err
-	}
-
-	log.Printf("tesla: done, %d stations processed", result.processed)
-
-	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
-	// result.processed > 0 guards against a run that silently processed
-	// nothing looking identical to "no Tesla stations exist" and wiping the
-	// entire known dataset — see the same guard in izivia.go.
-	if firstErr == nil && result.processed > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
-			return result.processed, err
-		}
 	}
 	return result.processed, firstErr
 }

@@ -57,6 +57,14 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-opencharge}:${POSTGRES_PASSWORD:-opencharge}@db:5432/${POSTGRES_DB:-opencharge}?sslmode=disable
+      INGEST_FAILED_DIR: /data/ingest-failures
+    volumes:
+      # Bind-mounted (not a named volume) so the per-source failed-URL
+      # JSON files a run leaves behind survive the --rm container and are
+      # directly inspectable on the host; a later
+      # `docker compose run --rm ingest -source X -retry-failed` reads
+      # them back from the same place.
+      - ./ingest-failures:/data/ingest-failures
     # No default command: pass -source (and any other flag) via
     # `docker compose run --rm ingest -source tesla`. The image bakes in
     # TESLA_CHROME_PATH, so no extra flag is needed for the tesla source.

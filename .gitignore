@@ -14,3 +14,8 @@ frontend/web/dist/
 # backend
 backend/opencharge-api
 backend/opencharge-ingest
+
+# per-source failed-URL files left by ingestion runs (replayed with
+# `opencharge-ingest -retry-failed`)
+ingest-failures/
+backend/ingest-failures/

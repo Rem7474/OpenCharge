@@ -95,8 +95,13 @@ type ChargenowIngester struct {
 	BaseURL          string
 	Config           ChargenowConfig
 	MaxLinkDistanceM float64
-	client           *http.Client
-	retryBackoff     time.Duration // unexported: overridden by tests to keep them fast
+	// Failures, when set, records every request that failed for good
+	// (discovery query for a bbox, price batch — recorded per affected
+	// pool) so a later -retry-failed pass can replay just those — see
+	// FailureLog.
+	Failures     *FailureLog
+	client       *http.Client
+	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
 
 func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, baseURL string, cfg ChargenowConfig) *ChargenowIngester {
@@ -133,6 +138,7 @@ func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // time in writeSourceStationChunk, but ChargeNow's price fetch itself
 // depends on the correlation, not just the final station_links row.
 func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
+	defer ing.Failures.saveAndLog()
 	runStart := time.Now()
 
 	pools, err := ing.scanPools(ctx)
@@ -141,6 +147,81 @@ func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("chargenow: %d pools found", len(pools))
 
+	processed, err := ing.processPools(ctx, pools)
+	if err != nil {
+		return processed, err
+	}
+	log.Printf("chargenow: done, %d source stations processed", processed)
+
+	// Only sweep after actually finding stations this run — see the same
+	// guard (and the incident that motivated it) in izivia.go.
+	if processed > 0 {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, chargenowSourceName, runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
+			return processed, err
+		}
+	}
+	return processed, nil
+}
+
+// RetryFailed replays only the requests a previous run recorded as failed
+// (see FailureLog): failed discovery bboxes are re-scanned to recover
+// their pools, and pools whose price batch failed are re-priced directly
+// from the pool identity saved in the failure's params. Requests that
+// fail again are re-recorded, so the failure file always reflects what's
+// still outstanding. No stale-data sweep happens here: a retry pass only
+// touches the previously-failed subset, so most known stations
+// legitimately go un-refreshed.
+func (ing *ChargenowIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
+	defer ing.Failures.saveAndLog()
+
+	var bboxes []chargenowBBox
+	poolsByID := map[string]chargenowPool{}
+	for _, f := range failures {
+		switch f.Kind {
+		case failKindChargenowBBox:
+			var bbox chargenowBBox
+			if err := json.Unmarshal(f.Params, &bbox); err != nil {
+				log.Printf("chargenow: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			bboxes = append(bboxes, bbox)
+		case failKindChargenowPool:
+			var pool chargenowPool
+			if err := json.Unmarshal(f.Params, &pool); err != nil || pool.ID == "" {
+				log.Printf("chargenow: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			poolsByID[pool.ID] = pool
+		default:
+			log.Printf("chargenow: skipping failure of unknown kind %q", f.Kind)
+		}
+	}
+
+	if len(bboxes) > 0 {
+		scanned, err := ing.scanPoolsFrom(ctx, bboxes)
+		if err != nil {
+			return 0, err
+		}
+		for _, p := range scanned {
+			poolsByID[p.ID] = p
+		}
+	}
+
+	pools := make([]chargenowPool, 0, len(poolsByID))
+	for _, p := range poolsByID {
+		pools = append(pools, p)
+	}
+
+	log.Printf("chargenow: retrying %d pools from %d recorded failure(s)", len(pools), len(failures))
+	processed, err := ing.processPools(ctx, pools)
+	log.Printf("chargenow: retry done, %d source stations processed", processed)
+	return processed, err
+}
+
+// processPools correlates every pool with the IRVE referential, fetches
+// its prices and writes the resulting source stations/tariffs — the
+// shared pipeline behind both a full Run and a RetryFailed pass.
+func (ing *ChargenowIngester) processPools(ctx context.Context, pools []chargenowPool) (int, error) {
 	points := make([]repository.NearestStationQuery, len(pools))
 	for i, p := range pools {
 		points[i] = repository.NearestStationQuery{Lat: p.Lat, Lng: p.Lng}
@@ -200,6 +281,25 @@ func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 	}
 	pricesByPoolKind := make(map[string]poolPrice)
 
+	// A failed price batch loses the tariffs of every pool it covered:
+	// record each affected pool (dedup'd — a pool contributes one AC and
+	// one DC item to the same batch) so a -retry-failed pass can re-price
+	// exactly those, without re-scanning the whole map. Skipped when the
+	// run is just being canceled — see the same guard in izivia.go.
+	recordFailedBatch := func(targets []priceTarget, start, end int, err error) {
+		if ctx.Err() != nil {
+			return
+		}
+		recorded := map[int]struct{}{}
+		for _, target := range targets[start:end] {
+			if _, dup := recorded[target.poolIdx]; dup {
+				continue
+			}
+			recorded[target.poolIdx] = struct{}{}
+			ing.Failures.Record(failKindChargenowPool, ing.BaseURL+chargenowPricesPath, pools[target.poolIdx], err)
+		}
+	}
+
 	for start := 0; start < len(items); start += chargenowPriceBatchSize {
 		end := start + chargenowPriceBatchSize
 		if end > len(items) {
@@ -214,11 +314,13 @@ func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 		})
 		if err != nil {
 			log.Printf("chargenow: price batch [%d:%d] failed, skipping: %v", start, end, err)
+			recordFailedBatch(targets, start, end, err)
 			continue
 		}
 		var results []chargenowPriceResult
 		if err := json.Unmarshal(respBody, &results); err != nil {
 			log.Printf("chargenow: decode price batch [%d:%d] failed, skipping: %v", start, end, err)
+			recordFailedBatch(targets, start, end, err)
 			continue
 		}
 		for _, res := range results {
@@ -275,15 +377,6 @@ func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 		}
 		log.Printf("chargenow: %d/%d processed", processed, len(normalized))
 	}
-	log.Printf("chargenow: done, %d source stations processed", processed)
-
-	// Only sweep after actually finding stations this run — see the same
-	// guard (and the incident that motivated it) in izivia.go.
-	if processed > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, chargenowSourceName, runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
-			return processed, err
-		}
-	}
 	return processed, nil
 }
 
@@ -314,14 +407,21 @@ func chargenowExtractPrices(result chargenowPriceResult) (energyCents, flatCents
 	return energyCents, flatCents
 }
 
+// chargenowPool's and chargenowBBox's JSON tags matter: a failed price
+// fetch is persisted per affected pool, and a failed discovery query per
+// bbox, in the failure log (see FailureLog) and read back by RetryFailed.
 type chargenowPool struct {
-	ID             string
-	Lat, Lng       float64
-	ChargePointIDs []string
+	ID             string   `json:"id"`
+	Lat            float64  `json:"lat"`
+	Lng            float64  `json:"lng"`
+	ChargePointIDs []string `json:"chargePointIds"`
 }
 
 type chargenowBBox struct {
-	MinLng, MinLat, MaxLng, MaxLat float64
+	MinLng float64 `json:"minLng"`
+	MinLat float64 `json:"minLat"`
+	MaxLng float64 `json:"maxLng"`
+	MaxLat float64 `json:"maxLat"`
 }
 
 // subdivideChargenowBBox splits a bbox into 4 quadrants — identical shape
@@ -379,6 +479,13 @@ func (ing *ChargenowIngester) scanPools(ctx context.Context) ([]chargenowPool, e
 	// of this fixed grid order.
 	rand.Shuffle(len(initial), func(i, j int) { initial[i], initial[j] = initial[j], initial[i] })
 
+	return ing.scanPoolsFrom(ctx, initial)
+}
+
+// scanPoolsFrom is scanPools' engine, starting from an arbitrary list of
+// initial boxes rather than always the full-France grid — RetryFailed
+// reuses it to re-scan just the bboxes a previous run recorded as failed.
+func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []chargenowBBox) ([]chargenowPool, error) {
 	var (
 		mu   sync.Mutex
 		seen = map[string]chargenowPool{}
@@ -399,6 +506,12 @@ func (ing *ChargenowIngester) scanPools(ctx context.Context) ([]chargenowPool, e
 		resp, err := ing.fetchQuery(ctx, bbox, sem)
 		if err != nil {
 			log.Printf("chargenow: query bbox %+v failed: %v", bbox, err)
+			// A failed query drops its whole branch of the subdivision
+			// tree — record it for a targeted retry, unless the scan is
+			// just being canceled (see the same guard in izivia.go).
+			if ctx.Err() == nil {
+				ing.Failures.Record(failKindChargenowBBox, ing.BaseURL+chargenowQueryPath, bbox, err)
+			}
 			return
 		}
 

@@ -121,8 +121,12 @@ type FreshmileIngester struct {
 	BaseURL          string
 	Config           FreshmileConfig
 	MaxLinkDistanceM float64
-	client           *http.Client
-	retryBackoff     time.Duration // unexported: overridden by tests to keep them fast
+	// Failures, when set, records every request that failed for good
+	// (location detail fetch, map-locations tile scan) so a later
+	// -retry-failed pass can replay just those — see FailureLog.
+	Failures     *FailureLog
+	client       *http.Client
+	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
 
 func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, baseURL string, cfg FreshmileConfig) *FreshmileIngester {
@@ -159,9 +163,97 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // everything — discovery alone used to take the vast majority of a run's
 // wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
+	defer ing.Failures.saveAndLog()
 	runStart := time.Now()
 
-	// pipelineCtx (not ctx directly) governs scanLocationIDs and the
+	processed, err := ing.runPipeline(ctx, ing.scanLocationIDs)
+
+	log.Printf("freshmile: done, %d locations processed", processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	// processed > 0 guards against a scan that silently found/fetched
+	// nothing (e.g. Freshmile's map-locations API down for the whole run)
+	// looking identical to "France has zero stations" and wiping the
+	// entire known dataset — see the same guard in izivia.go for the
+	// production incident that motivated it.
+	if err == nil && processed > 0 {
+		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart.Add(-repository.StaleSourceDataGracePeriod)); sweepErr != nil {
+			return processed, sweepErr
+		}
+	}
+	return processed, err
+}
+
+// RetryFailed replays only the requests a previous run recorded as failed
+// (see FailureLog): failed map tiles are re-scanned (re-discovering and
+// fetching whatever locations they cover) and failed location details are
+// re-fetched directly by id. Requests that fail again are re-recorded, so
+// the failure file always reflects what's still outstanding. No stale-data
+// sweep happens here: a retry pass only touches the previously-failed
+// subset, so most known locations legitimately go un-refreshed.
+func (ing *FreshmileIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
+	defer ing.Failures.saveAndLog()
+
+	var ids []int
+	var tiles []freshmileBBox
+	seenIDs := map[int]struct{}{}
+	for _, f := range failures {
+		switch f.Kind {
+		case failKindFreshmileLocation:
+			var params struct {
+				ID int `json:"id"`
+			}
+			if err := json.Unmarshal(f.Params, &params); err != nil || params.ID == 0 {
+				log.Printf("freshmile: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			if _, dup := seenIDs[params.ID]; dup {
+				continue
+			}
+			seenIDs[params.ID] = struct{}{}
+			ids = append(ids, params.ID)
+		case failKindFreshmileTile:
+			var bbox freshmileBBox
+			if err := json.Unmarshal(f.Params, &bbox); err != nil {
+				log.Printf("freshmile: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			tiles = append(tiles, bbox)
+		default:
+			log.Printf("freshmile: skipping failure of unknown kind %q", f.Kind)
+		}
+	}
+
+	log.Printf("freshmile: retrying %d locations and %d map tiles from %d recorded failure(s)", len(ids), len(tiles), len(failures))
+
+	// A location fed directly by id may also be re-discovered by a retried
+	// tile's scan; the resulting duplicate fetch is harmless (the write
+	// path upserts) and rare enough not to be worth threading the seen-set
+	// across the two feeds.
+	feed := func(feedCtx context.Context, idCh chan<- int) {
+		for _, id := range ids {
+			select {
+			case idCh <- id:
+			case <-feedCtx.Done():
+				return
+			}
+		}
+		if len(tiles) > 0 {
+			ing.scanBBoxes(feedCtx, idCh, tiles)
+		}
+	}
+	processed, err := ing.runPipeline(ctx, feed)
+	log.Printf("freshmile: retry done, %d locations processed", processed)
+	return processed, err
+}
+
+// runPipeline runs the shared discover→fetch→write pipeline behind both a
+// full Run and a RetryFailed pass: feed streams location IDs onto idCh
+// (a full run's feed is scanLocationIDs; a retry pass feeds recorded IDs
+// and re-scans failed tiles), detail-fetch workers consume them, and a
+// single writer batches results onto the database.
+func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx context.Context, idCh chan<- int)) (int, error) {
+	// pipelineCtx (not ctx directly) governs the feed and the
 	// detail-fetch workers, so that once writeResults returns — whether
 	// because the pipeline finished normally or because a flush failed —
 	// we can force those two stages to unwind via cancelPipeline below.
@@ -191,7 +283,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	go func() {
 		defer scanWG.Done()
 		defer close(idCh)
-		ing.scanLocationIDs(pipelineCtx, idCh)
+		feed(pipelineCtx, idCh)
 	}()
 
 	var workerWG sync.WaitGroup
@@ -202,6 +294,12 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 			if err != nil {
 				atomic.AddInt64(&fetchFailed, 1)
 				log.Printf("freshmile: location %d failed: %v", id, err)
+				// Not recorded when the pipeline itself is shutting down:
+				// those locations didn't fail on their own — see the same
+				// guard in izivia.go's worker.
+				if pipelineCtx.Err() == nil {
+					ing.Failures.Record(failKindFreshmileLocation, fmt.Sprintf("%s/locations/%d", ing.BaseURL, id), map[string]int{"id": id}, err)
+				}
 				continue
 			}
 			if !ok {
@@ -259,19 +357,6 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	scanWG.Wait()
 	workerWG.Wait()
 
-	log.Printf("freshmile: done, %d locations processed", processed)
-
-	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
-	// processed > 0 guards against a scan that silently found/fetched
-	// nothing (e.g. Freshmile's map-locations API down for the whole run)
-	// looking identical to "France has zero stations" and wiping the
-	// entire known dataset — see the same guard in izivia.go for the
-	// production incident that motivated it.
-	if err == nil && processed > 0 {
-		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart.Add(-repository.StaleSourceDataGracePeriod)); sweepErr != nil {
-			return processed, sweepErr
-		}
-	}
 	return processed, err
 }
 
@@ -354,9 +439,14 @@ func (ing *FreshmileIngester) fetchAndNormalizeLocation(ctx context.Context, id 
 	return normalizedSourceStation{Station: src, Tariffs: normalizeFreshmileTariffs(details)}, true, nil
 }
 
-// freshmileBBox is a [minLng,minLat,maxLng,maxLat] map-locations query box.
+// freshmileBBox is a [minLng,minLat,maxLng,maxLat] map-locations query
+// box. The JSON tags matter: a failed tile is persisted as this struct in
+// the failure log (see FailureLog) and read back by RetryFailed.
 type freshmileBBox struct {
-	MinLng, MinLat, MaxLng, MaxLat float64
+	MinLng float64 `json:"minLng"`
+	MinLat float64 `json:"minLat"`
+	MaxLng float64 `json:"maxLng"`
+	MaxLat float64 `json:"maxLat"`
 }
 
 // scanLocationIDs scans map-locations across metropolitan France, starting
@@ -400,6 +490,13 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 	// of France goes stale run after run instead of the miss rotating.
 	rand.Shuffle(len(initial), func(i, j int) { initial[i], initial[j] = initial[j], initial[i] })
 
+	ing.scanBBoxes(ctx, idCh, initial)
+}
+
+// scanBBoxes is scanLocationIDs' engine, starting from an arbitrary list
+// of initial boxes rather than always the full-France grid — RetryFailed
+// reuses it to re-scan just the tiles a previous run recorded as failed.
+func (ing *FreshmileIngester) scanBBoxes(ctx context.Context, idCh chan<- int, initial []freshmileBBox) {
 	var (
 		mu   sync.Mutex
 		seen = map[int]struct{}{}
@@ -445,6 +542,13 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 		features, err := ing.fetchMapLocations(ctx, bbox, sem)
 		if err != nil {
 			log.Printf("freshmile: map-locations bbox %+v failed: %v", bbox, err)
+			// A failed tile drops its whole branch of the subdivision tree
+			// (a region can go missing from discovery entirely), so it's
+			// worth recording for a targeted retry — unless the scan is
+			// just being canceled, see the same guard in izivia.go.
+			if ctx.Err() == nil {
+				ing.Failures.Record(failKindFreshmileTile, ing.mapLocationsURL(bbox), bbox, err)
+			}
 			return
 		}
 		for _, f := range features {
@@ -533,9 +637,13 @@ func subdivideBBox(b freshmileBBox) []freshmileBBox {
 	}
 }
 
-func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox, sem chan struct{}) ([]map[string]any, error) {
-	url := fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
+func (ing *FreshmileIngester) mapLocationsURL(bbox freshmileBBox) string {
+	return fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
 		ing.BaseURL, bbox.MinLng, bbox.MinLat, bbox.MaxLng, bbox.MaxLat, freshmileZoom)
+}
+
+func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox, sem chan struct{}) ([]map[string]any, error) {
+	url := ing.mapLocationsURL(bbox)
 	body, err := ing.getJSON(ctx, url, sem)
 	if err != nil {
 		return nil, err

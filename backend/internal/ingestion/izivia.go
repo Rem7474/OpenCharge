@@ -76,8 +76,12 @@ type IziviaIngester struct {
 	Links            *repository.LinkRepository
 	Config           IziviaConfig
 	MaxLinkDistanceM float64
-	client           *http.Client
-	retryBackoff     time.Duration // unexported: overridden by tests to keep them fast
+	// Failures, when set, records every request that failed for good
+	// (station detail fetch, marker square scan) so a later
+	// -retry-failed pass can replay just those — see FailureLog.
+	Failures     *FailureLog
+	client       *http.Client
+	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
 
 func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, cfg IziviaConfig) *IziviaIngester {
@@ -115,6 +119,7 @@ const iziviaMaxRetries = 5
 // writeSourceStationChunk — same bulk correlation + single-transaction
 // pattern as Electra, instead of one uncommitted round trip per marker.
 func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
+	defer ing.Failures.saveAndLog()
 	runStart := time.Now()
 
 	markers, err := ing.fetchMarkers(ctx)
@@ -123,6 +128,92 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("izivia: %d unique markers found", len(markers))
 
+	result, firstErr := ing.processMarkers(ctx, markers)
+
+	log.Printf("izivia: done, %d stations processed", result)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData) —
+	// firstErr covers both ctx cancellation and a write failure. result
+	// > 0 is a second, independent guard: every healthy run re-touches
+	// thousands of stations, so zero processed with no error is itself a
+	// sign something upstream failed silently (e.g. every marker's detail
+	// fetch failing while the marker scan itself reported success) —
+	// sweeping in that case would wipe the entire known dataset instead of
+	// just skipping a bad run. See also fetchMarkers' own all-squares-failed
+	// check, which catches the total-scan-failure case earlier.
+	if firstErr == nil && result > 0 {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "izivia", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
+			return result, err
+		}
+	}
+	return result, firstErr
+}
+
+// RetryFailed replays only the requests a previous run recorded as failed
+// (see FailureLog): failed marker squares are re-scanned to recover their
+// markers, and failed station details are re-fetched from the marker saved
+// in the failure's params. Stations that fail again are re-recorded, so
+// the failure file always reflects what's still outstanding. No stale-data
+// sweep happens here: a retry pass only touches the previously-failed
+// subset, so most known stations legitimately go un-refreshed.
+func (ing *IziviaIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
+	defer ing.Failures.saveAndLog()
+
+	var markers []map[string]any
+	seen := map[string]struct{}{}
+	addMarker := func(m map[string]any) {
+		id, _ := m["id"].(string)
+		if id == "" {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		markers = append(markers, m)
+	}
+
+	for _, f := range failures {
+		switch f.Kind {
+		case failKindIziviaSquare:
+			var square iziviaSquare
+			if err := json.Unmarshal(f.Params, &square); err != nil {
+				log.Printf("izivia: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			squareMarkers, err := ing.fetchSquareMarkers(ctx, square)
+			if err != nil {
+				log.Printf("izivia: markers square still failing: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
+				if ctx.Err() == nil {
+					ing.Failures.Record(failKindIziviaSquare, iziviaBaseURL+"/map/markers", square, err)
+				}
+				continue
+			}
+			for _, m := range squareMarkers {
+				addMarker(m)
+			}
+		case failKindIziviaStation:
+			var marker map[string]any
+			if err := json.Unmarshal(f.Params, &marker); err != nil {
+				log.Printf("izivia: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			addMarker(marker)
+		default:
+			log.Printf("izivia: skipping failure of unknown kind %q", f.Kind)
+		}
+	}
+
+	log.Printf("izivia: retrying %d markers from %d recorded failure(s)", len(markers), len(failures))
+	processed, err := ing.processMarkers(ctx, markers)
+	log.Printf("izivia: retry done, %d stations processed", processed)
+	return processed, err
+}
+
+// processMarkers fetches details/pricing for every marker and writes the
+// results, concurrently — the shared pipeline behind both a full Run and a
+// RetryFailed pass.
+func (ing *IziviaIngester) processMarkers(ctx context.Context, markers []map[string]any) (int, error) {
 	// pipelineCtx governs the marker-feeding loop below and the fetch
 	// workers. writeResults runs concurrently in its own goroutine and can
 	// return early on a flush error, well before every marker has been fed
@@ -148,6 +239,13 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 			if err != nil {
 				stationID, _ := marker["id"].(string)
 				log.Printf("izivia: station %s failed: %v", stationID, err)
+				// Not recorded when the pipeline itself is shutting down
+				// (timeout/SIGINT/write error): those markers didn't fail on
+				// their own, and recording the cancellation-error flood
+				// would drown the genuinely-failed ones.
+				if pipelineCtx.Err() == nil {
+					ing.Failures.Record(failKindIziviaStation, fmt.Sprintf("%s/charging-locations/%s", iziviaBaseURL, stationID), marker, err)
+				}
 				continue
 			}
 			if !ok {
@@ -204,23 +302,6 @@ feedLoop:
 	firstErr := ctx.Err()
 	if firstErr == nil {
 		firstErr = result.err
-	}
-
-	log.Printf("izivia: done, %d stations processed", result.processed)
-
-	// Only sweep after a fully successful run (see repository.SweepStaleSourceData) —
-	// firstErr covers both ctx cancellation and a write failure. result.processed
-	// > 0 is a second, independent guard: every healthy run re-touches
-	// thousands of stations, so zero processed with no error is itself a
-	// sign something upstream failed silently (e.g. every marker's detail
-	// fetch failing while the marker scan itself reported success) —
-	// sweeping in that case would wipe the entire known dataset instead of
-	// just skipping a bad run. See also fetchMarkers' own all-squares-failed
-	// check, which catches the total-scan-failure case earlier.
-	if firstErr == nil && result.processed > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "izivia", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
-			return result.processed, err
-		}
 	}
 	return result.processed, firstErr
 }
@@ -620,25 +701,13 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 		go func() {
 			defer wg.Done()
 			for square := range squareCh {
-				payload := map[string]any{"square": square, "filters": map[string]any{}}
-				markersURL := iziviaBaseURL + "/map/markers"
-				// /map/markers has the same URL for every square — only the
-				// payload distinguishes one request from another, so the
-				// label passed to postJSON (used in retry logs) must spell
-				// out the square explicitly. Without this, a page of retry
-				// logs (or the final failure below) is indistinguishable
-				// noise: no way to tell which of the many in-flight squares
-				// actually failed.
-				label := fmt.Sprintf("%s (square centerLng=%g centerLat=%g zoom=%d)", markersURL, square.CenterLng, square.CenterLat, square.Zoom)
-				body, err := ing.postJSON(ctx, markersURL, label, payload)
+				markers, err := ing.fetchSquareMarkers(ctx, square)
 				if err != nil {
 					atomic.AddInt64(&failed, 1)
 					log.Printf("izivia: markers square failed: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
-					continue
-				}
-				var markers []map[string]any
-				if err := json.Unmarshal(body, &markers); err != nil {
-					atomic.AddInt64(&failed, 1)
+					if ctx.Err() == nil {
+						ing.Failures.Record(failKindIziviaSquare, iziviaBaseURL+"/map/markers", square, err)
+					}
 					continue
 				}
 				atomic.AddInt64(&succeeded, 1)
@@ -686,6 +755,27 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 	}
 
 	return all, nil
+}
+
+// fetchSquareMarkers fetches /map/markers for one grid square. The URL is
+// the same constant for every square — only the payload distinguishes one
+// request from another — so the label passed to postJSON (used in retry
+// logs) must spell out the square explicitly. Without this, a page of
+// retry logs (or the final failure) is indistinguishable noise: no way to
+// tell which of the many in-flight squares actually failed.
+func (ing *IziviaIngester) fetchSquareMarkers(ctx context.Context, square iziviaSquare) ([]map[string]any, error) {
+	payload := map[string]any{"square": square, "filters": map[string]any{}}
+	markersURL := iziviaBaseURL + "/map/markers"
+	label := fmt.Sprintf("%s (square centerLng=%g centerLat=%g zoom=%d)", markersURL, square.CenterLng, square.CenterLat, square.Zoom)
+	body, err := ing.postJSON(ctx, markersURL, label, payload)
+	if err != nil {
+		return nil, err
+	}
+	var markers []map[string]any
+	if err := json.Unmarshal(body, &markers); err != nil {
+		return nil, fmt.Errorf("decode markers for square centerLng=%g centerLat=%g zoom=%d: %w", square.CenterLng, square.CenterLat, square.Zoom, err)
+	}
+	return markers, nil
 }
 
 // postJSON POSTs payload to url. label identifies this specific request in
