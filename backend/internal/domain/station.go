@@ -61,8 +61,14 @@ type StationFilter struct {
 	// filter any more than it should pass a HasTariffs one.
 	MinPriceCentsPerKWh *float64
 	MaxPriceCentsPerKWh *float64
-	Limit               int
-	Offset              int
+	// ExcludeSubscriptionPlans, when true, ignores tariffs on the
+	// TariffPlanSubscription plan when computing PricingSummary and
+	// SelectedSourcesPricing (and, transitively, the price-range filter
+	// above) — a station whose only known price requires a paid
+	// subscription then behaves as if it had no price at all.
+	ExcludeSubscriptionPlans bool
+	Limit                    int
+	Offset                   int
 }
 
 // Connector is an aggregated connector group exposed by the API

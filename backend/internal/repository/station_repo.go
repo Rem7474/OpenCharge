@@ -69,7 +69,26 @@ func (r *StationRepository) UpsertStation(ctx context.Context, s domain.Station)
 	return id, nil
 }
 
-const stationListSelectPrefix = `
+// subscriptionExclusionSQL returns the extra WHERE-clause fragment that
+// drops subscription-plan tariffs from a price aggregate's FILTER (...)
+// when exclude is true, or "" (no-op) otherwise. domain.TariffPlanSubscription
+// is a fixed Go constant, never user input, so splicing it into the query
+// text directly (rather than a bind parameter) is safe.
+func subscriptionExclusionSQL(exclude bool) string {
+	if !exclude {
+		return ""
+	}
+	return " AND t.plan <> '" + domain.TariffPlanSubscription + "'"
+}
+
+// stationListSelectPrefix returns the shared SELECT list every ListByBBox
+// query starts from. exclude mirrors StationFilter.ExcludeSubscriptionPlans:
+// when true, both the ac_min/dc_min aggregates drop subscription-plan
+// tariffs, so a station whose only price requires a paid subscription comes
+// back with a null price instead of one the caller can't actually get.
+func stationListSelectPrefix(exclude bool) string {
+	excl := subscriptionExclusionSQL(exclude)
+	return fmt.Sprintf(`
 	SELECT
 		s.id, s.irve_id_station, s.irve_id_pdc, s.operator_name, s.amenageur, s.enseigne, s.name,
 		s.address_street, s.address_postal_code, s.address_city, s.address_country_code,
@@ -100,13 +119,14 @@ const stationListSelectPrefix = `
 		-- see migration 008 for why that goes stale between runs. Non-windowed
 		-- tariffs (everything else) fall through to the same column value.
 		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed'))
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed')%[1]s)
 		),
 		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed'))
-		)`
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed')%[1]s)
+		)`, excl)
+}
 
 const stationListFrom = `
 	FROM stations s
@@ -118,15 +138,21 @@ const stationListFrom = `
 // exact-connector-match preference exists). Factored out here so
 // stationBestPriceFragment (below) doesn't hand-duplicate the whole thing
 // a second time.
-const stationBestPriceACFragment = `COALESCE(
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed'))
-)`
+func stationBestPriceACFragment(exclude bool) string {
+	excl := subscriptionExclusionSQL(exclude)
+	return fmt.Sprintf(`COALESCE(
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed')%[1]s)
+)`, excl)
+}
 
-const stationBestPriceDCFragment = `COALESCE(
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed'))
-)`
+func stationBestPriceDCFragment(exclude bool) string {
+	excl := subscriptionExclusionSQL(exclude)
+	return fmt.Sprintf(`COALESCE(
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
+	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed')%[1]s)
+)`, excl)
+}
 
 // stationBestPriceFragment picks the same price a client would display for
 // a station via utils/pricing.js#pickPriceCentsPerKWh: prefer whichever of
@@ -135,7 +161,9 @@ const stationBestPriceDCFragment = `COALESCE(
 // f.Sources selection is active, since without one there is no "filtered"
 // price to filter on — unlike ORDER BY/GROUP BY, HAVING can't reference a
 // SELECT-list alias and must repeat the aggregate expression verbatim.
-var stationBestPriceFragment = stationBestPriceExprFor(stationBestPriceACFragment, stationBestPriceDCFragment)
+func stationBestPriceFragment(exclude bool) string {
+	return stationBestPriceExprFor(stationBestPriceACFragment(exclude), stationBestPriceDCFragment(exclude))
+}
 
 // stationBestPriceExprFor builds the same "prefer the station's own
 // connector kind, else whichever is available" COALESCE/CASE shape as
@@ -163,15 +191,16 @@ func stationBestPriceExprFor(acFragment, dcFragment string) string {
 // filter whenever a sources selection is active: the min/max price fields
 // filter what the user would pay, not an unrelated cheaper plan they
 // haven't selected.
-func stationSelectedPriceFragment(sourcesParamIdx int) string {
+func stationSelectedPriceFragment(sourcesParamIdx int, exclude bool) string {
+	excl := subscriptionExclusionSQL(exclude)
 	acFragment := fmt.Sprintf(`COALESCE(
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
-	)`, sourcesParamIdx)
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
+	)`, sourcesParamIdx, excl)
 	dcFragment := fmt.Sprintf(`COALESCE(
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
-	)`, sourcesParamIdx)
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
+	)`, sourcesParamIdx, excl)
 	return stationBestPriceExprFor(acFragment, dcFragment)
 }
 
@@ -312,15 +341,16 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	// the tariff's own source/plan joined the same way.
 	args = append(args, f.Sources)
 	sourcesParamIdx := len(args)
-	query := stationListSelectPrefix + fmt.Sprintf(`,
+	subscriptionExcl := subscriptionExclusionSQL(f.ExcludeSubscriptionPlans)
+	query := stationListSelectPrefix(f.ExcludeSubscriptionPlans) + fmt.Sprintf(`,
 		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
 		),
 		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]))
-		)`, sourcesParamIdx)
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
+			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
+		)`, sourcesParamIdx, subscriptionExcl)
 	query += stationListFrom + `
 		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 
@@ -353,9 +383,9 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	// "0.20-0.30 €/kWh" while only Electra is selected expects that bound to
 	// apply to Electra's price, not some unrelated cheaper source they
 	// haven't picked.
-	priceFragment := stationBestPriceFragment
+	priceFragment := stationBestPriceFragment(f.ExcludeSubscriptionPlans)
 	if len(f.Sources) > 0 {
-		priceFragment = stationSelectedPriceFragment(sourcesParamIdx)
+		priceFragment = stationSelectedPriceFragment(sourcesParamIdx, f.ExcludeSubscriptionPlans)
 	}
 
 	var having []string

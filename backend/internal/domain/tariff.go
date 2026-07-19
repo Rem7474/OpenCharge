@@ -18,6 +18,13 @@ const (
 // own plan ids instead.
 const TariffPlanStandard = "standard"
 
+// TariffPlanSubscription identifies a subscriber-only price tier (used as
+// the literal plan id by Electra, Fastned and eborn's ingesters). Excluded
+// from price aggregates when StationFilter.ExcludeSubscriptionPlans is set,
+// so a user without a paid subscription to any network isn't shown a price
+// they can't actually get.
+const TariffPlanSubscription = "subscription"
+
 // StationTariff is a normalized tariff attached to an IRVE station, coming
 // from a given source (electra, izivia, irve_text, ...) and price plan
 // (e.g. "standard", or "public"/"app"/"subscription" for Electra).
