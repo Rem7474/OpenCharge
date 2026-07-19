@@ -7,68 +7,13 @@ import {
   formatPrice,
   hasHourlyPricing,
   tariffCostBreakdown,
-  tariffAppliesToBucket,
-  preferConnectorMatch,
+  bestTariffForSource,
+  cheapestTariff,
   PRICE_MODE_RECHARGE,
   SUBSCRIPTION_PLAN,
 } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
-
-function cheapestOf(tariffs) {
-  return tariffs.reduce((min, t) => (currentEnergyPriceCentsPerKWh(t) < currentEnergyPriceCentsPerKWh(min) ? t : min));
-}
-
-// Pick, among a (source, plan)'s tariffs, the one applicable to the
-// station's own connector kind (mixed-kind tariffs count for either — see
-// tariffAppliesToBucket), preferring a connector-specific tariff over a
-// generic one from the same source when both exist (preferConnectorMatch —
-// mirrors backend station_repo.go's stationListFrom dedup, so this agrees
-// with the price the map marker shows for the same source/plan).
-function bestTariffForSource(tariffs, source, plan, connectorKind, stationConnectorType) {
-  let candidates = tariffs.filter(
-    (t) => t.source === source && t.plan === plan && t.energy_price_cents_per_kwh != null
-  );
-  if (connectorKind) {
-    const bucketMatches = candidates.filter((t) => tariffAppliesToBucket(t, connectorKind));
-    if (bucketMatches.length > 0) candidates = bucketMatches;
-  }
-  if (candidates.length === 0) return null;
-  return cheapestOf(preferConnectorMatch(candidates, stationConnectorType));
-}
-
-// Ranks by currentEnergyPriceCentsPerKWh, not the raw
-// energy_price_cents_per_kwh field: for a windowed tariff (Electra) that
-// field is a snapshot fixed at the last ingestion run, so ranking by it
-// directly can pick a tariff that was cheapest at ingestion time but isn't
-// live right now.
-//
-// Dedupes per (source, plan) — preferring a connector-specific tariff over
-// a generic one from that *same* source, exactly like bestTariffForSource —
-// before taking the overall minimum. Applying that connector preference at
-// the top level instead (favoring any connector-exact-match tariff over
-// the cheapest known price, regardless of source) was a real bug: a single
-// source's connector-specific tariff could suppress an unrelated, cheaper
-// tariff from a completely different source that has nothing to do with
-// that connector granularity (see backend station_repo.go's stationListFrom
-// comment — this is the client-side mirror of that same fix).
-function cheapestTariff(tariffs, connectorKind, stationConnectorType) {
-  let candidates = tariffs.filter((t) => t.energy_price_cents_per_kwh != null);
-  if (connectorKind) {
-    const bucketMatches = candidates.filter((t) => tariffAppliesToBucket(t, connectorKind));
-    if (bucketMatches.length > 0) candidates = bucketMatches;
-  }
-  if (candidates.length === 0) return null;
-
-  const bySourcePlan = new Map();
-  for (const t of candidates) {
-    const key = `${t.source}:${t.plan}`;
-    if (!bySourcePlan.has(key)) bySourcePlan.set(key, []);
-    bySourcePlan.get(key).push(t);
-  }
-  const perSourceBest = Array.from(bySourcePlan.values(), (rows) => cheapestOf(preferConnectorMatch(rows, stationConnectorType)));
-  return cheapestOf(perSourceBest);
-}
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
 // mode, a breakdown of every cost component the tariff actually carries

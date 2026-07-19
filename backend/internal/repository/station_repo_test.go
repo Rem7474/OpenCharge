@@ -780,3 +780,111 @@ func TestStationRepository_ListByBBox_ExcludeSubscriptionPlans(t *testing.T) {
 		}
 	}
 }
+
+// TestStationRepository_ListByBBox_SelectedSourcesDedupWithinSource covers
+// the interaction between stationListFrom's connector-match dedup and a
+// f.Sources selection: when a user selects one specific source that itself
+// has both a connector-specific and a generic tariff for the same
+// station/plan (Freshmile's case), SelectedSourcesPricing must reflect the
+// connector-specific one — the dedup has to apply consistently whether or
+// not a sources filter is active, since stationSelectedPriceFragment reuses
+// the same deduped `t` rows as the unfiltered aggregate.
+func TestStationRepository_ListByBBox_SelectedSourcesDedupWithinSource(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRSELDEDUP1", 45.90, 6.10)
+	station.ConnectorType = "CCS"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	genericPrice := 32.0
+	specificPrice := 51.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &genericPrice, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert generic tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &specificPrice,
+		ConnectorType: "CCS", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert connector-specific tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{
+		MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0,
+		Sources: []string{"freshmile:standard"},
+	}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	got := results[0].SelectedSourcesPricing
+	if got == nil || got.DCMinCentsPerKWh == nil || *got.DCMinCentsPerKWh != specificPrice {
+		t.Errorf("SelectedSourcesPricing = %+v, want DCMinCentsPerKWh = %v (the connector-specific tariff)", got, specificPrice)
+	}
+}
+
+// TestStationRepository_ListByBBox_DedupRespectsPlanBoundary covers the
+// interaction between stationListFrom's dedup (partitioned by source,
+// plan, kind — so a subscription-plan tariff and a standard-plan tariff
+// from the same source never get grouped together) and
+// ExcludeSubscriptionPlans: a cheap connector-specific *subscription*
+// tariff must not "steal" the dedup slot from a pricier but excludable
+// generic *standard* tariff from the same source — they're different plans
+// and must be deduped (and filtered) independently.
+func TestStationRepository_ListByBBox_DedupRespectsPlanBoundary(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRPLANBOUND1", 45.90, 6.10)
+	station.ConnectorType = "CCS"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	cheapSubscriptionSpecific := 15.0
+	standardGeneric := 40.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanSubscription, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &cheapSubscriptionSpecific,
+		ConnectorType: "CCS", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert subscription tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &standardGeneric, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert standard tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{
+		MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0,
+		ExcludeSubscriptionPlans: true,
+	}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	got := results[0].PricingSummary.DCMinCentsPerKWh
+	if got == nil || *got != standardGeneric {
+		t.Errorf("DCMinCentsPerKWh = %v, want %v (the standard plan's price, subscription plan excluded — not the cheaper subscription price)", got, standardGeneric)
+	}
+}
