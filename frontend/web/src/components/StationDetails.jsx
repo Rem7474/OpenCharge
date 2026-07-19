@@ -7,21 +7,34 @@ import {
   formatPrice,
   hasHourlyPricing,
   tariffCostBreakdown,
+  tariffAppliesToBucket,
+  preferConnectorMatch,
   PRICE_MODE_RECHARGE,
   SUBSCRIPTION_PLAN,
 } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 
-// Pick, among a (source, plan)'s tariffs, the one matching the station's
-// own connector kind (falling back to any tariff from that source/plan).
-function bestTariffForSource(tariffs, source, plan, connectorKind) {
-  const candidates = tariffs.filter(
+function cheapestOf(tariffs) {
+  return tariffs.reduce((min, t) => (currentEnergyPriceCentsPerKWh(t) < currentEnergyPriceCentsPerKWh(min) ? t : min));
+}
+
+// Pick, among a (source, plan)'s tariffs, the one applicable to the
+// station's own connector kind (mixed-kind tariffs count for either — see
+// tariffAppliesToBucket), preferring a connector-specific tariff over a
+// generic one from the same source when both exist (preferConnectorMatch —
+// mirrors backend station_repo.go's stationListFrom dedup, so this agrees
+// with the price the map marker shows for the same source/plan).
+function bestTariffForSource(tariffs, source, plan, connectorKind, stationConnectorType) {
+  let candidates = tariffs.filter(
     (t) => t.source === source && t.plan === plan && t.energy_price_cents_per_kwh != null
   );
+  if (connectorKind) {
+    const bucketMatches = candidates.filter((t) => tariffAppliesToBucket(t, connectorKind));
+    if (bucketMatches.length > 0) candidates = bucketMatches;
+  }
   if (candidates.length === 0) return null;
-  const matching = connectorKind ? candidates.find((t) => t.kind === connectorKind) : null;
-  return matching ?? candidates[0];
+  return cheapestOf(preferConnectorMatch(candidates, stationConnectorType));
 }
 
 // Ranks by currentEnergyPriceCentsPerKWh, not the raw
@@ -29,12 +42,32 @@ function bestTariffForSource(tariffs, source, plan, connectorKind) {
 // field is a snapshot fixed at the last ingestion run, so ranking by it
 // directly can pick a tariff that was cheapest at ingestion time but isn't
 // live right now.
-function cheapestTariff(tariffs, connectorKind) {
-  const candidates = tariffs.filter((t) => t.energy_price_cents_per_kwh != null);
+//
+// Dedupes per (source, plan) — preferring a connector-specific tariff over
+// a generic one from that *same* source, exactly like bestTariffForSource —
+// before taking the overall minimum. Applying that connector preference at
+// the top level instead (favoring any connector-exact-match tariff over
+// the cheapest known price, regardless of source) was a real bug: a single
+// source's connector-specific tariff could suppress an unrelated, cheaper
+// tariff from a completely different source that has nothing to do with
+// that connector granularity (see backend station_repo.go's stationListFrom
+// comment — this is the client-side mirror of that same fix).
+function cheapestTariff(tariffs, connectorKind, stationConnectorType) {
+  let candidates = tariffs.filter((t) => t.energy_price_cents_per_kwh != null);
+  if (connectorKind) {
+    const bucketMatches = candidates.filter((t) => tariffAppliesToBucket(t, connectorKind));
+    if (bucketMatches.length > 0) candidates = bucketMatches;
+  }
   if (candidates.length === 0) return null;
-  const pool = connectorKind ? candidates.filter((t) => t.kind === connectorKind) : candidates;
-  const from = pool.length > 0 ? pool : candidates;
-  return from.reduce((min, t) => (currentEnergyPriceCentsPerKWh(t) < currentEnergyPriceCentsPerKWh(min) ? t : min));
+
+  const bySourcePlan = new Map();
+  for (const t of candidates) {
+    const key = `${t.source}:${t.plan}`;
+    if (!bySourcePlan.has(key)) bySourcePlan.set(key, []);
+    bySourcePlan.get(key).push(t);
+  }
+  const perSourceBest = Array.from(bySourcePlan.values(), (rows) => cheapestOf(preferConnectorMatch(rows, stationConnectorType)));
+  return cheapestOf(perSourceBest);
 }
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
@@ -140,15 +173,20 @@ export default function StationDetails({
     return excludeSubscriptionPlans ? all.filter((t) => t.plan !== SUBSCRIPTION_PLAN) : all;
   }, [data, excludeSubscriptionPlans]);
 
-  const connectorKind = data ? connectorPriceKind(data.station.connectors?.[0]?.kind) : null;
+  const stationConnectorType = data ? data.station.connectors?.[0]?.kind : null;
+  const connectorKind = data ? connectorPriceKind(stationConnectorType) : null;
   const selectedEntries = Object.entries(selectedSources);
   const selectedTariffs = useMemo(
     () =>
       selectedEntries
-        .map(([source, plan]) => ({ source, plan, tariff: bestTariffForSource(tariffs, source, plan, connectorKind) }))
+        .map(([source, plan]) => ({
+          source,
+          plan,
+          tariff: bestTariffForSource(tariffs, source, plan, connectorKind, stationConnectorType),
+        }))
         .filter((entry) => entry.tariff != null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tariffs, connectorKind, selectedSources]
+    [tariffs, connectorKind, stationConnectorType, selectedSources]
   );
   const cheapestSelected = useMemo(
     () =>
@@ -159,7 +197,10 @@ export default function StationDetails({
         : null,
     [selectedTariffs]
   );
-  const overallBest = useMemo(() => (data ? cheapestTariff(tariffs, connectorKind) : null), [data, tariffs, connectorKind]);
+  const overallBest = useMemo(
+    () => (data ? cheapestTariff(tariffs, connectorKind, stationConnectorType) : null),
+    [data, tariffs, connectorKind, stationConnectorType]
+  );
   const overallBeatsSelection =
     overallBest &&
     (!cheapestSelected ||

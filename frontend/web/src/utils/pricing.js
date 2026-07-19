@@ -13,6 +13,32 @@ export function connectorPriceKind(connectorType) {
   return null;
 }
 
+// A tariff's own kind (ac/dc/mixed) "applies to" an ac/dc bucket when it
+// either matches exactly or is "mixed" (price applies regardless of
+// connector — see backend station_repo.go's `t.kind IN ('ac', 'mixed')`,
+// which this mirrors). A plain `t.kind === bucket` check alone drops every
+// mixed-kind tariff (e.g. Lidl's single connector-agnostic price) from
+// consideration, which used to make a station's "best price" miss a
+// cheaper mixed-kind tariff entirely.
+export function tariffAppliesToBucket(tariff, bucket) {
+  return tariff.kind === bucket || tariff.kind === "mixed";
+}
+
+// Some sources (currently only Freshmile) can attach both a
+// connector-specific tariff (tariff.connector_type set, matching the
+// station's own connector) and a generic one (unset) to the very same
+// station, source and plan — see backend station_repo.go's stationListFrom
+// comment for why. Given a set of same-source/plan candidates, the
+// connector-specific one is the accurate price for this exact station and
+// must win regardless of price; this mirrors that dedup client-side so
+// StationDetails' "best price" agrees with the map marker's (which is
+// computed server-side the same way).
+export function preferConnectorMatch(tariffs, stationConnectorType) {
+  if (!stationConnectorType) return tariffs;
+  const exact = tariffs.filter((t) => t.connector_type === stationConnectorType);
+  return exact.length > 0 ? exact : tariffs;
+}
+
 /**
  * Pick the €/kWh price (in cents) most relevant to a station: prefer the
  * price matching its own connector kind, fall back to whichever of AC/DC
