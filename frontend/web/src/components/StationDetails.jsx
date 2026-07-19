@@ -7,35 +7,13 @@ import {
   formatPrice,
   hasHourlyPricing,
   tariffCostBreakdown,
+  bestTariffForSource,
+  cheapestTariff,
   PRICE_MODE_RECHARGE,
   SUBSCRIPTION_PLAN,
 } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
-
-// Pick, among a (source, plan)'s tariffs, the one matching the station's
-// own connector kind (falling back to any tariff from that source/plan).
-function bestTariffForSource(tariffs, source, plan, connectorKind) {
-  const candidates = tariffs.filter(
-    (t) => t.source === source && t.plan === plan && t.energy_price_cents_per_kwh != null
-  );
-  if (candidates.length === 0) return null;
-  const matching = connectorKind ? candidates.find((t) => t.kind === connectorKind) : null;
-  return matching ?? candidates[0];
-}
-
-// Ranks by currentEnergyPriceCentsPerKWh, not the raw
-// energy_price_cents_per_kwh field: for a windowed tariff (Electra) that
-// field is a snapshot fixed at the last ingestion run, so ranking by it
-// directly can pick a tariff that was cheapest at ingestion time but isn't
-// live right now.
-function cheapestTariff(tariffs, connectorKind) {
-  const candidates = tariffs.filter((t) => t.energy_price_cents_per_kwh != null);
-  if (candidates.length === 0) return null;
-  const pool = connectorKind ? candidates.filter((t) => t.kind === connectorKind) : candidates;
-  const from = pool.length > 0 ? pool : candidates;
-  return from.reduce((min, t) => (currentEnergyPriceCentsPerKWh(t) < currentEnergyPriceCentsPerKWh(min) ? t : min));
-}
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
 // mode, a breakdown of every cost component the tariff actually carries
@@ -140,15 +118,20 @@ export default function StationDetails({
     return excludeSubscriptionPlans ? all.filter((t) => t.plan !== SUBSCRIPTION_PLAN) : all;
   }, [data, excludeSubscriptionPlans]);
 
-  const connectorKind = data ? connectorPriceKind(data.station.connectors?.[0]?.kind) : null;
+  const stationConnectorType = data ? data.station.connectors?.[0]?.kind : null;
+  const connectorKind = data ? connectorPriceKind(stationConnectorType) : null;
   const selectedEntries = Object.entries(selectedSources);
   const selectedTariffs = useMemo(
     () =>
       selectedEntries
-        .map(([source, plan]) => ({ source, plan, tariff: bestTariffForSource(tariffs, source, plan, connectorKind) }))
+        .map(([source, plan]) => ({
+          source,
+          plan,
+          tariff: bestTariffForSource(tariffs, source, plan, connectorKind, stationConnectorType),
+        }))
         .filter((entry) => entry.tariff != null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tariffs, connectorKind, selectedSources]
+    [tariffs, connectorKind, stationConnectorType, selectedSources]
   );
   const cheapestSelected = useMemo(
     () =>
@@ -159,7 +142,10 @@ export default function StationDetails({
         : null,
     [selectedTariffs]
   );
-  const overallBest = useMemo(() => (data ? cheapestTariff(tariffs, connectorKind) : null), [data, tariffs, connectorKind]);
+  const overallBest = useMemo(
+    () => (data ? cheapestTariff(tariffs, connectorKind, stationConnectorType) : null),
+    [data, tariffs, connectorKind, stationConnectorType]
+  );
   const overallBeatsSelection =
     overallBest &&
     (!cheapestSelected ||

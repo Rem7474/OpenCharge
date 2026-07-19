@@ -341,3 +341,132 @@ func TestListSources(t *testing.T) {
 		t.Errorf("sources[1] = %+v, want izivia with plans [standard]", sources[1])
 	}
 }
+
+// clientSideBestDCPrice replicates the dedup+bucket logic the frontend
+// applies to GET /stations/{id}'s raw tariff list (see
+// frontend/web/src/utils/pricing.js#tariffAppliesToBucket/preferConnectorMatch
+// and StationDetails.jsx#cheapestTariff): among tariffs applicable to the
+// "dc" bucket (kind "dc" or "mixed"), dedupe per (source, plan) preferring
+// a connector-specific tariff over a generic one from that same source,
+// then take the true minimum across sources.
+func clientSideBestDCPrice(tariffs []tariffDTO, stationConnectorType string) *float64 {
+	type group struct {
+		exact, all []tariffDTO
+	}
+	bySourcePlan := map[string]*group{}
+	for _, t := range tariffs {
+		if t.EnergyPriceCentsPerKWh == nil || (t.Kind != "dc" && t.Kind != "mixed") {
+			continue
+		}
+		key := t.Source + ":" + t.Plan
+		g, ok := bySourcePlan[key]
+		if !ok {
+			g = &group{}
+			bySourcePlan[key] = g
+		}
+		g.all = append(g.all, t)
+		if t.ConnectorType == stationConnectorType && stationConnectorType != "" {
+			g.exact = append(g.exact, t)
+		}
+	}
+	var best *float64
+	for _, g := range bySourcePlan {
+		pool := g.all
+		if len(g.exact) > 0 {
+			pool = g.exact
+		}
+		for _, t := range pool {
+			if best == nil || *t.EnergyPriceCentsPerKWh < *best {
+				v := *t.EnergyPriceCentsPerKWh
+				best = &v
+			}
+		}
+	}
+	return best
+}
+
+// TestMarkerPriceAgreesWithDetailPanelBestPrice is a regression/consistency
+// test for the "gros bug sur le meilleur tarif" report: it drives the real
+// HTTP handlers for both GET /stations (the map marker's price) and GET
+// /stations/{id} (the detail panel's tariff list) for the very same
+// station, and asserts the two independently-computed "best price" values
+// agree — regardless of which side (backend SQL vs frontend JS) a future
+// regression happens to land in. Reproduces the exact reported scenario:
+// Freshmile generic (0.32€) + Freshmile CCS-specific (0.51€) + Izivia
+// (0.45€) + Lidl mixed-kind (0.29€) on a CCS station — the correct answer
+// is Lidl's 0.29€, not Freshmile's connector-specific 0.51€.
+func TestMarkerPriceAgreesWithDetailPanelBestPrice(t *testing.T) {
+	h := setupHandler(t)
+	ctx := context.Background()
+
+	station := domain.Station{
+		IRVEIDPDC: "FRCONSIST01", OperatorName: "Lidl", Name: "Consistency Repro",
+		AddressCountry: "FR", Lat: 45.90, Lng: 6.10,
+		PowerKW: floatPtr(150), ConnectorType: "CCS", AccessType: "paid", Metadata: map[string]any{},
+	}
+	stationID, err := h.Stations.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("seed station: %v", err)
+	}
+
+	tariffs := []domain.StationTariff{
+		{StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+			Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: floatPtr(32), Extra: map[string]any{}},
+		{StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+			Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: floatPtr(51), ConnectorType: "CCS", Extra: map[string]any{}},
+		{StationID: stationID, Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+			Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: floatPtr(45), Extra: map[string]any{}},
+		{StationID: stationID, Source: "lidl", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindMixed,
+			Model: "lidl", Currency: "EUR", EnergyPriceCentsPerKWh: floatPtr(29), Extra: map[string]any{}},
+	}
+	for _, tf := range tariffs {
+		if err := h.Tariffs.Upsert(ctx, tf); err != nil {
+			t.Fatalf("seed tariff %s: %v", tf.Source, err)
+		}
+	}
+
+	router := newRouter(h)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/stations?bbox=6.0,45.8,6.3,46.0", nil)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GET /stations status = %d, want 200; body=%s", listRec.Code, listRec.Body.String())
+	}
+	var items []stationListItemDTO
+	if err := json.Unmarshal(listRec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode /stations response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d stations, want 1", len(items))
+	}
+	markerPrice := items[0].PricingSummary.DCMinCentsPerKWh
+	if markerPrice == nil {
+		t.Fatal("marker DCMinCentsPerKWh = nil, want a price")
+	}
+
+	detailReq := httptest.NewRequest(http.MethodGet, "/stations/irve:FRCONSIST01", nil)
+	detailRec := httptest.NewRecorder()
+	router.ServeHTTP(detailRec, detailReq)
+	if detailRec.Code != http.StatusOK {
+		t.Fatalf("GET /stations/{id} status = %d, want 200; body=%s", detailRec.Code, detailRec.Body.String())
+	}
+	var detail stationDetailResponse
+	if err := json.Unmarshal(detailRec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode /stations/{id} response: %v", err)
+	}
+	panelPrice := clientSideBestDCPrice(detail.Tariffs, detail.Station.Connectors[0].Kind)
+	if panelPrice == nil {
+		t.Fatal("panel best DC price = nil, want a price")
+	}
+
+	if *markerPrice != 29 {
+		t.Errorf("marker price = %v, want 29 (Lidl's mixed-kind tariff, the true cheapest)", *markerPrice)
+	}
+	if *panelPrice != 29 {
+		t.Errorf("detail panel best price = %v, want 29 (Lidl's mixed-kind tariff, the true cheapest)", *panelPrice)
+	}
+	if *markerPrice != *panelPrice {
+		t.Errorf("marker price (%v) and detail panel best price (%v) disagree", *markerPrice, *panelPrice)
+	}
+}

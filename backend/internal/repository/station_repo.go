@@ -102,56 +102,71 @@ func stationListSelectPrefix(exclude bool) string {
 		-- out on the map even though a tariff exists (visible in the detail
 		-- view, which lists every kind).
 		--
-		-- COALESCE prefers a tariff whose connector_type exactly matches this
-		-- station's own s.connector_type (Freshmile is currently the only
-		-- source that populates it) over the coarse kind-only minimum: e.g. a
-		-- station with a T2 connector and a Freshmile CCS-specific tariff on
-		-- file for the *same physical location* (a different PDC row sharing
-		-- source_station correlation) shouldn't have that CCS price bleed into
-		-- this station's summary. "t.connector_type <> ''" guards against
-		-- s.connector_type also being '' (unknown) — that must never look like
-		-- an "exact match" against every generic (non-connector-specific)
-		-- tariff row.
-		--
 		-- current_window_price(t.extra, t.energy_price_cents_per_kwh) instead
 		-- of the bare column: for tariffs with time-of-day windows (Electra),
 		-- the column is a snapshot fixed at the last ingestion run, not live —
 		-- see migration 008 for why that goes stale between runs. Non-windowed
 		-- tariffs (everything else) fall through to the same column value.
-		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed')%[1]s)
-		),
-		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed')%[1]s)
-		)`, excl)
+		--
+		-- No connector-type disambiguation needed here: stationListFrom's
+		-- LATERAL join already dedupes each (source, plan, kind) down to a
+		-- single row per station, preferring an exact connector_type match —
+		-- so this MIN is already a true minimum across every applicable
+		-- source, not just whichever source happens to have a connector-
+		-- specific tariff on file (see stationListFrom's comment for why that
+		-- distinction matters).
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed')%[1]s),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed')%[1]s)`, excl)
 }
 
+// stationListFrom dedupes station_tariffs per (source, plan, kind) before
+// any aggregation happens: some sources (currently only Freshmile) can
+// attach both a connector-specific tariff (t.connector_type set, e.g.
+// "CCS") and a generic one (t.connector_type = ”) to the very same
+// station row — see the correlation note below. Only the row that matches
+// (or, absent a match, an arbitrary row from) each (source, plan, kind)
+// group survives, via ROW_NUMBER() OVER (... ORDER BY exact-match DESC).
+//
+// This dedup has to happen per source/plan, *before* taking a MIN across
+// all sources: a naive "prefer any exact-connector-match row over the
+// coarse min" at the aggregate level (the previous approach) let a single
+// source's connector-specific tariff suppress every other, unrelated
+// source's cheaper price for the whole station — e.g. a Freshmile
+// CCS-specific tariff at 0.51€/kWh would hide a plain Lidl tariff at
+// 0.29€/kWh entirely, even though Lidl's price has nothing to do with
+// Freshmile's connector granularity. Deduping first means the MIN below
+// is computed over one representative price per source, so it's a true
+// global minimum again.
+//
+// (The connector-specific-vs-generic split arises because Freshmile
+// correlation happens at the site level: a CCS-specific Freshmile tariff
+// meant for one physical connector can end up attached to a *different*
+// IRVE station row at the same location that has, say, a T2 connector —
+// see source_station correlation in ingestion/freshmile.go.)
 const stationListFrom = `
 	FROM stations s
-	LEFT JOIN station_tariffs t ON t.station_id = s.id`
+	LEFT JOIN LATERAL (
+		SELECT t2.*,
+			ROW_NUMBER() OVER (
+				PARTITION BY t2.source, t2.plan, t2.kind
+				ORDER BY (t2.connector_type = s.connector_type AND t2.connector_type <> '') DESC
+			) AS rn
+		FROM station_tariffs t2
+		WHERE t2.station_id = s.id
+	) t ON t.rn = 1`
 
 // stationBestPriceACFragment/stationBestPriceDCFragment mirror
-// stationListSelectPrefix's own ac_min/dc_min COALESCE expressions
-// exactly (kept in sync by hand — see that prefix's comment for why the
-// exact-connector-match preference exists). Factored out here so
-// stationBestPriceFragment (below) doesn't hand-duplicate the whole thing
-// a second time.
+// stationListSelectPrefix's own ac_min/dc_min expressions exactly (kept in
+// sync by hand). Factored out here so stationBestPriceFragment (below)
+// doesn't hand-duplicate the whole thing a second time.
 func stationBestPriceACFragment(exclude bool) string {
 	excl := subscriptionExclusionSQL(exclude)
-	return fmt.Sprintf(`COALESCE(
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed')%[1]s)
-)`, excl)
+	return fmt.Sprintf(`MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed')%[1]s)`, excl)
 }
 
 func stationBestPriceDCFragment(exclude bool) string {
 	excl := subscriptionExclusionSQL(exclude)
-	return fmt.Sprintf(`COALESCE(
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND t.connector_type = s.connector_type AND t.connector_type <> ''%[1]s),
-	MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed')%[1]s)
-)`, excl)
+	return fmt.Sprintf(`MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed')%[1]s)`, excl)
 }
 
 // stationBestPriceFragment picks the same price a client would display for
@@ -193,14 +208,14 @@ func stationBestPriceExprFor(acFragment, dcFragment string) string {
 // haven't selected.
 func stationSelectedPriceFragment(sourcesParamIdx int, exclude bool) string {
 	excl := subscriptionExclusionSQL(exclude)
-	acFragment := fmt.Sprintf(`COALESCE(
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
-	)`, sourcesParamIdx, excl)
-	dcFragment := fmt.Sprintf(`COALESCE(
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
-		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
-	)`, sourcesParamIdx, excl)
+	acFragment := fmt.Sprintf(
+		`MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)`,
+		sourcesParamIdx, excl,
+	)
+	dcFragment := fmt.Sprintf(
+		`MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)`,
+		sourcesParamIdx, excl,
+	)
 	return stationBestPriceExprFor(acFragment, dcFragment)
 }
 
@@ -343,14 +358,8 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	sourcesParamIdx := len(args)
 	subscriptionExcl := subscriptionExclusionSQL(f.ExcludeSubscriptionPlans)
 	query := stationListSelectPrefix(f.ExcludeSubscriptionPlans) + fmt.Sprintf(`,
-		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
-		),
-		COALESCE(
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[]) AND t.connector_type = s.connector_type AND t.connector_type <> ''%[2]s),
-			MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)
-		)`, sourcesParamIdx, subscriptionExcl)
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s),
+		MIN(current_window_price(t.extra, t.energy_price_cents_per_kwh)) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[1]d::text[])%[2]s)`, sourcesParamIdx, subscriptionExcl)
 	query += stationListFrom + `
 		WHERE s.location && ST_MakeEnvelope($1, $2, $3, $4, 4326)`
 

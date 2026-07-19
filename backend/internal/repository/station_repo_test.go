@@ -315,13 +315,15 @@ func TestStationRepository_ListByBBox_ConnectorTypeAndMinPower(t *testing.T) {
 	}
 }
 
-// TestStationRepository_ListByBBox_PrefersExactConnectorMatch pins the
-// COALESCE fallback in stationListSelectPrefix/ListByBBox's sourced
-// aggregate: a station whose own connector_type is T2 must get its price
-// from a T2-specific Freshmile tariff, not the cheaper generic (no
-// connector_type) tariff also present on the same station — otherwise a
-// station's summary price wouldn't reflect the connector it actually has.
-func TestStationRepository_ListByBBox_PrefersExactConnectorMatch(t *testing.T) {
+// TestStationRepository_ListByBBox_PrefersExactConnectorMatch_SameSource
+// pins stationListFrom's LATERAL dedup: when a single source (Freshmile is
+// currently the only one that populates connector_type) has *both* a
+// connector-specific tariff and a generic one for the very same station,
+// source, plan and kind, the connector-specific one must win — even when
+// it's pricier — because it's the accurate price for this station's actual
+// connector, and the generic one is a coarser fallback meant for stations
+// Freshmile didn't have connector-level data for.
+func TestStationRepository_ListByBBox_PrefersExactConnectorMatch_SameSource(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()
 	stationRepo := NewStationRepository(pool)
@@ -335,7 +337,7 @@ func TestStationRepository_ListByBBox_PrefersExactConnectorMatch(t *testing.T) {
 	}
 
 	t2Price := 40.0
-	genericPrice := 10.0 // cheaper, but not connector-specific — must lose to the exact match
+	genericPrice := 10.0 // cheaper, but not connector-specific — must still lose to the exact match from the same source
 	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
 		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
 		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &t2Price,
@@ -344,8 +346,8 @@ func TestStationRepository_ListByBBox_PrefersExactConnectorMatch(t *testing.T) {
 		t.Fatalf("Upsert T2 tariff: %v", err)
 	}
 	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
-		StationID: stationID, Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
-		Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: &genericPrice, Extra: map[string]any{},
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &genericPrice, Extra: map[string]any{},
 	}); err != nil {
 		t.Fatalf("Upsert generic tariff: %v", err)
 	}
@@ -359,7 +361,59 @@ func TestStationRepository_ListByBBox_PrefersExactConnectorMatch(t *testing.T) {
 		t.Fatalf("got %d stations, want 1", len(results))
 	}
 	if got := results[0].PricingSummary.ACMinCentsPerKWh; got == nil || *got != 40.0 {
-		t.Errorf("ACMinCentsPerKWh = %v, want 40.0 (the T2-specific tariff, not the cheaper generic 10.0)", got)
+		t.Errorf("ACMinCentsPerKWh = %v, want 40.0 (Freshmile's own T2-specific tariff, not its cheaper generic 10.0)", got)
+	}
+}
+
+// TestStationRepository_ListByBBox_ConnectorMatchNeverSuppressesOtherSources
+// is the regression test for the "gros bug sur le meilleur tarif" report: a
+// connector-specific tariff from one source (Freshmile) must never hide a
+// cheaper, unrelated tariff from a completely different source (Izivia) —
+// the connector-type exact-match preference only makes sense *within* one
+// source's own tariffs (see the SameSource test above), never across
+// sources. Before stationListFrom's LATERAL dedup, a single global COALESCE
+// let any exact-connector-match row anywhere suppress every other source's
+// price entirely, so this used to return 40.0 (Freshmile) instead of the
+// true cheapest, 10.0 (Izivia).
+func TestStationRepository_ListByBBox_ConnectorMatchNeverSuppressesOtherSources(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRPREFCONN2", 45.90, 6.10)
+	station.ConnectorType = "T2"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	t2Price := 40.0
+	cheaperOtherSource := 10.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &t2Price,
+		ConnectorType: "T2", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert T2 tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "izivia", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindAC,
+		Model: "izivia_text", Currency: "EUR", EnergyPriceCentsPerKWh: &cheaperOtherSource, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert generic tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	if got := results[0].PricingSummary.ACMinCentsPerKWh; got == nil || *got != 10.0 {
+		t.Errorf("ACMinCentsPerKWh = %v, want 10.0 (Izivia's cheaper price, not suppressed by Freshmile's unrelated connector-specific tariff)", got)
 	}
 }
 
@@ -724,5 +778,113 @@ func TestStationRepository_ListByBBox_ExcludeSubscriptionPlans(t *testing.T) {
 			t.Errorf("station %s: SelectedSourcesPricing.DCMinCentsPerKWh = %v, want nil (the only matching tariff is the excluded subscription plan)",
 				r.Station.IRVEIDPDC, *r.SelectedSourcesPricing.DCMinCentsPerKWh)
 		}
+	}
+}
+
+// TestStationRepository_ListByBBox_SelectedSourcesDedupWithinSource covers
+// the interaction between stationListFrom's connector-match dedup and a
+// f.Sources selection: when a user selects one specific source that itself
+// has both a connector-specific and a generic tariff for the same
+// station/plan (Freshmile's case), SelectedSourcesPricing must reflect the
+// connector-specific one — the dedup has to apply consistently whether or
+// not a sources filter is active, since stationSelectedPriceFragment reuses
+// the same deduped `t` rows as the unfiltered aggregate.
+func TestStationRepository_ListByBBox_SelectedSourcesDedupWithinSource(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRSELDEDUP1", 45.90, 6.10)
+	station.ConnectorType = "CCS"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	genericPrice := 32.0
+	specificPrice := 51.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &genericPrice, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert generic tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &specificPrice,
+		ConnectorType: "CCS", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert connector-specific tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{
+		MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0,
+		Sources: []string{"freshmile:standard"},
+	}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	got := results[0].SelectedSourcesPricing
+	if got == nil || got.DCMinCentsPerKWh == nil || *got.DCMinCentsPerKWh != specificPrice {
+		t.Errorf("SelectedSourcesPricing = %+v, want DCMinCentsPerKWh = %v (the connector-specific tariff)", got, specificPrice)
+	}
+}
+
+// TestStationRepository_ListByBBox_DedupRespectsPlanBoundary covers the
+// interaction between stationListFrom's dedup (partitioned by source,
+// plan, kind — so a subscription-plan tariff and a standard-plan tariff
+// from the same source never get grouped together) and
+// ExcludeSubscriptionPlans: a cheap connector-specific *subscription*
+// tariff must not "steal" the dedup slot from a pricier but excludable
+// generic *standard* tariff from the same source — they're different plans
+// and must be deduped (and filtered) independently.
+func TestStationRepository_ListByBBox_DedupRespectsPlanBoundary(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	station := testStation("FRPLANBOUND1", 45.90, 6.10)
+	station.ConnectorType = "CCS"
+	stationID, err := stationRepo.UpsertStation(ctx, station)
+	if err != nil {
+		t.Fatalf("UpsertStation: %v", err)
+	}
+
+	cheapSubscriptionSpecific := 15.0
+	standardGeneric := 40.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanSubscription, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &cheapSubscriptionSpecific,
+		ConnectorType: "CCS", Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert subscription tariff: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: stationID, Source: "freshmile", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "freshmile_kwh", Currency: "EUR", EnergyPriceCentsPerKWh: &standardGeneric, Extra: map[string]any{},
+	}); err != nil {
+		t.Fatalf("Upsert standard tariff: %v", err)
+	}
+
+	bbox := domain.StationFilter{
+		MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0,
+		ExcludeSubscriptionPlans: true,
+	}
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d stations, want 1", len(results))
+	}
+	got := results[0].PricingSummary.DCMinCentsPerKWh
+	if got == nil || *got != standardGeneric {
+		t.Errorf("DCMinCentsPerKWh = %v, want %v (the standard plan's price, subscription plan excluded — not the cheaper subscription price)", got, standardGeneric)
 	}
 }
