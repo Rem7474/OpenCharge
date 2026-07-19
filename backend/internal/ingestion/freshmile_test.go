@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -441,6 +442,44 @@ func TestNormalizeFreshmileTariffsCombinedKWhAndPerMinute(t *testing.T) {
 	}
 }
 
+// TestNormalizeFreshmileTariffsKWhEntameAndSubCentPerMinute pins another
+// real production description shape: single-line (spaces, no newlines),
+// "kWh entamé" sitting between the energy price and the "et ..." per-minute
+// clause, and a sub-cent per-minute amount with three decimals (0,025 € →
+// 2.5 cents/min, which must survive the euro→cents conversion untruncated).
+func TestNormalizeFreshmileTariffsKWhEntameAndSubCentPerMinute(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"description": "Le prix dépend de l'énergie délivrée et du temps de branchement 0,20 € par kWh entamé et 0,025 € par minute La tarification continue tant que le véhicule est branché",
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	got := tariffs[0]
+	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 20.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 20.0", got.EnergyPriceCentsPerKWh)
+	}
+	if got.SessionPriceCentsPerMin == nil || *got.SessionPriceCentsPerMin != 2.5 {
+		t.Errorf("SessionPriceCentsPerMin = %v, want 2.5", got.SessionPriceCentsPerMin)
+	}
+	if got.Model != "freshmile_kwh_and_per_minute" {
+		t.Errorf("Model = %q, want freshmile_kwh_and_per_minute", got.Model)
+	}
+}
+
 func TestNormalizeFreshmileTariffsNoEvses(t *testing.T) {
 	if got := normalizeFreshmileTariffs(map[string]any{}); got != nil {
 		t.Errorf("normalizeFreshmileTariffs({}) = %v, want nil", got)
@@ -715,5 +754,35 @@ func TestNormalizeFreshmileRealPayloadEmptyEvses(t *testing.T) {
 
 	if tariffs := normalizeFreshmileTariffs(details); len(tariffs) != 0 {
 		t.Errorf("got %d tariffs, want 0 (no evses)", len(tariffs))
+	}
+}
+
+// TestFreshmileRunSurfacesContextErrorInsteadOfSweeping pins the fix for a
+// production failure: a run cut short by the CLI's -timeout still ended
+// with a nil pipeline error (writes are decoupled from ctx, so the last
+// batches commit fine), making the truncated run look fully successful —
+// Run() then attempted the stale-data sweep with an already-expired ctx
+// ("sweep stale source_stations for freshmile: context deadline exceeded"),
+// and only that query's own failure kept it from wiping every location the
+// run never got to visit. Run must report the ctx error itself and never
+// reach the sweep (the nil Pool here would panic if it did).
+func TestFreshmileRunSurfacesContextErrorInsteadOfSweeping(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"features": []}`)
+	}))
+	defer srv.Close()
+
+	ing := NewFreshmileIngester(nil, nil, nil, nil, srv.URL, FreshmileConfig{Workers: 2})
+	ing.retryBackoff = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	processed, err := ing.Run(ctx)
+	if processed != 0 {
+		t.Errorf("processed = %d, want 0", processed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run() error = %v, want context.Canceled", err)
 	}
 }

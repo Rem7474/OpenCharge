@@ -280,6 +280,13 @@ func (ing *TeslaIngester) processSlugs(ctx, allocCtx context.Context, slugs []st
 	if firstErr == nil {
 		firstErr = result.err
 	}
+	// Same guard as freshmile's runPipeline: a ctx expiring after the last
+	// write but before the caller's sweep decision must surface as an
+	// error, so a truncated run is never mistaken for a fully successful
+	// one (which would sweep stations the run never got to visit).
+	if firstErr == nil {
+		firstErr = ctx.Err()
+	}
 	return result.processed, firstErr
 }
 

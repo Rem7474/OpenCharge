@@ -377,6 +377,13 @@ func (ing *ChargenowIngester) processPools(ctx context.Context, pools []chargeno
 		}
 		log.Printf("chargenow: %d/%d processed", processed, len(normalized))
 	}
+	// Same guard as freshmile's runPipeline: price batches that failed on
+	// a mid-run ctx expiry are only logged and skipped above, so without
+	// surfacing ctx.Err() a truncated run could look fully successful to
+	// Run(), which would then sweep stations this run never re-priced.
+	if err := ctx.Err(); err != nil {
+		return processed, err
+	}
 	return processed, nil
 }
 

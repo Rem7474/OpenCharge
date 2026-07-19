@@ -357,6 +357,17 @@ func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx con
 	scanWG.Wait()
 	workerWG.Wait()
 
+	// A run cut short by ctx (the CLI's -timeout, a SIGINT) can still end
+	// with a nil write error: flushes are deliberately decoupled from ctx
+	// (see writeResults), so the last collected batch commits fine and the
+	// pipeline just drains early. Without surfacing ctx.Err() here, such a
+	// truncated run looked fully successful to Run(), which then attempted
+	// the stale-data sweep with an already-expired ctx — the sweep query's
+	// own "context deadline exceeded" failure was the only thing that
+	// stopped it from wiping every location the run never got to visit.
+	if err == nil {
+		err = ctx.Err()
+	}
 	return processed, err
 }
 
