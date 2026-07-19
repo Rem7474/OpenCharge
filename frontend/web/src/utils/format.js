@@ -40,6 +40,20 @@ export function formatConnectorLabel(connectorType) {
  * last change?". Returns "" for a missing or unparseable date so callers can
  * skip the line entirely rather than render "Invalid Date".
  */
+/**
+ * Turns a fetch error (see api/stations.js#throwForStatus, which attaches
+ * `.status` to the thrown Error) into a short, French, user-facing message
+ * — never the raw `err.message` (an English "GET /stations failed: 500"
+ * string), which used to be shown to users directly.
+ */
+export function friendlyFetchErrorMessage(err) {
+  if (!err) return "Une erreur inconnue est survenue.";
+  if (err.status == null) return "Impossible de contacter le serveur. Vérifiez votre connexion.";
+  if (err.status === 404) return "Cette borne n'existe pas ou plus.";
+  if (err.status >= 500) return "Le serveur rencontre un problème. Réessayez dans quelques instants.";
+  return "La demande n'a pas pu aboutir. Réessayez.";
+}
+
 export function formatUpdatedAt(isoDate) {
   if (!isoDate) return "";
   const date = new Date(isoDate);

@@ -23,7 +23,7 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 	return &StationsHandler{Stations: stations, Tariffs: tariffs}
 }
 
-// ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&connectorType=&minPowerKw=&minPriceCentsPerKwh=&maxPriceCentsPerKwh=&limit=&offset=
+// ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&connectorType=&minPowerKw=&minPriceCentsPerKwh=&maxPriceCentsPerKwh=&excludeSubscriptionPlans=&limit=&offset=
 // It never loads the whole dataset: bbox is mandatory, and the map/frontend
 // is expected to re-query on every viewport change.
 //
@@ -33,6 +33,11 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 // response: it only controls which (source, plan) pairs
 // selectedSourcesPricing is computed from, so the map can gray out
 // stations lacking a tariff from the selection instead of hiding them.
+//
+// excludeSubscriptionPlans=true drops any tariff on the
+// domain.TariffPlanSubscription plan from both pricingSummary and
+// selectedSourcesPricing, so the price shown for a station never assumes a
+// paid subscription the caller may not have.
 func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -86,6 +91,11 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("maxPriceCentsPerKwh"); v != "" {
 		if p, err := strconv.ParseFloat(v, 64); err == nil {
 			filter.MaxPriceCentsPerKWh = &p
+		}
+	}
+	if v := q.Get("excludeSubscriptionPlans"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			filter.ExcludeSubscriptionPlans = b
 		}
 	}
 	if v := q.Get("limit"); v != "" {

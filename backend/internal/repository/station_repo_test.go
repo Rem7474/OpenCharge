@@ -629,3 +629,100 @@ func TestStationRepository_ListByBBox_SelectedSourcesPricing(t *testing.T) {
 		}
 	}
 }
+
+func TestStationRepository_ListByBBox_ExcludeSubscriptionPlans(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	// A station whose only known price is a subscription-plan tariff, and
+	// one with both a standard and a (pricier) subscription tariff, so
+	// excluding subscription plans changes the global best price for the
+	// second station rather than just removing it entirely.
+	subscriptionOnly := testStation("FREXCL001", 45.90, 6.10)
+	both := testStation("FREXCL002", 45.91, 6.11)
+
+	idSubOnly, err := stationRepo.UpsertStation(ctx, subscriptionOnly)
+	if err != nil {
+		t.Fatalf("UpsertStation subscriptionOnly: %v", err)
+	}
+	idBoth, err := stationRepo.UpsertStation(ctx, both)
+	if err != nil {
+		t.Fatalf("UpsertStation both: %v", err)
+	}
+
+	subOnlyPrice := 30.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: idSubOnly, Source: "electra", Plan: domain.TariffPlanSubscription, Kind: domain.TariffKindDC,
+		Model: "electra_fixed", Currency: "EUR", EnergyPriceCentsPerKWh: &subOnlyPrice,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert subscriptionOnly: %v", err)
+	}
+
+	standardPrice := 40.0
+	subscriptionPrice := 25.0 // cheaper, so it would otherwise win the global MIN()
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: idBoth, Source: "electra", Plan: domain.TariffPlanStandard, Kind: domain.TariffKindDC,
+		Model: "electra_fixed", Currency: "EUR", EnergyPriceCentsPerKWh: &standardPrice,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert both/standard: %v", err)
+	}
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: idBoth, Source: "electra", Plan: domain.TariffPlanSubscription, Kind: domain.TariffKindDC,
+		Model: "electra_fixed", Currency: "EUR", EnergyPriceCentsPerKWh: &subscriptionPrice,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert both/subscription: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+
+	// Without the filter: the subscription-only station has a price, and the
+	// "both" station's price is the cheaper subscription rate.
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox (no exclusion): %v", err)
+	}
+	byID := map[string]domain.StationSummary{}
+	for _, r := range results {
+		byID[r.Station.IRVEIDPDC] = r
+	}
+	if p := byID["FREXCL001"].PricingSummary.DCMinCentsPerKWh; p == nil || *p != subOnlyPrice {
+		t.Errorf("FREXCL001 DCMinCentsPerKWh = %v, want %v", p, subOnlyPrice)
+	}
+	if p := byID["FREXCL002"].PricingSummary.DCMinCentsPerKWh; p == nil || *p != subscriptionPrice {
+		t.Errorf("FREXCL002 DCMinCentsPerKWh = %v, want %v (cheapest overall, including subscription)", p, subscriptionPrice)
+	}
+
+	// With ExcludeSubscriptionPlans: the subscription-only station has no
+	// price at all, and the "both" station falls back to its standard price.
+	bbox.ExcludeSubscriptionPlans = true
+	results, err = stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox (exclude subscription): %v", err)
+	}
+	byID = map[string]domain.StationSummary{}
+	for _, r := range results {
+		byID[r.Station.IRVEIDPDC] = r
+	}
+	if p := byID["FREXCL001"].PricingSummary.DCMinCentsPerKWh; p != nil {
+		t.Errorf("FREXCL001 DCMinCentsPerKWh = %v, want nil (only tariff is subscription-plan)", *p)
+	}
+	if p := byID["FREXCL002"].PricingSummary.DCMinCentsPerKWh; p == nil || *p != standardPrice {
+		t.Errorf("FREXCL002 DCMinCentsPerKWh = %v, want %v (falls back to the standard plan)", p, standardPrice)
+	}
+
+	// Same exclusion must also apply to SelectedSourcesPricing when a
+	// sources selection is active.
+	bbox.Sources = []string{"electra:subscription"}
+	results, err = stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox (exclude subscription + sources=electra:subscription): %v", err)
+	}
+	for _, r := range results {
+		if r.SelectedSourcesPricing != nil && r.SelectedSourcesPricing.DCMinCentsPerKWh != nil {
+			t.Errorf("station %s: SelectedSourcesPricing.DCMinCentsPerKWh = %v, want nil (the only matching tariff is the excluded subscription plan)",
+				r.Station.IRVEIDPDC, *r.SelectedSourcesPricing.DCMinCentsPerKWh)
+		}
+	}
+}

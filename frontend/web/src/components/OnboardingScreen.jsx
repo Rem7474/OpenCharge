@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { fetchSources } from "../api/stations.js";
+import { useState } from "react";
 import { formatSourceLabel, formatPlanLabel } from "../utils/format.js";
+import { useOperatorSources } from "../hooks/useOperatorSources.js";
 
 /**
  * Full-page operator/plan picker — the same selection this app already
@@ -11,25 +11,8 @@ import { formatSourceLabel, formatPlanLabel } from "../utils/format.js";
  * reset it to empty.
  */
 export default function OnboardingScreen({ initialSources, onComplete, onSkip }) {
-  const [allSources, setAllSources] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const { sources: allSources, loading, error } = useOperatorSources();
   const [selected, setSelected] = useState(initialSources ?? {});
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setError(null);
-    fetchSources({ signal: controller.signal })
-      .then((sources) => setAllSources(sources ?? []))
-      .catch((err) => {
-        if (err.name !== "AbortError") {
-          console.error(err);
-          setError(err.message);
-        }
-      })
-      .finally(() => setLoading(false));
-    return () => controller.abort();
-  }, []);
 
   const toggleSource = (source) => {
     setSelected((prev) => {
@@ -56,10 +39,10 @@ export default function OnboardingScreen({ initialSources, onComplete, onSkip })
         <p>Sélectionnez vos opérateurs de recharge et abonnements pour comparer les tarifs en temps réel sur la carte.</p>
       </div>
 
-      <div className="onboarding-list">
+      <div className="onboarding-list" aria-live="polite">
         {loading && <p className="onboarding-empty">Chargement des réseaux…</p>}
         {!loading && error && (
-          <p className="onboarding-empty">
+          <p className="onboarding-empty" role="alert">
             Impossible de contacter le serveur ({error}). Vérifiez votre connexion, puis réessayez.
           </p>
         )}

@@ -99,6 +99,14 @@ export function currentEnergyPriceCentsPerKWh(tariff) {
 export const PRICE_MODE_PER_KWH = "per_kwh";
 export const PRICE_MODE_RECHARGE = "recharge";
 
+// Mirrors backend/internal/domain/tariff.go's TariffPlanSubscription — the
+// plan id used for subscriber-only price tiers (Electra, Fastned, eborn).
+// Used client-side to filter StationDetails' own tariff list the same way
+// the "Exclure les tarifs abonnés" filter already makes the API filter
+// pricingSummary/selectedSourcesPricing server-side (see
+// api/stations.js#fetchStationsInBBox's excludeSubscriptionPlans param).
+export const SUBSCRIPTION_PLAN = "subscription";
+
 /**
  * Format a €/kWh price (in cents) according to the active display mode.
  * In "recharge" mode, returns the total price for chargeKWh kWh of energy

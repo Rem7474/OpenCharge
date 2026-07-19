@@ -14,6 +14,7 @@ export default function FilterBar(props) {
     minPriceCentsPerKwh,
     maxPriceCentsPerKwh,
     showAllStations,
+    excludeSubscriptionPlans,
     onReopenOnboarding,
   } = props;
   const [open, setOpen] = useState(false);
@@ -24,7 +25,8 @@ export default function FilterBar(props) {
     (minPowerKw != null ? 1 : 0) +
     (minPriceCentsPerKwh != null ? 1 : 0) +
     (maxPriceCentsPerKwh != null ? 1 : 0) +
-    (showAllStations ? 1 : 0);
+    (showAllStations ? 1 : 0) +
+    (excludeSubscriptionPlans ? 1 : 0);
 
   return (
     <div className="filter-bar">

@@ -15,6 +15,26 @@
   --viz-ink-secondary: #52514e;
   --viz-ink-muted: #898781;
   --viz-baseline: #c3c2b7;
+
+  /* Shared spacing/radius/layering scale — see docs/audit-ux-2026-07.md
+     §1.4: these used to be repeated magic numbers all over this file. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+  /* Stack order: banners/badges float over the map, panels dock above
+     that, and a modal-style overlay (OperatorFilter) sits on top of
+     everything else. */
+  --z-banner: 1000;
+  --z-panel: 1150;
+  --z-overlay: 1300;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -87,6 +107,13 @@ a {
   color: var(--color-muted);
 }
 
+.map-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .app-body {
   flex: 1;
   display: flex;
@@ -104,6 +131,50 @@ a {
   width: 100%;
 }
 
+.geolocate-btn {
+  position: absolute;
+  bottom: 24px;
+  right: 12px;
+  z-index: var(--z-banner);
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.geolocate-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.geolocate-spinner {
+  animation: geolocate-spin 1s linear infinite;
+}
+
+@keyframes geolocate-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.geolocate-error {
+  position: absolute;
+  bottom: 76px;
+  left: auto;
+  right: 12px;
+  top: auto;
+  transform: none;
+  max-width: min(280px, calc(100vw - 24px));
+  white-space: normal;
+}
+
 /* Floats over the map (top-right — mirrors .filter-panel's left dock),
    sized to its own content instead of stretching to the map's full
    height: it used to be a flex sibling of .map-container inside
@@ -114,13 +185,13 @@ a {
   position: fixed;
   top: 68px;
   right: 12px;
-  z-index: 1150;
+  z-index: var(--z-panel);
   width: 380px;
   max-width: calc(100vw - 24px);
   max-height: calc(100vh - 80px);
   overflow-y: auto;
   border: 1px solid var(--color-border);
-  border-radius: 18px;
+  border-radius: var(--radius-xl);
   padding: 16px 18px;
   background: var(--color-bg);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
@@ -131,19 +202,37 @@ a {
   top: 10px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 1000;
+  z-index: var(--z-banner);
   background: rgba(20, 20, 20, 0.85);
   color: #fff;
   padding: 4px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+.status-banner--error {
+  background: var(--color-accent-high);
+}
+
+.status-banner-retry {
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: #fff;
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
 }
 
 .close-btn {
   float: right;
   cursor: pointer;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: none;
   color: var(--color-text);
   width: 30px;
@@ -190,7 +279,7 @@ a {
 
 .onboarding-reopen-btn {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   width: 30px;
   height: 30px;
   background: none;
@@ -214,7 +303,7 @@ a {
 
 .operator-filter-toggle {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 4px 12px;
   font-size: 13px;
   cursor: pointer;
@@ -233,7 +322,7 @@ a {
 .operator-panel-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1300;
+  z-index: var(--z-overlay);
   background: rgba(0, 0, 0, 0.25);
   display: flex;
   align-items: center;
@@ -249,7 +338,7 @@ a {
   flex-direction: column;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 18px;
+  border-radius: var(--radius-xl);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
   overflow: hidden;
 }
@@ -280,7 +369,7 @@ a {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   margin-bottom: 10px;
 }
@@ -302,7 +391,7 @@ a {
   font-size: 13px;
   cursor: pointer;
   padding: 4px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .operator-filter-list label:hover {
@@ -319,7 +408,7 @@ a {
 
 .filter-toggle-btn {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 6px 16px;
   font-size: 13px;
   font-weight: 600;
@@ -341,7 +430,7 @@ a {
   position: fixed;
   top: 68px;
   left: 12px;
-  z-index: 1150;
+  z-index: var(--z-panel);
   width: 340px;
   max-width: calc(100vw - 24px);
   max-height: calc(100vh - 80px);
@@ -349,7 +438,7 @@ a {
   flex-direction: column;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 18px;
+  border-radius: var(--radius-xl);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
   overflow: hidden;
 }
@@ -397,7 +486,7 @@ a {
 
 .filter-section {
   background: rgba(128, 128, 128, 0.06);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 12px 14px;
 }
 
@@ -414,7 +503,7 @@ a {
   justify-content: center;
   gap: 6px;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 8px;
   font-size: 13px;
   font-weight: 600;
@@ -475,7 +564,7 @@ a {
   min-width: 0;
   padding: 6px 8px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   background: var(--color-bg);
   color: var(--color-text);
@@ -516,7 +605,7 @@ a {
 
 .connector-pill {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 6px 12px;
   font-size: 12.5px;
   cursor: pointer;
@@ -533,7 +622,7 @@ a {
 .price-mode-toggle {
   display: flex;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
@@ -556,7 +645,7 @@ a {
   width: 64px;
   padding: 3px 6px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
 }
 
@@ -566,7 +655,7 @@ a {
   background: var(--color-bg);
   color: var(--color-text);
   border: 2px solid var(--color-accent);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 3px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -629,7 +718,7 @@ a {
 
 .station-meta-card {
   background: rgba(128, 128, 128, 0.06);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 12px 14px;
   margin-bottom: 16px;
   display: flex;
@@ -662,7 +751,7 @@ a {
   align-items: center;
   gap: 4px;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -678,7 +767,7 @@ a {
 
 .station-price-block {
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 12px 14px;
   margin-bottom: 10px;
 }
@@ -710,7 +799,7 @@ a {
 
 .tariff-row {
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 12px 14px;
   margin-bottom: 10px;
 }
@@ -754,7 +843,7 @@ a {
 
 .plan-selector button {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 2px 8px;
   font-size: 11px;
   cursor: pointer;
@@ -855,7 +944,7 @@ a {
 
 .onboarding-item {
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   padding: 4px 14px;
 }
 
@@ -896,7 +985,7 @@ a {
 
 .onboarding-continue {
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 12px 20px;
   background: var(--color-accent);
   color: #fff;
@@ -948,7 +1037,7 @@ a {
     max-width: 100%;
     max-height: 60vh;
     margin: 0;
-    border-radius: 18px;
+    border-radius: var(--radius-xl);
     padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }

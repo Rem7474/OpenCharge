@@ -3,6 +3,7 @@ import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { fetchStationsInBBox } from "../api/stations.js";
 import { pickPriceCentsPerKWh, formatPrice, priceTier, sourcePlanPairs } from "../utils/pricing.js";
+import { friendlyFetchErrorMessage } from "../utils/format.js";
 
 const MIN_ZOOM_TO_LOAD = 10;
 
@@ -29,20 +30,27 @@ export default function StationMarkers({
   minPowerKw,
   minPriceCentsPerKwh,
   maxPriceCentsPerKwh,
+  excludeSubscriptionPlans,
 }) {
   const [stations, setStations] = useState([]);
   const [loading, setLoading] = useState(false);
+  // null = no error; otherwise the Error thrown by fetchStationsInBBox, so
+  // the banner can distinguish a real failure (with a retry) from either a
+  // load in progress or a load that succeeded with zero results.
+  const [error, setError] = useState(null);
   const abortRef = useRef(null);
 
   const load = (map) => {
     if (map.getZoom() < MIN_ZOOM_TO_LOAD) {
       setStations([]);
+      setError(null);
       return;
     }
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
+    setError(null);
     fetchStationsInBBox(boundsToBBox(map.getBounds()), {
       sources: sourcePlanPairs(selectedSources),
       // Only ever sends hasTariffs=true or omits it — the backend only
@@ -53,11 +61,15 @@ export default function StationMarkers({
       minPowerKw,
       minPriceCentsPerKwh,
       maxPriceCentsPerKwh,
+      excludeSubscriptionPlans,
       signal: controller.signal,
     })
       .then((data) => setStations(data ?? []))
       .catch((err) => {
-        if (err.name !== "AbortError") console.error(err);
+        if (err.name !== "AbortError") {
+          console.error(err);
+          setError(err);
+        }
       })
       .finally(() => setLoading(false));
   };
@@ -72,14 +84,26 @@ export default function StationMarkers({
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw, minPriceCentsPerKwh, maxPriceCentsPerKwh]);
+  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw, minPriceCentsPerKwh, maxPriceCentsPerKwh, excludeSubscriptionPlans]);
 
   const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
+  const isEmpty = !loading && !error && !belowMinZoom && stations.length === 0;
 
   return (
     <>
-      {loading && <div className="status-banner">Chargement des bornes…</div>}
-      {belowMinZoom && <div className="status-banner">Zoomez pour afficher les bornes</div>}
+      <div aria-live="polite">
+        {loading && <div className="status-banner">Chargement des bornes…</div>}
+        {belowMinZoom && <div className="status-banner">Zoomez pour afficher les bornes</div>}
+        {error && (
+          <div className="status-banner status-banner--error" role="alert">
+            {friendlyFetchErrorMessage(error)}{" "}
+            <button type="button" className="status-banner-retry" onClick={() => load(map)}>
+              Réessayer
+            </button>
+          </div>
+        )}
+        {isEmpty && <div className="status-banner">Aucune borne ne correspond à vos filtres dans cette zone.</div>}
+      </div>
       {stations.map((station) => {
         const connectorType = station.connectors?.[0]?.kind;
         const hasSelection = Object.keys(selectedSources).length > 0;

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import { Radio, X } from "lucide-react";
-import { fetchSources } from "../api/stations.js";
 import { formatSourceLabel, formatPlanLabel } from "../utils/format.js";
+import { useOperatorSources } from "../hooks/useOperatorSources.js";
+import { useDialogA11y } from "../hooks/useDialogA11y.js";
 
 /**
  * Multi-select, searchable list of tariff sources ("operators" in the UI).
@@ -14,45 +15,21 @@ import { formatSourceLabel, formatPlanLabel } from "../utils/format.js";
  * treatment FilterPanel itself used before it got docked to a corner) —
  * a full network picker warrants more room and more attention than a
  * small anchored dropdown, especially once there are many sources to
- * search through.
+ * search through. Behaves like a real modal dialog (role="dialog",
+ * Escape to close, focus trapped inside, focus returned to the toggle
+ * button on close) via useDialogA11y.
  */
 export default function OperatorFilter({ selectedSources, onToggleSource, onSelectPlan }) {
-  const [allSources, setAllSources] = useState([]);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchSources({ signal: controller.signal })
-      .then((sources) => setAllSources(sources ?? []))
-      .catch((err) => {
-        if (err.name !== "AbortError") {
-          console.error(err);
-          setError(err.message);
-        }
-      });
-    return () => controller.abort();
-  }, []);
-
-  // Re-fetch every time the picker opens: an ingestion run can add a new
-  // source (or a new plan on an existing one) at any point during a long
-  // browsing session, and the initial mount-time fetch above would
-  // otherwise never reflect that until a full page reload.
-  useEffect(() => {
-    if (!open) return;
-    const controller = new AbortController();
-    setError(null);
-    fetchSources({ signal: controller.signal })
-      .then((sources) => setAllSources(sources ?? []))
-      .catch((err) => {
-        if (err.name !== "AbortError") {
-          console.error(err);
-          setError(err.message);
-        }
-      });
-    return () => controller.abort();
-  }, [open]);
+  const panelRef = useRef(null);
+  const searchRef = useRef(null);
+  const close = () => setOpen(false);
+  // Re-fetches every time the picker opens (refetchKey=open): an ingestion
+  // run can add a new source (or plan) mid-session, and a mount-time-only
+  // fetch would never reflect that until a full page reload.
+  const { sources: allSources, error } = useOperatorSources(open);
+  useDialogA11y(panelRef, open, close, searchRef);
 
   const filtered = allSources.filter((s) => s.id.toLowerCase().includes(query.trim().toLowerCase()));
   const selectedIds = Object.keys(selectedSources);
@@ -61,38 +38,38 @@ export default function OperatorFilter({ selectedSources, onToggleSource, onSele
 
   return (
     <div className="operator-filter">
-      <button
-        type="button"
-        className="operator-filter-toggle"
-        onClick={() => setOpen(true)}
-        aria-expanded={open}
-      >
+      <button type="button" className="operator-filter-toggle" onClick={() => setOpen(true)} aria-expanded={open}>
         {summary} ▾
       </button>
       {open && (
-        <div className="operator-panel-overlay" onClick={() => setOpen(false)}>
-          <div className="operator-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="operator-panel-overlay" onClick={close}>
+          <div
+            className="operator-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Réseaux"
+            ref={panelRef}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="operator-panel-header">
               <h3>
                 <Radio size={18} strokeWidth={2.2} /> Réseaux
               </h3>
-              <button type="button" className="close-btn" onClick={() => setOpen(false)} aria-label="Fermer">
+              <button type="button" className="close-btn" onClick={close} aria-label="Fermer">
                 <X size={15} strokeWidth={2.2} />
               </button>
             </div>
             <div className="operator-panel-body">
               <input
+                ref={searchRef}
                 type="search"
                 className="operator-filter-search"
                 placeholder="Rechercher un réseau…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                autoFocus
               />
               <ul className="operator-filter-list">
-                {error && (
-                  <li className="operator-filter-empty">Impossible de contacter le serveur ({error}).</li>
-                )}
+                {error && <li className="operator-filter-empty">Impossible de contacter le serveur ({error}).</li>}
                 {!error && filtered.length === 0 && <li className="operator-filter-empty">Aucun réseau trouvé</li>}
                 {filtered.map((source) => {
                   const checked = source.id in selectedSources;

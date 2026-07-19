@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star } from "lucide-react";
 import { fetchStationDetails } from "../api/stations.js";
 import {
@@ -8,8 +8,9 @@ import {
   hasHourlyPricing,
   tariffCostBreakdown,
   PRICE_MODE_RECHARGE,
+  SUBSCRIPTION_PLAN,
 } from "../utils/pricing.js";
-import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt } from "../utils/format.js";
+import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 
 // Pick, among a (source, plan)'s tariffs, the one matching the station's
@@ -69,6 +70,20 @@ function TariffCost({ tariff, priceMode, chargeKWh, chargeMinutes }) {
   );
 }
 
+// Single place that decides how to render a tariff's price: an hourly chart
+// for tariffs whose price varies across the day, a cost breakdown/headline
+// rate otherwise. Used everywhere a tariff's price is shown (the per-source
+// blocks, the "best overall" block, and each row of "Tous les tarifs")
+// instead of repeating the same hasHourlyPricing(...) ? <A/> : <B/> check
+// three times.
+function TariffDisplay({ tariff, priceMode, chargeKWh, chargeMinutes }) {
+  return hasHourlyPricing(tariff) ? (
+    <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
+  ) : (
+    <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
+  );
+}
+
 function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
   const updatedAt = formatUpdatedAt(tariff.updated_at);
   return (
@@ -76,11 +91,7 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
       <div className="source">
         {tariff.source} · {formatPlanLabel(tariff.plan)} · {tariff.kind}
       </div>
-      {hasHourlyPricing(tariff) ? (
-        <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
-      ) : (
-        <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-      )}
+      <TariffDisplay tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
       {tariff.service_fee_percent != null && <div>Frais de service : {tariff.service_fee_percent}%</div>}
       {priceMode !== PRICE_MODE_RECHARGE && tariff.session_price_cents_per_min != null && (
         <div>{(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min</div>
@@ -94,7 +105,15 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
   );
 }
 
-export default function StationDetails({ stationId, onClose, selectedSources, priceMode, chargeKWh, chargeMinutes }) {
+export default function StationDetails({
+  stationId,
+  onClose,
+  selectedSources,
+  priceMode,
+  chargeKWh,
+  chargeMinutes,
+  excludeSubscriptionPlans,
+}) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
 
@@ -106,36 +125,58 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
     fetchStationDetails(stationId, { signal: controller.signal })
       .then(setData)
       .catch((err) => {
-        if (err.name !== "AbortError") setError(err.message);
+        if (err.name !== "AbortError") setError(err);
       });
     return () => controller.abort();
   }, [stationId]);
 
-  if (!stationId) return null;
+  // GET /stations/{id} always returns every known tariff, including
+  // subscription-plan ones — the "Exclure les tarifs abonnés" filter is
+  // applied client-side here so the detail panel matches what the map
+  // marker already shows (the marker's price comes from the API's own
+  // excludeSubscriptionPlans param — see api/stations.js).
+  const tariffs = useMemo(() => {
+    const all = data?.tariffs ?? [];
+    return excludeSubscriptionPlans ? all.filter((t) => t.plan !== SUBSCRIPTION_PLAN) : all;
+  }, [data, excludeSubscriptionPlans]);
 
   const connectorKind = data ? connectorPriceKind(data.station.connectors?.[0]?.kind) : null;
   const selectedEntries = Object.entries(selectedSources);
-  const selectedTariffs = data
-    ? selectedEntries
-        .map(([source, plan]) => ({ source, plan, tariff: bestTariffForSource(data.tariffs, source, plan, connectorKind) }))
-        .filter((entry) => entry.tariff != null)
-    : [];
-  const cheapestSelected =
-    selectedTariffs.length > 0
-      ? selectedTariffs.reduce((min, e) =>
-          currentEnergyPriceCentsPerKWh(e.tariff) < currentEnergyPriceCentsPerKWh(min.tariff) ? e : min
-        )
-      : null;
-  const overallBest = data ? cheapestTariff(data.tariffs, connectorKind) : null;
+  const selectedTariffs = useMemo(
+    () =>
+      selectedEntries
+        .map(([source, plan]) => ({ source, plan, tariff: bestTariffForSource(tariffs, source, plan, connectorKind) }))
+        .filter((entry) => entry.tariff != null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tariffs, connectorKind, selectedSources]
+  );
+  const cheapestSelected = useMemo(
+    () =>
+      selectedTariffs.length > 0
+        ? selectedTariffs.reduce((min, e) =>
+            currentEnergyPriceCentsPerKWh(e.tariff) < currentEnergyPriceCentsPerKWh(min.tariff) ? e : min
+          )
+        : null,
+    [selectedTariffs]
+  );
+  const overallBest = useMemo(() => (data ? cheapestTariff(tariffs, connectorKind) : null), [data, tariffs, connectorKind]);
   const overallBeatsSelection =
     overallBest &&
     (!cheapestSelected ||
       currentEnergyPriceCentsPerKWh(overallBest) < currentEnergyPriceCentsPerKWh(cheapestSelected.tariff));
 
+  if (!stationId) return null;
+
   return (
     <div className="sidebar">
-      {error && <p>Erreur : {error}</p>}
-      {!data && !error && <p>Chargement…</p>}
+      <div aria-live="polite">
+        {error && (
+          <p role="alert">
+            {friendlyFetchErrorMessage(error)}
+          </p>
+        )}
+        {!data && !error && <p>Chargement…</p>}
+      </div>
       {data && (
         <>
           <div className="station-header">
@@ -212,11 +253,7 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
               <div className="source-name">
                 {formatSourceLabel(source)} · {formatPlanLabel(plan)}
               </div>
-              {hasHourlyPricing(tariff) ? (
-                <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
-              ) : (
-                <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-              )}
+              <TariffDisplay tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
             </div>
           ))}
           {overallBest && overallBeatsSelection && (
@@ -225,18 +262,14 @@ export default function StationDetails({ stationId, onClose, selectedSources, pr
                 <Star size={12} strokeWidth={2.4} /> Meilleur prix toutes sources · {formatSourceLabel(overallBest.source)}{" "}
                 · {formatPlanLabel(overallBest.plan)}
               </div>
-              {hasHourlyPricing(overallBest) ? (
-                <HourlyPriceChart tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} />
-              ) : (
-                <TariffCost tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-              )}
+              <TariffDisplay tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
             </div>
           )}
           {!overallBest && selectedEntries.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
 
           <h3 className="section-heading">Tous les tarifs</h3>
-          {data.tariffs.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
-          {data.tariffs.map((t, i) => (
+          {tariffs.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
+          {tariffs.map((t, i) => (
             <TariffRow tariff={t} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} key={i} />
           ))}
         </>

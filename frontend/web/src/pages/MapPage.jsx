@@ -4,6 +4,7 @@ import FilterBar from "../components/FilterBar.jsx";
 import StationMarkers from "../components/StationMarkers.jsx";
 import StationDetails from "../components/StationDetails.jsx";
 import OnboardingScreen from "../components/OnboardingScreen.jsx";
+import GeolocateControl from "../components/GeolocateControl.jsx";
 import { PRICE_MODE_PER_KWH } from "../utils/pricing.js";
 import { readStoredFilters, writeStoredFilters } from "../utils/storage.js";
 
@@ -34,6 +35,11 @@ const DEFAULT_FILTERS = {
   // every one by default would bury the priced ones a user is here to
   // compare.
   showAllStations: false,
+  // When true, subscription-plan tariffs (Electra/Fastned/eborn's
+  // "subscription" plan) are excluded from the price shown on markers
+  // (server-side, via the API's excludeSubscriptionPlans param) and from
+  // the station detail panel (client-side — see StationDetails.jsx).
+  excludeSubscriptionPlans: false,
 };
 
 export default function MapPage() {
@@ -64,6 +70,8 @@ export default function MapPage() {
   const setMinPriceCentsPerKwh = (minPriceCentsPerKwh) => setFilters((prev) => ({ ...prev, minPriceCentsPerKwh }));
   const setMaxPriceCentsPerKwh = (maxPriceCentsPerKwh) => setFilters((prev) => ({ ...prev, maxPriceCentsPerKwh }));
   const setShowAllStations = (showAllStations) => setFilters((prev) => ({ ...prev, showAllStations }));
+  const setExcludeSubscriptionPlans = (excludeSubscriptionPlans) =>
+    setFilters((prev) => ({ ...prev, excludeSubscriptionPlans }));
 
   const toggleSource = (source, wasChecked) => {
     setFilters((prev) => {
@@ -105,7 +113,7 @@ export default function MapPage() {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+    <div className="map-page">
       <FilterBar
         selectedSources={filters.sources}
         onToggleSource={toggleSource}
@@ -118,6 +126,8 @@ export default function MapPage() {
         onChangeChargeMinutes={setChargeMinutes}
         showAllStations={filters.showAllStations}
         onChangeShowAllStations={setShowAllStations}
+        excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
+        onChangeExcludeSubscriptionPlans={setExcludeSubscriptionPlans}
         selectedConnectorTypes={filters.connectorTypes}
         onToggleConnectorType={toggleConnectorType}
         minPowerKw={filters.minPowerKw}
@@ -129,7 +139,7 @@ export default function MapPage() {
         onReopenOnboarding={() => setShowOnboarding(true)}
         onResetFilters={resetFilters}
       />
-      <div className="app-body" style={{ flex: 1 }}>
+      <div className="app-body">
         <div className="map-container">
           <MapContainer center={FRANCE_CENTER} zoom={6} minZoom={5} maxZoom={19}>
             <TileLayer
@@ -146,7 +156,9 @@ export default function MapPage() {
               minPowerKw={filters.minPowerKw}
               minPriceCentsPerKwh={filters.minPriceCentsPerKwh}
               maxPriceCentsPerKwh={filters.maxPriceCentsPerKwh}
+              excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
             />
+            <GeolocateControl />
           </MapContainer>
         </div>
         {selectedStationId && (
@@ -157,6 +169,7 @@ export default function MapPage() {
             priceMode={priceMode}
             chargeKWh={chargeKWh}
             chargeMinutes={chargeMinutes}
+            excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
           />
         )}
       </div>

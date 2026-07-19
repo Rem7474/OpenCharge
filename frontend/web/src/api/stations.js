@@ -1,6 +1,18 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
 
 /**
+ * Throws a structured error for a failed response: callers can branch on
+ * `err.status` (e.g. friendlyFetchErrorMessage in utils/format.js) instead
+ * of parsing the message string, and a missing status (network failure,
+ * CORS, DNS) stays distinguishable from a real HTTP error status.
+ */
+async function throwForStatus(res, what) {
+  const err = new Error(`${what} failed: ${res.status}`);
+  err.status = res.status;
+  throw err;
+}
+
+/**
  * Fetch stations intersecting a map viewport. bbox is mandatory: the map
  * never loads the whole IRVE dataset, only what's currently visible.
  *
@@ -10,10 +22,26 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
  * `selectedSourcesPricing` for those (source, plan) pairs, so stations
  * without a tariff from the selection can still be shown, just without a
  * price.
+ *
+ * excludeSubscriptionPlans, when true, drops subscription-plan tariffs from
+ * both pricingSummary and selectedSourcesPricing server-side (see backend
+ * GET /stations docs), so the price used for the map marker never assumes
+ * a paid subscription.
  */
 export async function fetchStationsInBBox(
   bbox,
-  { operator, hasTariffs, sources, connectorTypes, minPowerKw, minPriceCentsPerKwh, maxPriceCentsPerKwh, limit, signal } = {}
+  {
+    operator,
+    hasTariffs,
+    sources,
+    connectorTypes,
+    minPowerKw,
+    minPriceCentsPerKwh,
+    maxPriceCentsPerKwh,
+    excludeSubscriptionPlans,
+    limit,
+    signal,
+  } = {}
 ) {
   const params = new URLSearchParams();
   params.set("bbox", bbox.join(","));
@@ -24,20 +52,17 @@ export async function fetchStationsInBBox(
   if (minPowerKw != null) params.set("minPowerKw", String(minPowerKw));
   if (minPriceCentsPerKwh != null) params.set("minPriceCentsPerKwh", String(minPriceCentsPerKwh));
   if (maxPriceCentsPerKwh != null) params.set("maxPriceCentsPerKwh", String(maxPriceCentsPerKwh));
+  if (excludeSubscriptionPlans) params.set("excludeSubscriptionPlans", "true");
   params.set("limit", String(limit ?? 500));
 
   const res = await fetch(`${API_BASE}/stations?${params.toString()}`, { signal });
-  if (!res.ok) {
-    throw new Error(`GET /stations failed: ${res.status}`);
-  }
+  if (!res.ok) await throwForStatus(res, "GET /stations");
   return res.json();
 }
 
 export async function fetchStationDetails(id, { signal } = {}) {
   const res = await fetch(`${API_BASE}/stations/${encodeURIComponent(id)}`, { signal });
-  if (!res.ok) {
-    throw new Error(`GET /stations/${id} failed: ${res.status}`);
-  }
+  if (!res.ok) await throwForStatus(res, `GET /stations/${id}`);
   return res.json();
 }
 
@@ -48,8 +73,6 @@ export async function fetchStationDetails(id, { signal } = {}) {
  */
 export async function fetchSources({ signal } = {}) {
   const res = await fetch(`${API_BASE}/sources`, { signal });
-  if (!res.ok) {
-    throw new Error(`GET /sources failed: ${res.status}`);
-  }
+  if (!res.ok) await throwForStatus(res, "GET /sources");
   return res.json();
 }

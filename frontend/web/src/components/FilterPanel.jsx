@@ -3,6 +3,7 @@ import { SlidersHorizontal, Radio, Zap, Euro, X, RotateCcw } from "lucide-react"
 import OperatorFilter from "./OperatorFilter.jsx";
 import ConnectorFilter from "./ConnectorFilter.jsx";
 import { PRICE_MODE_PER_KWH, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
+import { useDialogA11y } from "../hooks/useDialogA11y.js";
 
 /**
  * Floating "Filtrer par" card grouping every station-list filter (networks,
@@ -10,7 +11,10 @@ import { PRICE_MODE_PER_KWH, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
  * the top-right of the map — same side/positioning treatment as
  * StationDetails' sidebar — rather than a centered modal covering the map:
  * a filter panel is something you keep glancing at while panning the map
- * underneath it, not a blocking dialog.
+ * underneath it. It still behaves like a dialog for keyboard/screen-reader
+ * users (Escape closes it, focus is trapped inside and returned to the
+ * "Filtrer" toggle on close — see docs/audit-ux-2026-07.md §1.2), even
+ * though visually it's docked rather than a centered overlay.
  */
 export default function FilterPanel({
   selectedSources,
@@ -24,6 +28,8 @@ export default function FilterPanel({
   onChangeChargeMinutes,
   showAllStations,
   onChangeShowAllStations,
+  excludeSubscriptionPlans,
+  onChangeExcludeSubscriptionPlans,
   selectedConnectorTypes,
   onToggleConnectorType,
   minPowerKw,
@@ -47,8 +53,10 @@ export default function FilterPanel({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [onClose]);
 
+  useDialogA11y(panelRef, true, onClose);
+
   return (
-    <div className="filter-panel" ref={panelRef}>
+    <div className="filter-panel" role="dialog" aria-modal="true" aria-label="Filtrer par" ref={panelRef}>
       <div className="filter-panel-header">
         <h3>
           <SlidersHorizontal size={18} strokeWidth={2.2} />
@@ -154,6 +162,15 @@ export default function FilterPanel({
               />
             </div>
           </div>
+
+          <label className="show-all-stations-toggle">
+            <input
+              type="checkbox"
+              checked={excludeSubscriptionPlans}
+              onChange={(e) => onChangeExcludeSubscriptionPlans(e.target.checked)}
+            />
+            Exclure les tarifs abonnés
+          </label>
         </section>
 
         <section className="filter-section">
