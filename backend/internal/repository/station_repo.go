@@ -122,7 +122,7 @@ func stationListSelectPrefix(exclude bool) string {
 // stationListFrom dedupes station_tariffs per (source, plan, kind) before
 // any aggregation happens: some sources (currently only Freshmile) can
 // attach both a connector-specific tariff (t.connector_type set, e.g.
-// "CCS") and a generic one (t.connector_type = '') to the very same
+// "CCS") and a generic one (t.connector_type = ”) to the very same
 // station row — see the correlation note below. Only the row that matches
 // (or, absent a match, an arbitrary row from) each (source, plan, kind)
 // group survives, via ROW_NUMBER() OVER (... ORDER BY exact-match DESC).
