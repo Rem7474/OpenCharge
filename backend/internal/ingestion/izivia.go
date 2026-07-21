@@ -8,7 +8,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -437,7 +436,7 @@ func normalizeIziviaStation(marker, station map[string]any, pricing []any) (doma
 
 // iziviaPowerPattern extracts a connector's power rating (e.g. "24kW" in
 // "Connecteurs : CCS 24kW") from Izivia's free-text pricing description.
-var iziviaPowerPattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*kW`)
+var iziviaPowerPattern = mustCompileFrenchWS(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*kW`)
 
 // iziviaTariffKind decides a station's tariff Kind (ac/dc/mixed). It prefers
 // the station's structured chargingConnectorsStats — far more reliable than

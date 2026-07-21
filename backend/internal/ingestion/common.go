@@ -79,14 +79,35 @@ func effectiveWorkers(configured, fallback int) int {
 	return fallback
 }
 
+// frenchWSClass matches everyday ASCII whitespace (Go regexp's \s only
+// matches [\t\n\f\r ]) plus two Unicode space variants French
+// locale-aware number formatting actually produces between an amount and
+// its unit/currency symbol: U+00A0 (no-break space) and U+202F (narrow
+// no-break space — what JavaScript's Intl.NumberFormat('fr-FR',
+// {style:'currency', currency:'EUR'}) inserts by default in modern
+// browsers/Node, e.g. "0,20 €"). Visually indistinguishable from a
+// plain space when printed/logged, so a price pattern written with bare
+// \s can look correct in a test or a pasted log line while silently
+// failing to match the real production text — see mustCompileFrenchWS.
+const frenchWSClass = `[\s\x{00A0}\x{202F}]`
+
+// mustCompileFrenchWS compiles pattern after substituting every bare \s
+// with frenchWSClass, so a price-extraction pattern can be written
+// normally (using \s, same as any other regex) while still matching the
+// Unicode space variants described there. Every price/fee pattern below
+// uses this instead of regexp.MustCompile directly.
+func mustCompileFrenchWS(pattern string) *regexp.Regexp {
+	return regexp.MustCompile(strings.ReplaceAll(pattern, `\s`, frenchWSClass))
+}
+
 // Izivia (and similar sources) describe pricing as free text rather than
 // structured fields, e.g. "0,45€/kWh (Dont 15% de frais de service)",
 // "0.30 € TTC du kWh", "Prix : 0,05€/min". These patterns are deliberately
 // case-insensitive and tolerant of the wording/spacing variants seen across
 // station descriptions, since the source gives no schema guarantee.
-var pricePerKWhPattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:/\s*kwh|du\s+kwh|par\s+kwh|kwh)`)
-var pricePerMinutePattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:/\s*min(?:ute)?s?|par\s+min(?:ute)?s?|la\s+minute)`)
-var serviceFeePattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*%\s*(?:de\s+)?frais\s+de\s+service|frais\s+de\s+service\s*(?:de\s*)?[:=]?\s*([0-9]+(?:[.,][0-9]+)?)\s*%`)
+var pricePerKWhPattern = mustCompileFrenchWS(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:/\s*kwh|du\s+kwh|par\s+kwh|kwh)`)
+var pricePerMinutePattern = mustCompileFrenchWS(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:/\s*min(?:ute)?s?|par\s+min(?:ute)?s?|la\s+minute)`)
+var serviceFeePattern = mustCompileFrenchWS(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*%\s*(?:de\s+)?frais\s+de\s+service|frais\s+de\s+service\s*(?:de\s*)?[:=]?\s*([0-9]+(?:[.,][0-9]+)?)\s*%`)
 
 // sessionFeePattern matches a flat, one-time fee for starting a charging
 // session (e.g. Izivia's "2,3€ la session de charge"), as distinct from
@@ -94,7 +115,7 @@ var serviceFeePattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*%\s*(?
 // not matched — only "la session"/"par session"/"/session" is required
 // right after the amount, same tight-adjacency approach as the other
 // patterns here, so this doesn't accidentally match unrelated text.
-var sessionFeePattern = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:la\s+session|par\s+session|/\s*session)`)
+var sessionFeePattern = mustCompileFrenchWS(`(?i)([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)\s*(?:ttc\s*)?(?:la\s+session|par\s+session|/\s*session)`)
 
 func stringValue(value any) string {
 	switch typed := value.(type) {
