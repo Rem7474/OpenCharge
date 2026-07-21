@@ -103,14 +103,16 @@ type FreshmileConfig struct {
 	Workers int
 }
 
-// DefaultFreshmileConfig: Workers=24. Each location costs one HTTP round
-// trip (GET /locations/{id}, unlike Izivia's two), so this is the same
-// kind of I/O-bound single-host fan-out as Izivia's worker count, just
-// tuned down a bit given how retry-heavy this API already is (see
-// freshmileMaxRetries) — too high a worker count would only mean more
-// requests piling up in backoff at once against the same flaky gateway.
+// freshmileDefaultWorkers: 24. Each location costs one HTTP round trip
+// (GET /locations/{id}, unlike Izivia's two), so this is the same kind of
+// I/O-bound single-host fan-out as Izivia's worker count, just tuned down
+// a bit given how retry-heavy this API already is (see defaultMaxRetries
+// in common.go) — too high a worker count would only mean more requests
+// piling up in backoff at once against the same flaky gateway.
+const freshmileDefaultWorkers = 24
+
 func DefaultFreshmileConfig() FreshmileConfig {
-	return FreshmileConfig{Workers: 24}
+	return FreshmileConfig{Workers: freshmileDefaultWorkers}
 }
 
 type FreshmileIngester struct {
@@ -138,10 +140,7 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 	if baseURL == "" {
 		baseURL = DefaultFreshmileBaseURL
 	}
-	workers := cfg.Workers
-	if workers <= 0 {
-		workers = 24
-	}
+	workers := effectiveWorkers(cfg.Workers, freshmileDefaultWorkers)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = max(workers, freshmileScanWorkers)
 	return &FreshmileIngester{
@@ -333,10 +332,7 @@ func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx con
 		}
 	}
 
-	workers := ing.Config.Workers
-	if workers <= 0 {
-		workers = 24
-	}
+	workers := effectiveWorkers(ing.Config.Workers, freshmileDefaultWorkers)
 	for i := 0; i < workers; i++ {
 		workerWG.Add(1)
 		go worker()
@@ -691,55 +687,28 @@ func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshm
 	return collection.Features, nil
 }
 
-// freshmileMaxRetries is how many times a transient failure (network error
-// or 5xx, e.g. the Azure Application Gateway fronting Freshmile's API
-// occasionally returning 504 Gateway Timeout) is retried before giving up
-// on that request. 4xx responses are never retried — they won't succeed
-// on a second try.
+// getJSON performs a GET with retry/backoff on transient failures — see
+// the shared withRetries in common.go, which this uses the same
+// defaultMaxRetries budget as. Freshmile's map-locations failures make
+// that budget earn its keep more than most: a failure here isn't like a
+// single location's detail fetch failing (that just skips one station) —
+// scanLocationIDs drops the whole tile/cluster branch and never revisits
+// it, so a region can go permanently missing from discovery. That, plus
+// scanLocationIDs running freshmileScanWorkers requests concurrently
+// (more simultaneous load on the same gateway than a sequential scan
+// would produce), makes a short retry budget more likely to be exhausted
+// by the Azure Application Gateway's occasional 504s than it would be
+// elsewhere.
 //
-// A map-locations failure here isn't like a single location's detail
-// fetch failing (that just skips one station): scanLocationIDs drops the
-// whole tile/cluster branch and never revisits it, so a region can go
-// permanently missing from discovery. That, plus scanLocationIDs now
-// running freshmileScanWorkers requests concurrently (more simultaneous
-// load on the same gateway than the old sequential scan ever produced),
-// makes a short retry budget more likely to be exhausted by transient
-// 504s than it used to be — so this is deliberately more generous than a
-// single-request retry would normally need, with exponential backoff
-// instead of linear.
-const freshmileMaxRetries = 5
-
-// getJSON performs a GET with retry/backoff on transient failures. sem, if
-// non-nil, bounds how many of these requests run concurrently across all
-// callers sharing it (see scanLocationIDs) — it's acquired and released
-// around each individual attempt in doGet, not around the whole retry
-// loop, so a request that's sleeping between retries gives up its slot
-// instead of holding it idle for up to freshmileMaxRetries backoffs.
+// sem, if non-nil, bounds how many of these requests run concurrently
+// across all callers sharing it (see scanLocationIDs) — it's acquired and
+// released around each individual attempt in doGet, not around the whole
+// retry loop, so a request that's sleeping between retries gives up its
+// slot instead of holding it idle for up to defaultMaxRetries backoffs.
 func (ing *FreshmileIngester) getJSON(ctx context.Context, url string, sem chan struct{}) ([]byte, error) {
-	var lastErr error
-	for attempt := 0; attempt <= freshmileMaxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := (1 << (attempt - 1)) * ing.retryBackoff
-			log.Printf("freshmile: retrying %s in %v (attempt %d/%d) after: %v", url, backoff, attempt+1, freshmileMaxRetries+1, lastErr)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-
-		body, status, err := ing.doGet(ctx, url, sem)
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-		// status == 0 means no HTTP response at all (network/timeout
-		// error) — treat that as transient too, same as a 5xx.
-		if status != 0 && status < 500 {
-			break
-		}
-	}
-	return nil, lastErr
+	return withRetries(ctx, "freshmile", url, defaultMaxRetries, ing.retryBackoff, func() ([]byte, int, error) {
+		return ing.doGet(ctx, url, sem)
+	})
 }
 
 // doGet performs a single GET, always including the full URL in any

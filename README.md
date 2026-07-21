@@ -198,18 +198,22 @@ seulement documenté dans `raw_text`.
 
 **ChargeNow** (`backend/internal/ingestion/chargenow.go`) scanne toute la
 France via son API de clusters/pools (`/api/map/v1/fr/query`, même logique
-de subdivision par bounding box que Freshmile), puis interroge son API de
-tarifs (`/tariffs/CHARGENOW_PRIME/prices`) pour chaque pool trouvé.
-Particularité : l'API de découverte de ChargeNow ne renvoie ni le type de
-connecteur ni la puissance de chaque point de charge (seulement son id),
-alors que l'API de tarifs a besoin de `power_type`/`power` pour répondre —
-l'ingester corrèle donc chaque pool avec la station IRVE la plus proche
-*avant* même d'interroger les tarifs, uniquement pour lire ce
-`connector_type`/`power_kw` déjà connu d'IRVE. Nécessite le header WAF
-`rest-api-path` sur chaque requête (`clusters` pour `/query`, confirmé ;
-`prices` pour `/tariffs/.../prices` est une supposition non vérifiée en
-conditions réelles — voir le commentaire sur `doRequest` si ce endpoint se
-met à échouer de façon suspecte).
+de subdivision par bounding box que Freshmile) — découverte, corrélation,
+tarification et écriture tournent en pipeline (comme Freshmile), par lots
+de 100 pools au fur et à mesure qu'ils sont découverts, plutôt qu'en trois
+phases séparées (tout découvrir, puis tout tarifer, puis tout écrire) :
+un arrêt en cours de route ne perd donc que le lot en cours, pas tout ce
+qui a déjà été récupéré. Particularité : l'API de découverte de ChargeNow
+ne renvoie ni le type de connecteur ni la puissance de chaque point de
+charge (seulement son id), alors que l'API de tarifs (`/tariffs/CHARGENOW_PRIME/prices`)
+a besoin de `power_type`/`power` pour répondre — l'ingester corrèle donc
+chaque pool avec la station IRVE la plus proche *avant* même d'interroger
+les tarifs, uniquement pour lire ce `connector_type`/`power_kw` déjà connu
+d'IRVE. Nécessite le header WAF `rest-api-path` sur chaque requête
+(`clusters` pour `/query`, confirmé ; `prices` pour `/tariffs/.../prices`
+est une supposition non vérifiée en conditions réelles — voir le
+commentaire sur `doRequest` si ce endpoint se met à échouer de façon
+suspecte).
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux

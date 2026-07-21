@@ -64,12 +64,29 @@ const (
 	// blowup per initial tile.
 	chargenowMaxTilesVisited = 500000
 	chargenowScanWorkers     = 16
-	chargenowMaxRetries      = 5
 	// How many (charge_point, power_type, power) triples go in one POST to
 	// the prices endpoint — same reasoning as ingestionBulkChunkSize:
 	// bound request/response size without turning thousands of pools into
 	// thousands of round trips.
 	chargenowPriceBatchSize = 200
+	// chargenowPoolBatchSize bounds how many pools are correlated, priced,
+	// and written together as one unit before the pipeline moves on to
+	// the next — half of chargenowPriceBatchSize since each pool
+	// contributes up to 2 price items (AC and DC), so a batch this size
+	// produces at most one price request rather than needing its own
+	// internal pagination. Pools are fed into a batch as they're
+	// discovered (see scanPools), interleaved with pricing and writing,
+	// rather than only starting once the whole map has been scanned —
+	// same durability rationale as freshmile.go's streaming pipeline: a
+	// run cut short (SIGINT, the idle watchdog giving up) keeps whatever
+	// has already been priced and written instead of losing everything
+	// gathered so far.
+	chargenowPoolBatchSize = chargenowPriceBatchSize / 2
+
+	// chargenowFlushTimeout bounds how long a single batch write is
+	// allowed to take — same rationale and value as izivia.go's
+	// iziviaFlushTimeout/freshmile.go's freshmileFlushTimeout.
+	chargenowFlushTimeout = 2 * time.Minute
 
 	// Fallback power (kW) used only for a pool with no IRVE match within
 	// MaxLinkDistanceM to read a real power_kw from — see Run's
@@ -113,10 +130,7 @@ func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 	if baseURL == "" {
 		baseURL = DefaultChargenowBaseURL
 	}
-	workers := cfg.Workers
-	if workers <= 0 {
-		workers = chargenowScanWorkers
-	}
+	workers := effectiveWorkers(cfg.Workers, chargenowScanWorkers)
 	// Same MaxIdleConnsPerHost fix as izivia.go's newIziviaHTTPClient:
 	// http.DefaultTransport's default of 2 would otherwise serialize most
 	// of a single-host worker fan-out behind repeated TCP/TLS handshakes.
@@ -142,29 +156,27 @@ func (ing *ChargenowIngester) startIdleWatchdog(ctx context.Context) (context.Co
 }
 
 // Run scans ChargeNow's map for pools (physical charging locations)
-// covering metropolitan France, then, for each pool, correlates it with
-// the nearest IRVE station(s) up front — before fetching any price — since
-// ChargeNow's own discovery API returns only a pool's location and its
-// charge points' bare ids, never their power/connector type, while its
-// pricing API requires exactly that (charge_point, power_type, power) to
-// price anything. IRVE already knows the connector type/power for the
-// physical location a pool corresponds to, so that's what's used to build
-// the price query — every other ingester correlates only once, at write
-// time in writeSourceStationChunk, but ChargeNow's price fetch itself
-// depends on the correlation, not just the final station_links row.
+// covering metropolitan France and, as pools are discovered, correlates
+// each with the nearest IRVE station(s), fetches its price, and writes the
+// result — streamed in batches of chargenowPoolBatchSize as discovery
+// finds them, rather than only starting once the whole map has been
+// scanned (same discover+fetch+write-concurrently shape as freshmile.go's
+// pipeline, and for the same reason: a run cut short keeps whatever it's
+// already priced and written instead of losing everything). Correlation
+// happens before pricing (not after, as in every other ingester's
+// writeSourceStationChunk) because ChargeNow's own discovery API returns
+// only a pool's location and its charge points' bare ids, never their
+// power/connector type, while its pricing API requires exactly that
+// (charge_point, power_type, power) to price anything — IRVE already
+// knows the connector type/power for the physical location a pool
+// corresponds to, so that's what's used to build the price query.
 func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 	defer ing.Failures.saveAndLog()
 	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
 	defer cancelIdle()
 	runStart := time.Now()
 
-	pools, err := ing.scanPools(ctx)
-	if err != nil {
-		return 0, err
-	}
-	log.Printf("chargenow: %d pools found", len(pools))
-
-	processed, err := ing.processPools(ctx, pools)
+	processed, err := ing.runPipeline(ctx, ing.scanPools)
 	if err != nil {
 		return processed, err
 	}
@@ -194,7 +206,7 @@ func (ing *ChargenowIngester) RetryFailed(ctx context.Context, failures []Failed
 	defer cancelIdle()
 
 	var bboxes []chargenowBBox
-	poolsByID := map[string]chargenowPool{}
+	var directPools []chargenowPool
 	for _, f := range failures {
 		switch f.Kind {
 		case failKindChargenowBBox:
@@ -210,37 +222,123 @@ func (ing *ChargenowIngester) RetryFailed(ctx context.Context, failures []Failed
 				log.Printf("chargenow: skipping unreadable %s failure: %v", f.Kind, err)
 				continue
 			}
-			poolsByID[pool.ID] = pool
+			directPools = append(directPools, pool)
 		default:
 			log.Printf("chargenow: skipping failure of unknown kind %q", f.Kind)
 		}
 	}
 
-	if len(bboxes) > 0 {
-		scanned, err := ing.scanPoolsFrom(ctx, bboxes)
-		if err != nil {
-			return 0, err
+	log.Printf("chargenow: retrying %d pools directly and %d bboxes from %d recorded failure(s)", len(directPools), len(bboxes), len(failures))
+
+	// A pool fed directly may also be re-discovered by a retried bbox's
+	// own scan; the resulting duplicate send is harmless (the write path
+	// upserts) and rare enough not to be worth deduplicating across the
+	// two feeds.
+	feed := func(feedCtx context.Context, poolCh chan<- chargenowPool) {
+		for _, p := range directPools {
+			select {
+			case poolCh <- p:
+			case <-feedCtx.Done():
+				return
+			}
 		}
-		for _, p := range scanned {
-			poolsByID[p.ID] = p
+		if len(bboxes) > 0 {
+			ing.scanPoolsFrom(feedCtx, bboxes, poolCh)
 		}
 	}
-
-	pools := make([]chargenowPool, 0, len(poolsByID))
-	for _, p := range poolsByID {
-		pools = append(pools, p)
-	}
-
-	log.Printf("chargenow: retrying %d pools from %d recorded failure(s)", len(pools), len(failures))
-	processed, err := ing.processPools(ctx, pools)
+	processed, err := ing.runPipeline(ctx, feed)
 	log.Printf("chargenow: retry done, %d source stations processed", processed)
 	return processed, err
 }
 
-// processPools correlates every pool with the IRVE referential, fetches
-// its prices and writes the resulting source stations/tariffs — the
-// shared pipeline behind both a full Run and a RetryFailed pass.
-func (ing *ChargenowIngester) processPools(ctx context.Context, pools []chargenowPool) (int, error) {
+// runPipeline runs the shared discover→correlate→price→write pipeline
+// behind both a full Run and a RetryFailed pass: feed streams discovered
+// pools onto poolCh (a full run's feed is scanPools; a retry pass feeds
+// recorded pools directly and re-scans failed bboxes), and a single
+// consumer batches them by chargenowPoolBatchSize, correlating, pricing,
+// and writing each batch as it fills — same streaming shape as
+// freshmile.go's runPipeline.
+func (ing *ChargenowIngester) runPipeline(ctx context.Context, feed func(ctx context.Context, poolCh chan<- chargenowPool)) (int, error) {
+	// pipelineCtx (not ctx directly) governs feed, so that once
+	// consumePools returns below — whether poolCh closed normally or a
+	// batch's correlate/price/write failed early — feed's own goroutine,
+	// if still blocked trying to send a pool, unblocks via
+	// pipelineCtx.Done() instead of leaking forever. Same rationale as
+	// freshmile.go's identical pipelineCtx.
+	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
+	defer cancelPipeline()
+
+	poolCh := make(chan chargenowPool, chargenowPoolBatchSize)
+
+	var feedWG sync.WaitGroup
+	feedWG.Add(1)
+	go func() {
+		defer feedWG.Done()
+		defer close(poolCh)
+		feed(pipelineCtx, poolCh)
+	}()
+
+	processed, err := ing.consumePools(ctx, poolCh)
+	// Whether consumePools drained poolCh to completion or returned early
+	// on a batch error, cancel pipelineCtx so feed unblocks instead of
+	// leaking (see the comment above pipelineCtx's declaration).
+	cancelPipeline()
+	feedWG.Wait()
+
+	if err == nil {
+		err = context.Cause(ctx)
+	}
+	return processed, err
+}
+
+// consumePools drains poolCh, batching by chargenowPoolBatchSize, and
+// correlates+prices+writes each batch via processPoolBatch as it fills —
+// so an interruption only loses the batch currently in flight, not
+// everything discovered so far. Kept single-threaded (one batch at a
+// time, not a worker pool): each batch already correlates/prices up to
+// chargenowPoolBatchSize pools in one bulk round trip / one price
+// request, so the per-batch unit of work is large enough that added
+// concurrency here would mostly just mean several such bulk operations
+// competing for the same downstream resources, not meaningfully faster
+// throughput.
+func (ing *ChargenowIngester) consumePools(ctx context.Context, poolCh <-chan chargenowPool) (int, error) {
+	processed := 0
+	batch := make([]chargenowPool, 0, chargenowPoolBatchSize)
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := ing.processPoolBatch(ctx, batch)
+		processed += n
+		batch = batch[:0]
+		if err != nil {
+			return err
+		}
+		log.Printf("chargenow: %d processed so far", processed)
+		return nil
+	}
+
+	for p := range poolCh {
+		batch = append(batch, p)
+		if len(batch) >= chargenowPoolBatchSize {
+			if err := flush(); err != nil {
+				return processed, err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return processed, err
+	}
+	return processed, nil
+}
+
+// processPoolBatch correlates one batch of pools with the IRVE
+// referential, fetches their prices and writes the resulting source
+// stations/tariffs — called once per chargenowPoolBatchSize-sized batch
+// by consumePools as pools are discovered, rather than once for the whole
+// dataset.
+func (ing *ChargenowIngester) processPoolBatch(ctx context.Context, pools []chargenowPool) (int, error) {
 	points := make([]repository.NearestStationQuery, len(pools))
 	for i, p := range pools {
 		points[i] = repository.NearestStationQuery{Lat: p.Lat, Lng: p.Lng}
@@ -389,19 +487,28 @@ func (ing *ChargenowIngester) processPools(ctx context.Context, pools []chargeno
 		if end > len(normalized) {
 			end = len(normalized)
 		}
-		n, err := writeSourceStationChunk(ctx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, normalized[i:end])
+		// Decoupled from ctx (context.WithoutCancel), same as
+		// izivia.go/freshmile.go's flush: this chunk is already fully
+		// priced and collected in memory by this point, so once we've
+		// committed to writing it, a SIGINT or the idle watchdog giving
+		// up landing mid-query shouldn't be able to abort it.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chargenowFlushTimeout)
+		n, err := writeSourceStationChunk(writeCtx, ing.Pool, ing.SourceStations, ing.Tariffs, ing.Links, ing.MaxLinkDistanceM, normalized[i:end])
+		cancel()
 		processed += n
 		if err != nil {
 			return processed, err
 		}
 		log.Printf("chargenow: %d/%d processed", processed, len(normalized))
 	}
-	// Same guard as freshmile's runPipeline: price batches that failed on
-	// a mid-run ctx expiry are only logged and skipped above, so without
-	// surfacing this a truncated run could look fully successful to Run(),
-	// which would then sweep stations this run never re-priced.
-	// context.Cause (not plain ctx.Err()) so the caller sees *why* — e.g.
-	// "no successful request in the last 5m0s..." — see idleWatchdog.
+	// A batch's price fetches can fail on a mid-run ctx expiry without
+	// that ever producing a non-nil err above (each failed price batch is
+	// only logged and recorded, see recordFailedBatch) — so without
+	// surfacing this, a truncated run could look fully successful to
+	// consumePools/runPipeline, which would then let Run() sweep stations
+	// this run never got to re-price. context.Cause (not plain ctx.Err())
+	// so the caller sees *why* — e.g. "no successful request in the last
+	// 5m0s..." — see idleWatchdog.
 	if err := context.Cause(ctx); err != nil {
 		return processed, err
 	}
@@ -488,7 +595,12 @@ func padDegenerateChargenowBBox(b chargenowBBox) chargenowBBox {
 // above what's resolvable at the requested precision) — same
 // discover-then-subdivide shape as freshmile.go's scanLocationIDs, using
 // chargePointCount/boundingBox* instead of location_count/properties.bbox.
-func (ing *ChargenowIngester) scanPools(ctx context.Context) ([]chargenowPool, error) {
+// Discovered pools are sent onto poolCh as they're found (closing poolCh
+// is the caller's job, once this returns), same streaming contract as
+// freshmile.go's scanLocationIDs, so consumePools can start
+// correlating/pricing/writing the first batch long before the whole map
+// has been scanned.
+func (ing *ChargenowIngester) scanPools(ctx context.Context, poolCh chan<- chargenowPool) {
 	const step = chargenowGridStep
 	minLng, maxLng := -5.5, 9.8
 	minLat, maxLat := 41.0, 51.5
@@ -507,16 +619,16 @@ func (ing *ChargenowIngester) scanPools(ctx context.Context) ([]chargenowPool, e
 	// of this fixed grid order.
 	rand.Shuffle(len(initial), func(i, j int) { initial[i], initial[j] = initial[j], initial[i] })
 
-	return ing.scanPoolsFrom(ctx, initial)
+	ing.scanPoolsFrom(ctx, initial, poolCh)
 }
 
 // scanPoolsFrom is scanPools' engine, starting from an arbitrary list of
 // initial boxes rather than always the full-France grid — RetryFailed
 // reuses it to re-scan just the bboxes a previous run recorded as failed.
-func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []chargenowBBox) ([]chargenowPool, error) {
+func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []chargenowBBox, poolCh chan<- chargenowPool) {
 	var (
 		mu   sync.Mutex
-		seen = map[string]chargenowPool{}
+		seen = map[string]struct{}{}
 	)
 	var visited int64
 	sem := make(chan struct{}, ing.workers())
@@ -543,15 +655,26 @@ func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []charg
 			return
 		}
 
-		mu.Lock()
 		for _, p := range resp.Pools {
+			mu.Lock()
+			_, dup := seen[p.ID]
+			if !dup {
+				seen[p.ID] = struct{}{}
+			}
+			mu.Unlock()
+			if dup {
+				continue
+			}
 			ids := make([]string, len(p.ChargePoints))
 			for i, cp := range p.ChargePoints {
 				ids[i] = cp.ID
 			}
-			seen[p.ID] = chargenowPool{ID: p.ID, Lat: p.Latitude, Lng: p.Longitude, ChargePointIDs: ids}
+			select {
+			case poolCh <- chargenowPool{ID: p.ID, Lat: p.Latitude, Lng: p.Longitude, ChargePointIDs: ids}:
+			case <-ctx.Done():
+				return
+			}
 		}
-		mu.Unlock()
 
 		if depth >= chargenowMaxSubdivisionDepth {
 			return
@@ -573,19 +696,10 @@ func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []charg
 		go scan(tile, 0)
 	}
 	wg.Wait()
-
-	pools := make([]chargenowPool, 0, len(seen))
-	for _, p := range seen {
-		pools = append(pools, p)
-	}
-	return pools, nil
 }
 
 func (ing *ChargenowIngester) workers() int {
-	if ing.Config.Workers > 0 {
-		return ing.Config.Workers
-	}
-	return chargenowScanWorkers
+	return effectiveWorkers(ing.Config.Workers, chargenowScanWorkers)
 }
 
 type chargenowQueryResponse struct {
@@ -686,31 +800,10 @@ func (ing *ChargenowIngester) fetchQuery(ctx context.Context, bbox chargenowBBox
 	return &resp, nil
 }
 
-// withRetries retries do (one HTTP attempt) on a transient failure —
-// network error, timeout, or 5xx — up to chargenowMaxRetries times with
-// exponential backoff. Same pattern as izivia.go's withRetries.
+// withRetries retries do (one HTTP attempt) on a transient failure — see
+// the shared withRetries in common.go.
 func (ing *ChargenowIngester) withRetries(ctx context.Context, label string, do func() ([]byte, int, error)) ([]byte, error) {
-	var lastErr error
-	for attempt := 0; attempt <= chargenowMaxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := (1 << (attempt - 1)) * ing.retryBackoff
-			log.Printf("chargenow: retrying %s in %v (attempt %d/%d) after: %v", label, backoff, attempt+1, chargenowMaxRetries+1, lastErr)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-		body, status, err := do()
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-		if status != 0 && status < 500 {
-			break
-		}
-	}
-	return nil, lastErr
+	return withRetries(ctx, "chargenow", label, defaultMaxRetries, ing.retryBackoff, do)
 }
 
 // doRequest performs a single HTTP request with ChargeNow's WAF-required

@@ -68,9 +68,21 @@ type TeslaIngester struct {
 	// successful request before giving up on the whole run — see
 	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
 	IdleTimeout   time.Duration
-	idle          *idleWatchdog // set by Run/RetryFailed, pinged after fetchViaChrome succeeds
+	idle          *idleWatchdog // set by Run/RetryFailed, pinged after fetchViaChromeWithRetries succeeds
 	detailsURLFmt string        // get-charger-details endpoint, derived from URL's host
+	retryBackoff  time.Duration // unexported: overridden by tests to keep them fast
 }
+
+// teslaMaxRetries is smaller than the shared defaultMaxRetries (5, used
+// by every plain-HTTP source) because every attempt here is a real
+// browser tab: a stuck tab or a slow Akamai JS challenge can each cost up
+// to teslaFetchTimeout (45s), so retrying as aggressively as a cheap HTTP
+// request would could turn one bad URL into minutes of wall-clock time.
+// fetchViaChrome also has no HTTP status of its own to distinguish a
+// permanent failure from a transient one (unlike the other sources' 4xx
+// vs 5xx split), so every failure here is treated as potentially
+// transient and retried up to this smaller cap instead.
+const teslaMaxRetries = 2
 
 func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, teslaURL string, cfg TeslaConfig) *TeslaIngester {
 	if teslaURL == "" {
@@ -86,6 +98,7 @@ func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStati
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
 		IdleTimeout:      DefaultIdleTimeout,
 		detailsURLFmt:    teslaDetailsURLFmtFor(teslaURL),
+		retryBackoff:     2 * time.Second,
 	}
 }
 
@@ -350,11 +363,10 @@ func (ing *TeslaIngester) writeResults(ctx context.Context, resultsCh <-chan nor
 // touching the database — writes are batched separately, see Run.
 func (ing *TeslaIngester) fetchAndNormalizeSupercharger(allocCtx context.Context, slug string) (normalizedSourceStation, bool, error) {
 	detailsURL := fmt.Sprintf(ing.detailsURLFmt, url.QueryEscape(slug))
-	body, err := fetchViaChrome(allocCtx, detailsURL)
+	body, err := ing.fetchViaChromeWithRetries(allocCtx, detailsURL)
 	if err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("fetch charger details: %w", err)
 	}
-	ing.idle.Ping()
 
 	var envelope struct {
 		Data struct {
@@ -378,11 +390,10 @@ func (ing *TeslaIngester) fetchAndNormalizeSupercharger(allocCtx context.Context
 
 func (ing *TeslaIngester) fetchLocations(allocCtx context.Context) ([]map[string]any, error) {
 	log.Printf("tesla: downloading %s", ing.URL)
-	body, err := fetchViaChrome(allocCtx, ing.URL)
+	body, err := ing.fetchViaChromeWithRetries(allocCtx, ing.URL)
 	if err != nil {
 		return nil, fmt.Errorf("download tesla locations: %w", err)
 	}
-	ing.idle.Ping()
 
 	var envelope struct {
 		Data struct {
@@ -399,6 +410,24 @@ func (ing *TeslaIngester) fetchLocations(allocCtx context.Context) ([]map[string
 // bot-mitigation JS challenge (if any) to resolve, short enough that one
 // stuck tab can't stall a whole ingestion run indefinitely.
 const teslaFetchTimeout = 45 * time.Second
+
+// fetchViaChromeWithRetries retries fetchViaChrome on failure (see
+// teslaMaxRetries) via the shared withRetries in common.go, and pings the
+// idle watchdog once on success. fetchViaChrome has no HTTP status of its
+// own, so the retry helper's do closure always reports status 0 —
+// every failure is treated as potentially transient (network blip, a
+// slow Akamai challenge, a stuck tab), same as a plain network error
+// would be for the HTTP-based sources.
+func (ing *TeslaIngester) fetchViaChromeWithRetries(allocCtx context.Context, url string) ([]byte, error) {
+	body, err := withRetries(allocCtx, "tesla", url, teslaMaxRetries, ing.retryBackoff, func() ([]byte, int, error) {
+		body, err := fetchViaChrome(allocCtx, url)
+		return body, 0, err
+	})
+	if err == nil {
+		ing.idle.Ping()
+	}
+	return body, err
+}
 
 // fetchViaChrome navigates a fresh tab (its own chromedp.NewContext off
 // the shared allocator — cheap compared to launching a new browser) to

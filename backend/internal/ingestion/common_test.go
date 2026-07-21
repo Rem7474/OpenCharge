@@ -1,6 +1,12 @@
 package ingestion
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestParsePriceText(t *testing.T) {
 	cases := []struct {
@@ -103,4 +109,117 @@ func floatPtrEqual(a, b *float64) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// TestWithRetriesRetriesTransientFailureThenSucceeds pins the shared
+// retry/backoff helper every fan-out source (izivia, freshmile,
+// chargenow, tesla) delegates to: a transient failure (status 0, e.g. a
+// network error, or a 5xx) is retried up to maxRetries times before
+// giving up.
+func TestWithRetriesRetriesTransientFailureThenSucceeds(t *testing.T) {
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 3 {
+			return nil, 502, errors.New("bad gateway")
+		}
+		return []byte("ok"), 200, nil
+	}
+
+	body, err := withRetries(context.Background(), "test", "label", defaultMaxRetries, time.Millisecond, do)
+	if err != nil {
+		t.Fatalf("withRetries: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Errorf("body = %q, want ok", body)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Errorf("attempts = %d, want 3 (2 failures + 1 success)", got)
+	}
+}
+
+// TestWithRetriesDoesNotRetryOnDefinitiveClientError pins the 4xx/5xx
+// split: a non-zero status below 500 is a permanent client error and
+// must stop retrying immediately, unlike status 0 (no response at all —
+// used by tesla's chromedp-based do, which has no HTTP status of its
+// own) or a 5xx, both always retried.
+func TestWithRetriesDoesNotRetryOnDefinitiveClientError(t *testing.T) {
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		atomic.AddInt32(&attempts, 1)
+		return nil, 404, errors.New("not found")
+	}
+
+	_, err := withRetries(context.Background(), "test", "label", defaultMaxRetries, time.Millisecond, do)
+	if err == nil {
+		t.Fatal("withRetries = nil error, want the 404 surfaced")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry on a definitive 4xx)", got)
+	}
+}
+
+// TestWithRetriesGivesUpAfterMaxRetries pins the exhaustion case with a
+// small maxRetries (mirroring tesla's teslaMaxRetries, smaller than the
+// shared defaultMaxRetries since each attempt there is a real browser
+// tab): maxRetries+1 total attempts, then the last error is returned.
+func TestWithRetriesGivesUpAfterMaxRetries(t *testing.T) {
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		atomic.AddInt32(&attempts, 1)
+		return nil, 0, errors.New("still stuck")
+	}
+
+	_, err := withRetries(context.Background(), "test", "label", teslaMaxRetries, time.Millisecond, do)
+	if err == nil || err.Error() != "still stuck" {
+		t.Errorf("withRetries error = %v, want the last attempt's error", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != teslaMaxRetries+1 {
+		t.Errorf("attempts = %d, want %d (initial attempt + %d retries)", got, teslaMaxRetries+1, teslaMaxRetries)
+	}
+}
+
+// TestWithRetriesStopsOnContextCancellation ensures a canceled ctx aborts
+// the backoff sleep between attempts instead of waiting it out, and
+// surfaces context.Cause (not a bare "context canceled" with no further
+// info) — see idleWatchdog for why a richer cause matters here.
+func TestWithRetriesStopsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n == 1 {
+			cancel()
+		}
+		return nil, 0, errors.New("network blip")
+	}
+
+	start := time.Now()
+	_, err := withRetries(ctx, "test", "label", defaultMaxRetries, time.Hour, do)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("withRetries took %v, want it to abort immediately on ctx cancellation instead of waiting out the hour-long backoff", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestEffectiveWorkers(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured int
+		fallback   int
+		want       int
+	}{
+		{"positive configured value wins", 10, 40, 10},
+		{"zero falls back", 0, 40, 40},
+		{"negative falls back", -1, 40, 40},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := effectiveWorkers(c.configured, c.fallback); got != c.want {
+				t.Errorf("effectiveWorkers(%d, %d) = %d, want %d", c.configured, c.fallback, got, c.want)
+			}
+		})
+	}
 }

@@ -41,15 +41,17 @@ type IziviaConfig struct {
 	Zoom     int
 }
 
-// DefaultIziviaConfig: Workers=40 because every marker costs two sequential
-// HTTP round trips (station detail, then pricing) and the source has tens
-// of thousands of markers — this is a pure I/O-bound fan-out to a single
+// iziviaDefaultWorkers: 40 because every marker costs two sequential HTTP
+// round trips (station detail, then pricing) and the source has tens of
+// thousands of markers — this is a pure I/O-bound fan-out to a single
 // host, so it needs a much larger pool than a CPU-bound worker count. It
 // only pays off paired with newIziviaHTTPClient's raised per-host
 // connection limits below; without that, Go's default transport caps
 // concurrent connections to one host at 2 regardless of goroutine count.
+const iziviaDefaultWorkers = 40
+
 func DefaultIziviaConfig() IziviaConfig {
-	return IziviaConfig{Workers: 40, GridStep: 2.0, Zoom: 7}
+	return IziviaConfig{Workers: iziviaDefaultWorkers, GridStep: 2.0, Zoom: 7}
 }
 
 // iziviaFlushTimeout bounds how long a single batch write is allowed to
@@ -90,10 +92,7 @@ type IziviaIngester struct {
 }
 
 func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, cfg IziviaConfig) *IziviaIngester {
-	workers := cfg.Workers
-	if workers <= 0 {
-		workers = 40
-	}
+	workers := effectiveWorkers(cfg.Workers, iziviaDefaultWorkers)
 	return &IziviaIngester{
 		Pool:             pool,
 		SourceStations:   sourceStations,
@@ -115,16 +114,6 @@ func (ing *IziviaIngester) startIdleWatchdog(ctx context.Context) (context.Conte
 	ing.idle = watchdog
 	return ctx, cancel
 }
-
-// iziviaMaxRetries is how many times a transient failure (network error,
-// timeout, or 5xx) is retried before giving up on that request. Every
-// square-scan and marker fetch used to have zero retry at all: a single
-// fronts-map.izivia.com timeout (observed in practice under load — the API
-// has no documented SLA) permanently dropped whatever that request covered
-// (an entire grid square during discovery, or one station during detail
-// fetch), logged and skipped, with no way to recover it within the run.
-// 4xx responses are never retried — they won't succeed on a second try.
-const iziviaMaxRetries = 5
 
 // Run scans Izivia's map for markers covering metropolitan France, fetches
 // station details and pricing for each, then correlates every station with
@@ -278,10 +267,7 @@ func (ing *IziviaIngester) processMarkers(ctx context.Context, markers []map[str
 		}
 	}
 
-	workers := ing.Config.Workers
-	if workers <= 0 {
-		workers = 40
-	}
+	workers := effectiveWorkers(ing.Config.Workers, iziviaDefaultWorkers)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go worker()
@@ -703,10 +689,7 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 	resultsCh := make(chan []map[string]any)
 	var wg sync.WaitGroup
 
-	scanWorkers := ing.Config.Workers
-	if scanWorkers <= 0 {
-		scanWorkers = 40
-	}
+	scanWorkers := effectiveWorkers(ing.Config.Workers, iziviaDefaultWorkers)
 	if scanWorkers > len(squares) {
 		scanWorkers = len(squares)
 	}
@@ -822,37 +805,13 @@ func (ing *IziviaIngester) getJSON(ctx context.Context, url string) ([]byte, err
 	})
 }
 
-// withRetries retries do (one HTTP attempt) on a transient failure —
-// network error, timeout, or 5xx — up to iziviaMaxRetries times with
-// exponential backoff, same pattern as Freshmile's getJSON. do's int
-// return is the HTTP status (0 if the request never got a response at
-// all); a non-zero status below 500 is a definitive client error and
-// stops retrying immediately. label is only used for the retry log line
-// (see postJSON's comment on why it can differ from the request's actual
-// URL); the error doRequest returns always carries the real URL.
+// withRetries retries do (one HTTP attempt) on a transient failure — see
+// the shared withRetries in common.go. label is only used for the retry
+// log line (see postJSON's comment on why it can differ from the
+// request's actual URL); the error doRequest returns always carries the
+// real URL.
 func (ing *IziviaIngester) withRetries(ctx context.Context, label string, do func() ([]byte, int, error)) ([]byte, error) {
-	var lastErr error
-	for attempt := 0; attempt <= iziviaMaxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := (1 << (attempt - 1)) * ing.retryBackoff
-			log.Printf("izivia: retrying %s in %v (attempt %d/%d) after: %v", label, backoff, attempt+1, iziviaMaxRetries+1, lastErr)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-
-		body, status, err := do()
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-		if status != 0 && status < 500 {
-			break
-		}
-	}
-	return nil, lastErr
+	return withRetries(ctx, "izivia", label, defaultMaxRetries, ing.retryBackoff, do)
 }
 
 // doRequest performs a single HTTP request, always including the full URL
