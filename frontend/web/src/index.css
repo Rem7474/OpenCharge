@@ -716,6 +716,66 @@ a {
   flex-shrink: 0;
 }
 
+.station-preview {
+  position: relative;
+  margin-bottom: 16px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.station-preview-image {
+  display: block;
+  width: 100%;
+  height: 160px;
+  object-fit: cover;
+  background: var(--color-border);
+}
+
+.station-preview--no-image {
+  margin-bottom: 10px;
+}
+
+.station-preview .freshmile-availability {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  background: rgba(20, 20, 20, 0.75);
+  color: #fff;
+}
+
+.freshmile-availability {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.station-preview--no-image .freshmile-availability {
+  background: rgba(128, 128, 128, 0.12);
+  color: var(--color-text);
+}
+
+.station-preview--no-image .freshmile-availability--available {
+  color: var(--color-accent);
+}
+
+.station-preview--no-image .freshmile-availability--unavailable {
+  color: var(--color-accent-high);
+}
+
+.freshmile-availability--available {
+  color: #7fe08b;
+}
+
+.freshmile-availability--unavailable {
+  color: #f3a3a3;
+}
+
+.freshmile-availability--loading {
+  color: #d8d8d8;
+}
+
 .station-meta-card {
   background: rgba(128, 128, 128, 0.06);
   border-radius: var(--radius-lg);

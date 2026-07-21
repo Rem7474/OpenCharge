@@ -863,6 +863,21 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 			bestPowerCategory = strings.ToLower(stringValue(bestPower["category"]))
 		}
 	}
+	// Both are location-level (the whole physical site, not any one
+	// connector): locationID is the numeric id GET /locations/{id} itself
+	// takes, feeding the frontend's real-time is_available check directly
+	// against Freshmile's own API; imgPreviewURL is a Street View still
+	// Freshmile already generates for the site. Stashed into every
+	// connector's own tariff Extra below (harmlessly duplicated across
+	// them) since a single Freshmile location's connectors can end up
+	// correlated to several different IRVE station rows (one per connector
+	// kind — see freshmileTariffKind's doc comment), and there's no shared
+	// "site" row to attach them to instead; the frontend already re-groups
+	// those IRVE rows back into one site card (see
+	// utils/stationGrouping.js), so it can just read whichever connector's
+	// tariff has them.
+	locationID, _ := floatValue(details["id"])
+	imgPreviewURL := stringValue(details["img_preview_url"])
 
 	best := map[string]freshmileTariffCandidate{}
 	evses, _ := details["evses"].([]any)
@@ -882,7 +897,7 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 				continue
 			}
 			candidate := freshmileTariffCandidate{
-				tariff:         normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory),
+				tariff:         normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory, locationID, imgPreviewURL),
 				isPreferential: parseBooleanLoose(stringValue(tariffRaw["is_preferential"])),
 			}
 			key := candidate.tariff.Kind + "\x00" + candidate.tariff.ConnectorType
@@ -931,13 +946,19 @@ func freshmileBetterCandidate(candidate, current freshmileTariffCandidate) bool 
 	return false
 }
 
-func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string) domain.StationTariff {
+func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string, locationID *float64, imgPreviewURL string) domain.StationTariff {
 	power, _ := floatValue(conn["power"])
 	connectorType := freshmileConnectorType(stringValue(conn["standard"]))
 	kind := freshmileTariffKind(connectorType, power, bestPowerCategory)
 
 	extra := map[string]any{
 		"tariff": tariffRaw,
+	}
+	if locationID != nil {
+		extra["freshmile_location_id"] = int64(*locationID)
+	}
+	if imgPreviewURL != "" {
+		extra["img_preview_url"] = imgPreviewURL
 	}
 
 	t := domain.StationTariff{

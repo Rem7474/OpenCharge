@@ -13,7 +13,9 @@ import {
   SUBSCRIPTION_PLAN,
 } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
+import { findFreshmileSiteMeta } from "../utils/freshmile.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
+import FreshmileAvailability from "./FreshmileAvailability.jsx";
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
 // mode, a breakdown of every cost component the tariff actually carries
@@ -227,6 +229,7 @@ export default function StationDetails({
   // identical across every connector of the same site.
   const firstDetail = details?.[0]?.station;
   const connectors = site.stations.map((s) => s.connectors?.[0]).filter(Boolean);
+  const { imgPreviewUrl, locationId } = findFreshmileSiteMeta(details);
 
   return (
     <div className="sidebar">
@@ -246,6 +249,19 @@ export default function StationDetails({
           <X size={15} strokeWidth={2.2} />
         </button>
       </div>
+
+      {imgPreviewUrl ? (
+        <div className="station-preview">
+          <img src={imgPreviewUrl} alt="" className="station-preview-image" loading="lazy" />
+          {locationId != null && <FreshmileAvailability locationId={locationId} />}
+        </div>
+      ) : (
+        locationId != null && (
+          <div className="station-preview station-preview--no-image">
+            <FreshmileAvailability locationId={locationId} />
+          </div>
+        )
+      )}
 
       <div className="station-meta-card">
         <div className="station-meta-row">

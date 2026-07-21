@@ -857,4 +857,19 @@ func TestNormalizeFreshmileRealPayloadMixedConnectorKinds(t *testing.T) {
 	if ef.EnergyPriceCentsPerKWh == nil || *ef.EnergyPriceCentsPerKWh != 51.0 {
 		t.Errorf("DOMESTIC_F (EF) price = %v, want 51.0 (0,51€/kWh)", ef.EnergyPriceCentsPerKWh)
 	}
+
+	// The location-level id/img_preview_url must land in every connector's
+	// own tariff Extra (see normalizeFreshmileTariffs' doc comment) — this
+	// site's three tariffs correlate to three different IRVE station rows
+	// (one per connector kind), so there's no single shared place to store
+	// them other than duplicating across each connector's own tariff.
+	for key, tf := range byKey {
+		if got := tf.Extra["freshmile_location_id"]; got != int64(829320) {
+			t.Errorf("%s: freshmile_location_id = %v (%T), want int64(829320)", key, got, got)
+		}
+		wantImg := "https://maps.googleapis.com/maps/api/streetview?size=640x640&location=45.9078,6.13666&key=AIzaSyBTzO4i4vUlvTN98zgI1ae8fMPVHXVZ-Uk"
+		if got := tf.Extra["img_preview_url"]; got != wantImg {
+			t.Errorf("%s: img_preview_url = %v, want %v", key, got, wantImg)
+		}
+	}
 }
