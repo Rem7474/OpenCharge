@@ -790,9 +790,46 @@ func freshmileConnectorType(standard string) string {
 		return domain.ConnectorTypeCHAdeMO
 	case "IEC_62196_T2":
 		return domain.ConnectorTypeT2
+	case "DOMESTIC_E", "DOMESTIC_F":
+		return domain.ConnectorTypeEF
 	default:
 		return standard
 	}
+}
+
+// freshmileTariffKind classifies a connector's Kind (ac/dc): the
+// connector's own standard is authoritative whenever
+// domain.TariffKindForConnector can classify it (CCS/CHAdeMO are always
+// dc; T2/EF are always ac), regardless of how fast the station's OTHER
+// connectors are — mirroring izivia.go's iziviaConnectorKind, which
+// already gets this right. Falls back to a power-based heuristic (this
+// connector's own power, then the station-level best_power category)
+// only when the standard itself doesn't map to a known IRVE connector
+// type.
+//
+// The previous implementation used ONLY that power-based heuristic,
+// ignoring the connector's own standard entirely: a station with one
+// high-power DC connector (best_power.category "fast"/"superfast",
+// reported for the WHOLE station, not per connector) silently forced
+// every OTHER connector there — a plain Type 2 AC socket, even a 4kW
+// domestic plug — to "dc" too. That didn't just mislabel that one
+// connector's own tariff row: since every dc-kind tariff for a source
+// station correlates to the SAME nearest-dc IRVE row (see
+// writeSourceStationChunk), the cheaper, wrongly-dc-tagged AC price
+// could outcompete the genuine (higher) DC price in that station's
+// displayed DC price aggregate — e.g. a T2 22kW socket's 0,51€ rate
+// showing up as if it were the CCS connector's real 0,70€ DC rate.
+func freshmileTariffKind(connectorType string, power *float64, bestPowerCategory string) string {
+	if kind := domain.TariffKindForConnector(connectorType); kind != "" {
+		return kind
+	}
+	if power != nil && *power >= 50 {
+		return domain.TariffKindDC
+	}
+	if bestPowerCategory == "fast" || bestPowerCategory == "superfast" {
+		return domain.TariffKindDC
+	}
+	return domain.TariffKindAC
 }
 
 // freshmileTariffCandidate pairs a normalized tariff with whether it came
@@ -896,10 +933,8 @@ func freshmileBetterCandidate(candidate, current freshmileTariffCandidate) bool 
 
 func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string) domain.StationTariff {
 	power, _ := floatValue(conn["power"])
-	kind := domain.TariffKindAC
-	if (power != nil && *power >= 50) || bestPowerCategory == "fast" || bestPowerCategory == "superfast" {
-		kind = domain.TariffKindDC
-	}
+	connectorType := freshmileConnectorType(stringValue(conn["standard"]))
+	kind := freshmileTariffKind(connectorType, power, bestPowerCategory)
 
 	extra := map[string]any{
 		"tariff": tariffRaw,
@@ -911,7 +946,7 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 		Kind:          kind,
 		Model:         "freshmile_kwh",
 		Currency:      firstNonEmpty(stringValue(tariffRaw["currency"]), "EUR"),
-		ConnectorType: freshmileConnectorType(stringValue(conn["standard"])),
+		ConnectorType: connectorType,
 		Extra:         extra,
 	}
 
