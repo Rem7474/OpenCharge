@@ -55,6 +55,29 @@ export default function FilterPanel({
 
   useDialogA11y(panelRef, true, onClose);
 
+  // In "recharge" mode, the price-range filter should let the user reason
+  // in the same unit the rest of that mode already uses (a total for their
+  // configured session), not force them to mentally convert to €/kWh — so
+  // this shows/accepts a total for effectiveChargeKWh kWh, converting to
+  // and from the €/kWh value that's actually stored/sent to the API
+  // (minPriceCentsPerKwh/maxPriceCentsPerKwh never change unit: the backend
+  // only ever filters by €/kWh). effectiveChargeKWh guards against
+  // chargeKWh being momentarily 0 (the kWh input allows clearing it),
+  // which would otherwise divide by zero.
+  const isRecharge = priceMode === PRICE_MODE_RECHARGE;
+  const effectiveChargeKWh = chargeKWh > 0 ? chargeKWh : 1;
+  const centsPerKwhToDisplay = (cents) => {
+    if (cents == null) return "";
+    const euros = isRecharge ? (cents / 100) * effectiveChargeKWh : cents / 100;
+    return euros;
+  };
+  const displayToCentsPerKwh = (value) => {
+    if (value === "") return null;
+    const euros = Number(value);
+    const centsPerKwh = isRecharge ? (euros / effectiveChargeKWh) * 100 : euros * 100;
+    return Math.round(centsPerKwh);
+  };
+
   return (
     <div className="filter-panel" role="dialog" aria-modal="true" aria-label="Filtrer par" ref={panelRef}>
       <div className="filter-panel-header">
@@ -135,18 +158,18 @@ export default function FilterPanel({
           )}
 
           <div className="filter-price-range">
-            <span className="filter-price-range-label">Fourchette de prix (€/kWh)</span>
+            <span className="filter-price-range-label">
+              Fourchette de prix ({isRecharge ? `total pour ${effectiveChargeKWh} kWh` : "€/kWh"})
+            </span>
             <div className="filter-price-range-inputs">
               <input
                 type="number"
                 min={0}
                 step={0.01}
                 placeholder="Min"
-                aria-label="Prix minimum en €/kWh"
-                value={minPriceCentsPerKwh != null ? minPriceCentsPerKwh / 100 : ""}
-                onChange={(e) =>
-                  onChangeMinPriceCentsPerKwh(e.target.value === "" ? null : Math.round(Number(e.target.value) * 100))
-                }
+                aria-label={isRecharge ? "Prix minimum pour la recharge" : "Prix minimum en €/kWh"}
+                value={centsPerKwhToDisplay(minPriceCentsPerKwh)}
+                onChange={(e) => onChangeMinPriceCentsPerKwh(displayToCentsPerKwh(e.target.value))}
               />
               <span>–</span>
               <input
@@ -154,11 +177,9 @@ export default function FilterPanel({
                 min={0}
                 step={0.01}
                 placeholder="Max"
-                aria-label="Prix maximum en €/kWh"
-                value={maxPriceCentsPerKwh != null ? maxPriceCentsPerKwh / 100 : ""}
-                onChange={(e) =>
-                  onChangeMaxPriceCentsPerKwh(e.target.value === "" ? null : Math.round(Number(e.target.value) * 100))
-                }
+                aria-label={isRecharge ? "Prix maximum pour la recharge" : "Prix maximum en €/kWh"}
+                value={centsPerKwhToDisplay(maxPriceCentsPerKwh)}
+                onChange={(e) => onChangeMaxPriceCentsPerKwh(displayToCentsPerKwh(e.target.value))}
               />
             </div>
           </div>
