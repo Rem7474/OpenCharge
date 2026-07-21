@@ -63,8 +63,13 @@ type TeslaIngester struct {
 	// Failures, when set, records every supercharger whose detail fetch
 	// failed for good so a later -retry-failed pass can replay just
 	// those — see FailureLog.
-	Failures      *FailureLog
-	detailsURLFmt string // get-charger-details endpoint, derived from URL's host
+	Failures *FailureLog
+	// IdleTimeout bounds how long Run/RetryFailed goes without a single
+	// successful request before giving up on the whole run — see
+	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
+	IdleTimeout   time.Duration
+	idle          *idleWatchdog // set by Run/RetryFailed, pinged after fetchViaChrome succeeds
+	detailsURLFmt string        // get-charger-details endpoint, derived from URL's host
 }
 
 func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, teslaURL string, cfg TeslaConfig) *TeslaIngester {
@@ -79,8 +84,18 @@ func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStati
 		URL:              teslaURL,
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
+		IdleTimeout:      DefaultIdleTimeout,
 		detailsURLFmt:    teslaDetailsURLFmtFor(teslaURL),
 	}
+}
+
+// startIdleWatchdog wraps ctx with this ingester's idle watchdog (see
+// idleWatchdog) and records it on ing.idle so successful fetches can Ping
+// it. The returned cancel must be deferred immediately by the caller.
+func (ing *TeslaIngester) startIdleWatchdog(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel, watchdog := startIdleWatchdog(ctx, ing.IdleTimeout)
+	ing.idle = watchdog
+	return ctx, cancel
 }
 
 // teslaDetailsURLFmtFor derives the get-charger-details endpoint from the
@@ -109,6 +124,8 @@ func teslaDetailsURLFmtFor(locationsURL string) string {
 // connections as the concurrency unit.
 func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 	runStart := time.Now()
 
 	allocCtx, cancelAlloc := ing.newChromeAllocator(ctx)
@@ -154,6 +171,8 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 // stations legitimately go un-refreshed.
 func (ing *TeslaIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 
 	var slugs []string
 	seen := map[string]struct{}{}
@@ -271,7 +290,7 @@ func (ing *TeslaIngester) processSlugs(ctx, allocCtx context.Context, slugs []st
 		select {
 		case slugCh <- slug:
 		case <-ctx.Done():
-			firstErr = ctx.Err()
+			firstErr = context.Cause(ctx)
 		}
 	}
 	close(slugCh)
@@ -284,8 +303,10 @@ func (ing *TeslaIngester) processSlugs(ctx, allocCtx context.Context, slugs []st
 	// write but before the caller's sweep decision must surface as an
 	// error, so a truncated run is never mistaken for a fully successful
 	// one (which would sweep stations the run never got to visit).
+	// context.Cause (not plain ctx.Err()) so the caller sees *why* — e.g.
+	// "no successful request in the last 5m0s..." — see idleWatchdog.
 	if firstErr == nil {
-		firstErr = ctx.Err()
+		firstErr = context.Cause(ctx)
 	}
 	return result.processed, firstErr
 }
@@ -333,6 +354,7 @@ func (ing *TeslaIngester) fetchAndNormalizeSupercharger(allocCtx context.Context
 	if err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("fetch charger details: %w", err)
 	}
+	ing.idle.Ping()
 
 	var envelope struct {
 		Data struct {
@@ -360,6 +382,7 @@ func (ing *TeslaIngester) fetchLocations(allocCtx context.Context) ([]map[string
 	if err != nil {
 		return nil, fmt.Errorf("download tesla locations: %w", err)
 	}
+	ing.idle.Ping()
 
 	var envelope struct {
 		Data struct {

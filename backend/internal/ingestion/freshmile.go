@@ -124,7 +124,12 @@ type FreshmileIngester struct {
 	// Failures, when set, records every request that failed for good
 	// (location detail fetch, map-locations tile scan) so a later
 	// -retry-failed pass can replay just those — see FailureLog.
-	Failures     *FailureLog
+	Failures *FailureLog
+	// IdleTimeout bounds how long Run/RetryFailed goes without a single
+	// successful request before giving up on the whole run — see
+	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
+	IdleTimeout  time.Duration
+	idle         *idleWatchdog // set by Run/RetryFailed, read by doGet
 	client       *http.Client
 	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
@@ -147,9 +152,19 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 		BaseURL:          baseURL,
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
+		IdleTimeout:      DefaultIdleTimeout,
 		client:           &http.Client{Timeout: 60 * time.Second, Transport: transport},
 		retryBackoff:     2 * time.Second,
 	}
+}
+
+// startIdleWatchdog wraps ctx with this ingester's idle watchdog (see
+// idleWatchdog) and records it on ing.idle so doGet can Ping it. The
+// returned cancel must be deferred immediately by the caller.
+func (ing *FreshmileIngester) startIdleWatchdog(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel, watchdog := startIdleWatchdog(ctx, ing.IdleTimeout)
+	ing.idle = watchdog
+	return ctx, cancel
 }
 
 // Run discovers Freshmile locations (recursively resolving map clusters
@@ -164,6 +179,8 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 	runStart := time.Now()
 
 	processed, err := ing.runPipeline(ctx, ing.scanLocationIDs)
@@ -193,6 +210,8 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 // subset, so most known locations legitimately go un-refreshed.
 func (ing *FreshmileIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 
 	var ids []int
 	var tiles []freshmileBBox
@@ -357,16 +376,19 @@ func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx con
 	scanWG.Wait()
 	workerWG.Wait()
 
-	// A run cut short by ctx (the CLI's -timeout, a SIGINT) can still end
-	// with a nil write error: flushes are deliberately decoupled from ctx
-	// (see writeResults), so the last collected batch commits fine and the
-	// pipeline just drains early. Without surfacing ctx.Err() here, such a
-	// truncated run looked fully successful to Run(), which then attempted
-	// the stale-data sweep with an already-expired ctx — the sweep query's
-	// own "context deadline exceeded" failure was the only thing that
-	// stopped it from wiping every location the run never got to visit.
+	// A run cut short by ctx (a SIGINT, or the idle watchdog giving up —
+	// see idleWatchdog) can still end with a nil write error: flushes are
+	// deliberately decoupled from ctx (see writeResults), so the last
+	// collected batch commits fine and the pipeline just drains early.
+	// Without surfacing this here, such a truncated run looked fully
+	// successful to Run(), which then attempted the stale-data sweep with
+	// an already-expired ctx — the sweep query's own "context deadline
+	// exceeded" failure was the only thing that stopped it from wiping
+	// every location the run never got to visit. context.Cause (not plain
+	// ctx.Err()) so the caller sees *why* — e.g. "no successful request in
+	// the last 5m0s..." — rather than the generic "context canceled".
 	if err == nil {
-		err = ctx.Err()
+		err = context.Cause(ctx)
 	}
 	return processed, err
 }
@@ -386,7 +408,8 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 		// Always decoupled from ctx (context.WithoutCancel), not just once
 		// ctx has already ended: this batch is fully collected in memory
 		// by this point, so once we've committed to writing it, a SIGINT
-		// or -timeout landing mid-query shouldn't be able to abort it —
+		// or the idle watchdog giving up landing mid-query shouldn't be
+		// able to abort it —
 		// checking ctx.Err() only at the top of flush() left a race where
 		// cancellation arriving after that check but before the query
 		// finished still aborted an in-progress write
@@ -752,6 +775,7 @@ func (ing *FreshmileIngester) doGet(ctx context.Context, url string, sem chan st
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("freshmile read body from %s: %w", url, err)
 	}
+	ing.idle.Ping()
 	return body, resp.StatusCode, nil
 }
 

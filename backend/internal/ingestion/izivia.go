@@ -79,7 +79,12 @@ type IziviaIngester struct {
 	// Failures, when set, records every request that failed for good
 	// (station detail fetch, marker square scan) so a later
 	// -retry-failed pass can replay just those — see FailureLog.
-	Failures     *FailureLog
+	Failures *FailureLog
+	// IdleTimeout bounds how long Run/RetryFailed goes without a single
+	// successful request before giving up on the whole run — see
+	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
+	IdleTimeout  time.Duration
+	idle         *idleWatchdog // set by Run/RetryFailed, read by doRequest
 	client       *http.Client
 	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
@@ -96,9 +101,19 @@ func NewIziviaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStat
 		Links:            links,
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
+		IdleTimeout:      DefaultIdleTimeout,
 		client:           newIziviaHTTPClient(workers),
 		retryBackoff:     2 * time.Second,
 	}
+}
+
+// startIdleWatchdog wraps ctx with this ingester's idle watchdog (see
+// idleWatchdog) and records it on ing.idle so doRequest can Ping it. The
+// returned cancel must be deferred immediately by the caller.
+func (ing *IziviaIngester) startIdleWatchdog(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel, watchdog := startIdleWatchdog(ctx, ing.IdleTimeout)
+	ing.idle = watchdog
+	return ctx, cancel
 }
 
 // iziviaMaxRetries is how many times a transient failure (network error,
@@ -120,6 +135,8 @@ const iziviaMaxRetries = 5
 // pattern as Electra, instead of one uncommitted round trip per marker.
 func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 	runStart := time.Now()
 
 	markers, err := ing.fetchMarkers(ctx)
@@ -158,6 +175,8 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 // subset, so most known stations legitimately go un-refreshed.
 func (ing *IziviaIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 
 	var markers []map[string]any
 	seen := map[string]struct{}{}
@@ -299,7 +318,10 @@ feedLoop:
 	close(markerCh)
 
 	result := <-writeDone
-	firstErr := ctx.Err()
+	// context.Cause (not plain ctx.Err()) so a run the idle watchdog gave
+	// up on reports *why* ("no successful request in the last 5m0s...")
+	// rather than the generic "context canceled" — see idleWatchdog.
+	firstErr := context.Cause(ctx)
 	if firstErr == nil {
 		firstErr = result.err
 	}
@@ -318,9 +340,9 @@ func (ing *IziviaIngester) writeResults(ctx context.Context, resultsCh <-chan no
 		}
 		// Decoupled from ctx (context.WithoutCancel), same as Freshmile's
 		// writeResults: this batch is already fully collected in memory by
-		// this point, so once we've committed to writing it, the run's own
-		// -timeout or a SIGINT landing mid-query shouldn't be able to abort
-		// it. Without this, a deadline expiring right at (or just before) a
+		// this point, so once we've committed to writing it, a SIGINT or the
+		// idle watchdog giving up landing mid-query shouldn't be able to
+		// abort it. Without this, a deadline expiring right at (or just before) a
 		// flush silently drops that whole batch — already-fetched stations
 		// that never make it to the database — instead of just ending the
 		// run one batch earlier.
@@ -660,15 +682,16 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 			squares = append(squares, iziviaSquare{CenterLng: lng, CenterLat: lat, Zoom: zoom})
 		}
 	}
-	// The whole run has a hard overall timeout (see cmd/opencharge-ingest's
-	// -timeout), and squares used to always be fed to workers in this same
-	// fixed south-to-north, west-to-east order every run. A run that's
-	// chronically running behind (a slow API, lots of retries) always gets
-	// cut off at the same tail end of that fixed list — i.e. it's always
+	// A run can still end early (Ctrl+C, `docker stop`, or the idle
+	// watchdog giving up after a stretch of nothing but failures — see
+	// idleWatchdog), and squares used to always be fed to workers in this
+	// same fixed south-to-north, west-to-east order every run. A run that's
+	// chronically running behind (a slow API, lots of retries) always got
+	// cut off at the same tail end of that fixed list — i.e. it was always
 	// the same geographic region (the far north of France, last in this
-	// order) that goes stale, run after run, rather than a timeout costing
-	// a different, rotating slice of coverage each time. Shuffling once per
-	// run means a recurring timeout still costs roughly the same *amount*
+	// order) that went stale, run after run, rather than each early end
+	// costing a different, rotating slice of coverage. Shuffling once per
+	// run means a recurring early end still costs roughly the same *amount*
 	// of coverage, but spreads *which* region gets missed across runs
 	// instead of permanently starving one.
 	rand.Shuffle(len(squares), func(i, j int) { squares[i], squares[j] = squares[j], squares[i] })
@@ -856,6 +879,7 @@ func (ing *IziviaIngester) doRequest(ctx context.Context, method, url string, bo
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("izivia read body from %s: %w", url, err)
 	}
+	ing.idle.Ping()
 	return respBody, resp.StatusCode, nil
 }
 

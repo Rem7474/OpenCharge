@@ -122,8 +122,29 @@ go run ./cmd/opencharge-ingest -source all        # les onze, dans cet ordre
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 `-electra-url`, `-tesla-url`, `-freshmile-url`, `-chargenow-url`,
-`-link-max-distance-m`, `-failed-dir` (ou `INGEST_FAILED_DIR`),
-`-retry-failed`.
+`-link-max-distance-m`, `-idle-timeout`, `-failed-dir` (ou
+`INGEST_FAILED_DIR`), `-retry-failed`.
+
+### Arrêt automatique en cas de blocage (`-idle-timeout`)
+
+Izivia, Tesla, Freshmile et ChargeNow n'ont **pas** de timeout global fixe :
+scanner toute la France peut légitimement prendre plus d'une heure tant que
+le run progresse (Freshmile seul traite des dizaines de milliers
+d'emplacements par run), donc couper après une durée fixe finissait soit
+par interrompre un run sain, soit imposait une limite si généreuse qu'elle
+ne détectait jamais une source réellement en panne.
+
+À la place, `-idle-timeout` (défaut 5 min) mesure le temps écoulé depuis la
+**dernière requête réussie**, tous types confondus (scan de tuile/square,
+détail de station, lot de prix...) : tant qu'au moins une requête aboutit
+dans cette fenêtre, le run continue sans limite de durée globale. Si plus
+aucune requête n'aboutit pendant `-idle-timeout` (ex. l'API de la source
+tombe en panne en plein run), le run s'arrête avec un message explicite
+(`no successful request in the last 5m0s, aborting run`) plutôt que de
+continuer à retenter indéfiniment. Comme pour un Ctrl+C ou un `docker
+stop`, ce qui a déjà été écrit en base reste acquis, et aucun sweep de
+données périmées n'est tenté sur un run interrompu de la sorte (voir plus
+bas). `-idle-timeout 0` désactive complètement ce mécanisme.
 
 ### Rejouer les URLs en échec
 
@@ -197,9 +218,10 @@ récursive des clusters) est parallélisé sur 16 requêtes concurrentes, et
 chaque emplacement découvert est immédiatement envoyé aux workers de
 détail (8 par défaut, `FreshmileConfig.Workers`) puis écrit en base par
 paquets de 200 au fur et à mesure — sans attendre la fin du scan complet.
-Un arrêt en cours de route (Ctrl+C, `docker stop`, ou le flag `-timeout`)
-n'efface donc pas le travail déjà fait : ce qui a été récupéré avant
-l'arrêt reste écrit en base, et le run suivant repart pour compléter.
+Un arrêt en cours de route (Ctrl+C, `docker stop`, ou `-idle-timeout` qui
+donne l'abandon faute de requête réussie — voir plus haut) n'efface donc
+pas le travail déjà fait : ce qui a été récupéré avant l'arrêt reste écrit
+en base, et le run suivant repart pour compléter.
 
 **Tesla nécessite Chromium — en mode "headed", pas headless.**
 `tesla.com/api/findus/*` est protégé par un bot-mitigation (Akamai) qui

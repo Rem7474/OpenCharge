@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"opencharge/internal/ingestion"
 	"opencharge/internal/repository"
@@ -26,7 +25,7 @@ func main() {
 		freshmileURL = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
 		chargenowURL = flag.String("chargenow-url", ingestion.DefaultChargenowBaseURL, "ChargeNow map API base URL")
 		linkMaxM     = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
-		timeout      = flag.Duration("timeout", 30*time.Minute, "overall timeout for the ingestion run")
+		idleTimeout  = flag.Duration("idle-timeout", ingestion.DefaultIdleTimeout, "for izivia/tesla/freshmile/chargenow: abort the run if it goes this long without a single successful request (0 disables it) — unlike a flat overall timeout, this doesn't cut off a run that's still making progress")
 		failedDir    = flag.String("failed-dir", getEnv("INGEST_FAILED_DIR", "ingest-failures"), "directory where each source saves its failed URLs as <source>.json, for a later -retry-failed pass")
 		retryFailed  = flag.Bool("retry-failed", false, "instead of a full scan, replay only the URLs recorded as failed in -failed-dir by a previous run (izivia, tesla, freshmile, chargenow)")
 	)
@@ -43,8 +42,6 @@ func main() {
 	// as soon as ctx is done rather than only at the very end.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
-	defer cancel()
 
 	pool, err := repository.Open(ctx, *dsn)
 	if err != nil {
@@ -118,6 +115,7 @@ func main() {
 	runIzivia := func() {
 		ingester := ingestion.NewIziviaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, ingestion.DefaultIziviaConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
+		ingester.IdleTimeout = *idleTimeout
 		ingester.Failures = ingestion.NewFailureLog(failureLogPath("izivia"), "izivia")
 		if *retryFailed {
 			failures, ok := loadFailures("izivia")
@@ -141,6 +139,7 @@ func main() {
 		ingester := ingestion.NewTeslaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *teslaURL, ingestion.DefaultTeslaConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
 		ingester.ChromeExecPath = *teslaChrome
+		ingester.IdleTimeout = *idleTimeout
 		ingester.Failures = ingestion.NewFailureLog(failureLogPath("tesla"), "tesla")
 		if *retryFailed {
 			failures, ok := loadFailures("tesla")
@@ -163,6 +162,7 @@ func main() {
 	runFreshmile := func() {
 		ingester := ingestion.NewFreshmileIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *freshmileURL, ingestion.DefaultFreshmileConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
+		ingester.IdleTimeout = *idleTimeout
 		ingester.Failures = ingestion.NewFailureLog(failureLogPath("freshmile"), "freshmile")
 		if *retryFailed {
 			failures, ok := loadFailures("freshmile")
@@ -211,6 +211,7 @@ func main() {
 	runChargenow := func() {
 		ingester := ingestion.NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *chargenowURL, ingestion.DefaultChargenowConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
+		ingester.IdleTimeout = *idleTimeout
 		ingester.Failures = ingestion.NewFailureLog(failureLogPath("chargenow"), "chargenow")
 		if *retryFailed {
 			failures, ok := loadFailures("chargenow")

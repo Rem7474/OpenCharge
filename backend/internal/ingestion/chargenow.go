@@ -99,7 +99,12 @@ type ChargenowIngester struct {
 	// (discovery query for a bbox, price batch — recorded per affected
 	// pool) so a later -retry-failed pass can replay just those — see
 	// FailureLog.
-	Failures     *FailureLog
+	Failures *FailureLog
+	// IdleTimeout bounds how long Run/RetryFailed goes without a single
+	// successful request before giving up on the whole run — see
+	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
+	IdleTimeout  time.Duration
+	idle         *idleWatchdog // set by Run/RetryFailed, read by doRequest
 	client       *http.Client
 	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
@@ -121,9 +126,19 @@ func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 	return &ChargenowIngester{
 		Pool: pool, SourceStations: sourceStations, Tariffs: tariffs, Links: links,
 		BaseURL: baseURL, Config: cfg, MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
+		IdleTimeout:  DefaultIdleTimeout,
 		client:       &http.Client{Timeout: 20 * time.Second, Transport: transport},
 		retryBackoff: 2 * time.Second,
 	}
+}
+
+// startIdleWatchdog wraps ctx with this ingester's idle watchdog (see
+// idleWatchdog) and records it on ing.idle so doRequest can Ping it. The
+// returned cancel must be deferred immediately by the caller.
+func (ing *ChargenowIngester) startIdleWatchdog(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel, watchdog := startIdleWatchdog(ctx, ing.IdleTimeout)
+	ing.idle = watchdog
+	return ctx, cancel
 }
 
 // Run scans ChargeNow's map for pools (physical charging locations)
@@ -139,6 +154,8 @@ func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // depends on the correlation, not just the final station_links row.
 func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 	runStart := time.Now()
 
 	pools, err := ing.scanPools(ctx)
@@ -173,6 +190,8 @@ func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 // legitimately go un-refreshed.
 func (ing *ChargenowIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
 	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 
 	var bboxes []chargenowBBox
 	poolsByID := map[string]chargenowPool{}
@@ -379,9 +398,11 @@ func (ing *ChargenowIngester) processPools(ctx context.Context, pools []chargeno
 	}
 	// Same guard as freshmile's runPipeline: price batches that failed on
 	// a mid-run ctx expiry are only logged and skipped above, so without
-	// surfacing ctx.Err() a truncated run could look fully successful to
-	// Run(), which would then sweep stations this run never re-priced.
-	if err := ctx.Err(); err != nil {
+	// surfacing this a truncated run could look fully successful to Run(),
+	// which would then sweep stations this run never re-priced.
+	// context.Cause (not plain ctx.Err()) so the caller sees *why* — e.g.
+	// "no successful request in the last 5m0s..." — see idleWatchdog.
+	if err := context.Cause(ctx); err != nil {
 		return processed, err
 	}
 	return processed, nil
@@ -728,5 +749,6 @@ func (ing *ChargenowIngester) doRequest(ctx context.Context, url, restAPIPath st
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("chargenow read body from %s: %w", url, err)
 	}
+	ing.idle.Ping()
 	return respBody, resp.StatusCode, nil
 }
