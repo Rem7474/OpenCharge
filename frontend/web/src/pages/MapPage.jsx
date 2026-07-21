@@ -43,7 +43,9 @@ const DEFAULT_FILTERS = {
 };
 
 export default function MapPage() {
-  const [selectedStationId, setSelectedStationId] = useState(null);
+  // The site (group of same-location connectors) whose detail card is open
+  // — see StationMarkers/StationDetails and utils/stationGrouping.js.
+  const [selectedSite, setSelectedSite] = useState(null);
   const [filters, setFilters] = useState(() => readStoredFilters() ?? DEFAULT_FILTERS);
   // Onboarding is shown automatically only the first time the app is
   // opened (nothing persisted yet) — every later visit goes straight to
@@ -157,7 +159,7 @@ export default function MapPage() {
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
             <StationMarkers
-              onSelect={setSelectedStationId}
+              onSelect={setSelectedSite}
               selectedSources={filters.sources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}
@@ -172,10 +174,10 @@ export default function MapPage() {
             <GeolocateControl />
           </MapContainer>
         </div>
-        {selectedStationId && (
+        {selectedSite && (
           <StationDetails
-            stationId={selectedStationId}
-            onClose={() => setSelectedStationId(null)}
+            site={selectedSite}
+            onClose={() => setSelectedSite(null)}
             selectedSources={filters.sources}
             priceMode={priceMode}
             chargeKWh={chargeKWh}

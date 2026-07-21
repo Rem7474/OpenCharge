@@ -123,6 +123,29 @@ export function pickPriceCentsPerKWh(pricingSummary, connectorType) {
  * regardless of whether the price is shown as €/kWh or as a total for a
  * chosen session size.
  */
+/**
+ * A backend "station" is really a single connector (point of charge): a
+ * physical site with several connectors comes back as several same-location
+ * rows (see backend/internal/domain/station.go's IRVEIDStation vs
+ * IRVEIDPDC). Grouped into one site for display (see
+ * utils/stationGrouping.js), the site's map marker shows whichever
+ * connector is cheapest — same logic as pickPriceCentsPerKWh per connector,
+ * take the overall minimum — rather than a marker per connector stacked on
+ * the exact same spot. hasSelection mirrors the same flag callers already
+ * pass to pickPriceCentsPerKWh: which of pricingSummary/
+ * selectedSourcesPricing to read from each connector.
+ */
+export function cheapestPriceAcrossStations(stations, hasSelection) {
+  let best = null;
+  for (const station of stations) {
+    const pricing = hasSelection ? station.selectedSourcesPricing : station.pricingSummary;
+    const connectorType = station.connectors?.[0]?.kind;
+    const price = pickPriceCentsPerKWh(pricing, connectorType);
+    if (price != null && (best == null || price < best)) best = price;
+  }
+  return best;
+}
+
 export function priceTier(priceCentsPerKWh) {
   if (priceCentsPerKWh == null) return null;
   if (priceCentsPerKWh < 28) return "low";

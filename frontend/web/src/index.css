@@ -797,6 +797,43 @@ a {
   margin-top: 2px;
 }
 
+.connector-price-section {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.connector-price-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-muted);
+}
+
+.connector-price-section .station-price-block,
+.connector-price-section .connector-all-tariffs .tariff-row {
+  margin-bottom: 8px;
+}
+
+.connector-all-tariffs {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.connector-all-tariffs summary {
+  cursor: pointer;
+  color: var(--color-muted);
+  font-weight: 600;
+}
+
+.connector-all-tariffs .tariff-row {
+  margin-top: 8px;
+}
+
 .tariff-row {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
