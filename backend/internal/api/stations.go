@@ -23,7 +23,7 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 	return &StationsHandler{Stations: stations, Tariffs: tariffs}
 }
 
-// ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&connectorType=&minPowerKw=&minPriceCentsPerKwh=&maxPriceCentsPerKwh=&excludeSubscriptionPlans=&limit=&offset=
+// ListStations handles GET /stations?bbox=minLng,minLat,maxLng,maxLat&operator=&hasTariffs=&source=&connectorType=&minPowerKw=&minPriceCentsPerKwh=&maxPriceCentsPerKwh=&chargeKWh=&chargeMinutes=&excludeSubscriptionPlans=&limit=&offset=
 // It never loads the whole dataset: bbox is mandatory, and the map/frontend
 // is expected to re-query on every viewport change.
 //
@@ -38,6 +38,12 @@ func NewStationsHandler(stations *repository.StationRepository, tariffs *reposit
 // domain.TariffPlanSubscription plan from both pricingSummary and
 // selectedSourcesPricing, so the price shown for a station never assumes a
 // paid subscription the caller may not have.
+//
+// chargeKWh/chargeMinutes, when given alongside min/maxPriceCentsPerKwh,
+// switch the price-range filter to the estimated TOTAL cost (in cents) of a
+// session delivering chargeKWh over chargeMinutes (energy + any per-minute
+// rate + any flat session fee) instead of a plain €/kWh rate — see
+// domain.StationFilter.MinPriceCentsPerKWh's doc comment.
 func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -91,6 +97,16 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("maxPriceCentsPerKwh"); v != "" {
 		if p, err := strconv.ParseFloat(v, 64); err == nil {
 			filter.MaxPriceCentsPerKWh = &p
+		}
+	}
+	if v := q.Get("chargeKWh"); v != "" {
+		if p, err := strconv.ParseFloat(v, 64); err == nil {
+			filter.ChargeKWh = &p
+		}
+	}
+	if v := q.Get("chargeMinutes"); v != "" {
+		if p, err := strconv.ParseFloat(v, 64); err == nil {
+			filter.ChargeMinutes = &p
 		}
 	}
 	if v := q.Get("excludeSubscriptionPlans"); v != "" {

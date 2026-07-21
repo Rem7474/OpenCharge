@@ -531,6 +531,67 @@ func TestStationRepository_ListByBBox_PriceRange(t *testing.T) {
 	}
 }
 
+// TestStationRepository_ListByBBox_PriceRangeTotal checks that, once
+// f.ChargeKWh is set, the price-range filter ranks stations by total session
+// cost (energy + time + flat fee) rather than the bare €/kWh rate — a
+// cheaper-looking rate can still be the pricier option once its per-minute
+// charge and session fee are added in.
+func TestStationRepository_ListByBBox_PriceRangeTotal(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	tariffRepo := NewTariffRepository(pool)
+
+	// FRTOTAL001: 20 cts/kWh, no time-based cost -> 10 kWh = 200 cts total.
+	// FRTOTAL002: 10 cts/kWh (cheaper rate) but 5 cts/min + 100 cts flat fee
+	// -> 10 kWh over 30 min = 100 + 150 + 100 = 350 cts total, so it must
+	// rank *behind* FRTOTAL001 once time is accounted for.
+	flatRate := testStation("FRTOTAL001", 45.90, 6.10)
+	timeBased := testStation("FRTOTAL002", 45.91, 6.11)
+
+	flatRateID, err := stationRepo.UpsertStation(ctx, flatRate)
+	if err != nil {
+		t.Fatalf("UpsertStation flatRate: %v", err)
+	}
+	timeBasedID, err := stationRepo.UpsertStation(ctx, timeBased)
+	if err != nil {
+		t.Fatalf("UpsertStation timeBased: %v", err)
+	}
+
+	flatRatePrice := 20.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: flatRateID, Source: "izivia", Kind: domain.TariffKindMixed, Model: "izivia_text",
+		Currency: "EUR", EnergyPriceCentsPerKWh: &flatRatePrice,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert flatRate: %v", err)
+	}
+
+	timeBasedPrice, sessionPricePerMin, sessionFee := 10.0, 5.0, 100.0
+	if err := tariffRepo.Upsert(ctx, domain.StationTariff{
+		StationID: timeBasedID, Source: "freshmile", Kind: domain.TariffKindMixed, Model: "freshmile_text",
+		Currency: "EUR", EnergyPriceCentsPerKWh: &timeBasedPrice,
+		SessionPriceCentsPerMin: &sessionPricePerMin, SessionFeeCents: &sessionFee,
+	}); err != nil {
+		t.Fatalf("Tariffs.Upsert timeBased: %v", err)
+	}
+
+	bbox := domain.StationFilter{MinLng: 6.0, MinLat: 45.8, MaxLng: 6.3, MaxLat: 46.0}
+	chargeKWh, chargeMinutes := 10.0, 30.0
+	bbox.ChargeKWh = &chargeKWh
+	bbox.ChargeMinutes = &chargeMinutes
+	minTotal, maxTotal := 190.0, 250.0
+	bbox.MinPriceCentsPerKWh = &minTotal
+	bbox.MaxPriceCentsPerKWh = &maxTotal
+
+	results, err := stationRepo.ListByBBox(ctx, bbox)
+	if err != nil {
+		t.Fatalf("ListByBBox price range total: %v", err)
+	}
+	if len(results) != 1 || results[0].Station.IRVEIDPDC != "FRTOTAL001" {
+		t.Fatalf("ListByBBox total range [190,250] = %+v, want only FRTOTAL001 (200 cts total)", results)
+	}
+}
+
 func TestStationRepository_ListByBBox_MixedKindFeedsBothACAndDC(t *testing.T) {
 	pool := setupTestPool(t)
 	ctx := context.Background()

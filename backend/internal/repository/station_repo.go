@@ -219,6 +219,50 @@ func stationSelectedPriceFragment(sourcesParamIdx int, exclude bool) string {
 	return stationBestPriceExprFor(acFragment, dcFragment)
 }
 
+// stationTotalCentsExpr estimates the total cost (in cents) of a session
+// delivering the caller's chosen kWh over the caller's chosen minutes, for a
+// single tariff row: energy price × kWh, plus any per-minute rate × minutes,
+// plus any flat one-time session fee. chargeKWhIdx/chargeMinutesIdx are the
+// positional $N args holding those two session parameters. Mirrors
+// utils/pricing.js#tariffCostBreakdown's total, so the price-range filter's
+// "recharge" mode matches what the frontend actually displays for a station.
+func stationTotalCentsExpr(chargeKWhIdx, chargeMinutesIdx int) string {
+	return fmt.Sprintf(
+		`(current_window_price(t.extra, t.energy_price_cents_per_kwh) * $%[1]d + COALESCE(t.session_price_cents_per_min, 0) * $%[2]d + COALESCE(t.session_fee_cents, 0))`,
+		chargeKWhIdx, chargeMinutesIdx,
+	)
+}
+
+// stationBestTotalFragment mirrors stationBestPriceFragment but ranks/filters
+// tariffs by stationTotalCentsExpr's total-for-this-session cost instead of
+// the bare €/kWh rate — used by ListByBBox's price-range filter in "recharge"
+// mode (f.ChargeKWh set) when no f.Sources selection is active.
+func stationBestTotalFragment(exclude bool, chargeKWhIdx, chargeMinutesIdx int) string {
+	excl := subscriptionExclusionSQL(exclude)
+	totalExpr := stationTotalCentsExpr(chargeKWhIdx, chargeMinutesIdx)
+	acFragment := fmt.Sprintf(`MIN(%s) FILTER (WHERE t.kind IN ('ac', 'mixed')%s)`, totalExpr, excl)
+	dcFragment := fmt.Sprintf(`MIN(%s) FILTER (WHERE t.kind IN ('dc', 'mixed')%s)`, totalExpr, excl)
+	return stationBestPriceExprFor(acFragment, dcFragment)
+}
+
+// stationSelectedTotalFragment mirrors stationSelectedPriceFragment but, like
+// stationBestTotalFragment, ranks/filters by total session cost instead of
+// the bare €/kWh rate — used by ListByBBox's price-range filter in "recharge"
+// mode when a sources selection is active.
+func stationSelectedTotalFragment(sourcesParamIdx int, exclude bool, chargeKWhIdx, chargeMinutesIdx int) string {
+	excl := subscriptionExclusionSQL(exclude)
+	totalExpr := stationTotalCentsExpr(chargeKWhIdx, chargeMinutesIdx)
+	acFragment := fmt.Sprintf(
+		`MIN(%[1]s) FILTER (WHERE t.kind IN ('ac', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[2]d::text[])%[3]s)`,
+		totalExpr, sourcesParamIdx, excl,
+	)
+	dcFragment := fmt.Sprintf(
+		`MIN(%[1]s) FILTER (WHERE t.kind IN ('dc', 'mixed') AND (t.source || ':' || t.plan) = ANY($%[2]d::text[])%[3]s)`,
+		totalExpr, sourcesParamIdx, excl,
+	)
+	return stationBestPriceExprFor(acFragment, dcFragment)
+}
+
 // BulkUpsertStations upserts a slice of IRVE stations in a single round trip
 // via a multi-row INSERT ... SELECT FROM unnest(...), the same bulk form as
 // SourceStationRepository.BulkUpsert / TariffRepository.BulkUpsert — instead
@@ -395,6 +439,26 @@ func (r *StationRepository) ListByBBox(ctx context.Context, f domain.StationFilt
 	priceFragment := stationBestPriceFragment(f.ExcludeSubscriptionPlans)
 	if len(f.Sources) > 0 {
 		priceFragment = stationSelectedPriceFragment(sourcesParamIdx, f.ExcludeSubscriptionPlans)
+	}
+
+	// When the caller supplied a session size (f.ChargeKWh), the price-range
+	// filter switches from a bare €/kWh rate to the total cost of that
+	// session — see domain.StationFilter.MinPriceCentsPerKWh's doc comment.
+	wantsPriceFilter := f.MinPriceCentsPerKWh != nil || f.MaxPriceCentsPerKWh != nil
+	if wantsPriceFilter && f.ChargeKWh != nil {
+		args = append(args, *f.ChargeKWh)
+		chargeKWhIdx := len(args)
+		chargeMinutes := 0.0
+		if f.ChargeMinutes != nil {
+			chargeMinutes = *f.ChargeMinutes
+		}
+		args = append(args, chargeMinutes)
+		chargeMinutesIdx := len(args)
+		if len(f.Sources) > 0 {
+			priceFragment = stationSelectedTotalFragment(sourcesParamIdx, f.ExcludeSubscriptionPlans, chargeKWhIdx, chargeMinutesIdx)
+		} else {
+			priceFragment = stationBestTotalFragment(f.ExcludeSubscriptionPlans, chargeKWhIdx, chargeMinutesIdx)
+		}
 	}
 
 	var having []string

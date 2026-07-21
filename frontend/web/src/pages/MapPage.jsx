@@ -66,6 +66,16 @@ export default function MapPage() {
     }));
   };
 
+  // Switching price mode also resets any active price-range filter: its
+  // unit/meaning changes with the mode (a plain €/kWh rate vs. a total for
+  // the configured session — see FilterPanel's label and the backend's
+  // chargeKWh/chargeMinutes params), so a bound set in one mode is
+  // meaningless carried over into the other.
+  const changePriceMode = (mode) => {
+    setPriceMode(mode);
+    setFilters((prev) => ({ ...prev, minPriceCentsPerKwh: null, maxPriceCentsPerKwh: null }));
+  };
+
   const setMinPowerKw = (minPowerKw) => setFilters((prev) => ({ ...prev, minPowerKw }));
   const setMinPriceCentsPerKwh = (minPriceCentsPerKwh) => setFilters((prev) => ({ ...prev, minPriceCentsPerKwh }));
   const setMaxPriceCentsPerKwh = (maxPriceCentsPerKwh) => setFilters((prev) => ({ ...prev, maxPriceCentsPerKwh }));
@@ -119,7 +129,7 @@ export default function MapPage() {
         onToggleSource={toggleSource}
         onSelectPlan={selectPlan}
         priceMode={priceMode}
-        onChangePriceMode={setPriceMode}
+        onChangePriceMode={changePriceMode}
         chargeKWh={chargeKWh}
         onChangeChargeKWh={setChargeKWh}
         chargeMinutes={chargeMinutes}
@@ -151,6 +161,7 @@ export default function MapPage() {
               selectedSources={filters.sources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}
+              chargeMinutes={chargeMinutes}
               showAllStations={filters.showAllStations}
               selectedConnectorTypes={filters.connectorTypes}
               minPowerKw={filters.minPowerKw}

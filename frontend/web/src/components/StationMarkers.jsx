@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { fetchStationsInBBox } from "../api/stations.js";
-import { pickPriceCentsPerKWh, formatPrice, priceTier, sourcePlanPairs } from "../utils/pricing.js";
+import { pickPriceCentsPerKWh, formatPrice, priceTier, sourcePlanPairs, PRICE_MODE_RECHARGE } from "../utils/pricing.js";
 import { friendlyFetchErrorMessage } from "../utils/format.js";
 
 const MIN_ZOOM_TO_LOAD = 10;
@@ -25,6 +25,7 @@ export default function StationMarkers({
   selectedSources,
   priceMode,
   chargeKWh,
+  chargeMinutes,
   showAllStations,
   selectedConnectorTypes,
   minPowerKw,
@@ -61,6 +62,11 @@ export default function StationMarkers({
       minPowerKw,
       minPriceCentsPerKwh,
       maxPriceCentsPerKwh,
+      // Only meaningful (and only sent) in "recharge" mode: that's the only
+      // time the price-range filter means "total for this session" rather
+      // than a plain €/kWh rate — see FilterPanel's price-range label.
+      chargeKWh: priceMode === PRICE_MODE_RECHARGE ? chargeKWh : undefined,
+      chargeMinutes: priceMode === PRICE_MODE_RECHARGE ? chargeMinutes : undefined,
       excludeSubscriptionPlans,
       signal: controller.signal,
     })
@@ -84,7 +90,18 @@ export default function StationMarkers({
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw, minPriceCentsPerKwh, maxPriceCentsPerKwh, excludeSubscriptionPlans]);
+  }, [
+    sourcesKey,
+    showAllStations,
+    connectorTypesKey,
+    minPowerKw,
+    minPriceCentsPerKwh,
+    maxPriceCentsPerKwh,
+    priceMode,
+    chargeKWh,
+    chargeMinutes,
+    excludeSubscriptionPlans,
+  ]);
 
   const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
   const isEmpty = !loading && !error && !belowMinZoom && stations.length === 0;

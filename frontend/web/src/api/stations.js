@@ -27,6 +27,11 @@ async function throwForStatus(res, what) {
  * both pricingSummary and selectedSourcesPricing server-side (see backend
  * GET /stations docs), so the price used for the map marker never assumes
  * a paid subscription.
+ *
+ * chargeKWh/chargeMinutes, when given alongside min/maxPriceCentsPerKwh,
+ * switch the price-range filter server-side to the total cost of a session
+ * of that size (energy + time + flat fee) instead of a plain €/kWh rate —
+ * see backend GET /stations docs.
  */
 export async function fetchStationsInBBox(
   bbox,
@@ -38,6 +43,8 @@ export async function fetchStationsInBBox(
     minPowerKw,
     minPriceCentsPerKwh,
     maxPriceCentsPerKwh,
+    chargeKWh,
+    chargeMinutes,
     excludeSubscriptionPlans,
     limit,
     signal,
@@ -52,6 +59,8 @@ export async function fetchStationsInBBox(
   if (minPowerKw != null) params.set("minPowerKw", String(minPowerKw));
   if (minPriceCentsPerKwh != null) params.set("minPriceCentsPerKwh", String(minPriceCentsPerKwh));
   if (maxPriceCentsPerKwh != null) params.set("maxPriceCentsPerKwh", String(maxPriceCentsPerKwh));
+  if (chargeKWh != null) params.set("chargeKWh", String(chargeKWh));
+  if (chargeMinutes != null) params.set("chargeMinutes", String(chargeMinutes));
   if (excludeSubscriptionPlans) params.set("excludeSubscriptionPlans", "true");
   params.set("limit", String(limit ?? 500));
 
