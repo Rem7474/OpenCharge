@@ -148,33 +148,35 @@ export default function FilterPanel({
             </div>
           )}
 
-          {priceMode === PRICE_MODE_RECHARGE && (
-            <details className="fuel-comparison-inputs">
-              <summary>Comparer avec un thermique</summary>
-              <label>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  step={0.5}
-                  value={evConsumptionKWhPer100Km}
-                  onChange={(e) => onChangeEvConsumptionKWhPer100Km(Number(e.target.value))}
-                />{" "}
-                kWh/100km (véhicule électrique)
-              </label>
-              <label>
-                <input
-                  type="number"
-                  min={1}
-                  max={30}
-                  step={0.1}
-                  value={thermalConsumptionLPer100Km}
-                  onChange={(e) => onChangeThermalConsumptionLPer100Km(Number(e.target.value))}
-                />{" "}
-                L/100km (équivalent essence)
-              </label>
-            </details>
-          )}
+          {/* Not gated on priceMode: the essence/électrique comparison
+              (see StationDetails.jsx's FuelComparison) works off the
+              tariff's own €/kWh rate directly, so it's just as meaningful
+              in "€/kWh" mode as in "recharge" mode. */}
+          <details className="fuel-comparison-inputs">
+            <summary>Comparer avec un thermique</summary>
+            <label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                step={0.5}
+                value={evConsumptionKWhPer100Km}
+                onChange={(e) => onChangeEvConsumptionKWhPer100Km(Number(e.target.value))}
+              />{" "}
+              kWh/100km (véhicule électrique)
+            </label>
+            <label>
+              <input
+                type="number"
+                min={1}
+                max={30}
+                step={0.1}
+                value={thermalConsumptionLPer100Km}
+                onChange={(e) => onChangeThermalConsumptionLPer100Km(Number(e.target.value))}
+              />{" "}
+              L/100km (équivalent essence)
+            </label>
+          </details>
 
           <div className="filter-price-range">
             <span className="filter-price-range-label">

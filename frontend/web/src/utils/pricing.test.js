@@ -9,7 +9,7 @@ import {
   cheapestPriceAcrossStations,
   priceTier,
   offPeakRecommendation,
-  thermalEquivalentCost,
+  fuelPriceComparison,
 } from "./pricing.js";
 import { groupStationsByLocation } from "./stationGrouping.js";
 
@@ -248,23 +248,60 @@ describe("offPeakRecommendation", () => {
   });
 });
 
-describe("thermalEquivalentCost", () => {
-  it("computes reachable distance and its thermal-fuel equivalent cost", () => {
-    const got = thermalEquivalentCost({
-      chargeKWh: 50,
+describe("fuelPriceComparison", () => {
+  // Regression numbers straight from a user-provided spreadsheet: 0,35
+  // €/kWh, 7 L/100km thermal, 1,90 €/L, at 15 kWh/100km (min) and 22
+  // kWh/100km (max) EV consumption.
+  it("matches the reference spreadsheet at the low end of EV consumption", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 35,
+      evConsumptionKWhPer100Km: 15,
+      thermalConsumptionLPer100Km: 7,
+      fuelPriceCentsPerLiter: 190,
+    });
+    expect(got.evCostCentsPer100Km).toBeCloseTo(525); // 5,25 €/100km
+    expect(got.thermalCostCentsPer100Km).toBeCloseTo(1330); // 13,3 €/100km
+    expect(got.savingsCentsPer100Km).toBeCloseTo(805); // 8,05 €/100km
+    expect(got.savingsPercent).toBeCloseTo(60.5, 0);
+  });
+
+  it("matches the reference spreadsheet at the high end of EV consumption", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 35,
+      evConsumptionKWhPer100Km: 22,
+      thermalConsumptionLPer100Km: 7,
+      fuelPriceCentsPerLiter: 190,
+    });
+    expect(got.evCostCentsPer100Km).toBeCloseTo(770); // 7,7 €/100km
+    expect(got.savingsCentsPer100Km).toBeCloseTo(560); // 5,6 €/100km
+    expect(got.savingsPercent).toBeCloseTo(42.1, 1);
+  });
+
+  it("derives the fuel price this electricity rate is equivalent to", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 35,
+      evConsumptionKWhPer100Km: 15,
+      thermalConsumptionLPer100Km: 7,
+      fuelPriceCentsPerLiter: 190,
+    });
+    // 5,25 €/100km / 7 L/100km = 0,75 €/L — independent of the real fuel price.
+    expect(got.equivalentFuelPriceCentsPerLiter).toBeCloseTo(75);
+  });
+
+  it("can report a negative saving for an unusually expensive tariff, rather than pretending it's a win", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 90,
       evConsumptionKWhPer100Km: 20,
       thermalConsumptionLPer100Km: 6,
       fuelPriceCentsPerLiter: 180,
     });
-    expect(got).not.toBeNull();
-    expect(got.km).toBe(250); // 50 kWh / (20 kWh/100km) * 100
-    expect(got.thermalCostCents).toBeCloseTo(2700); // 250km / 100 * 6L * 180cts
+    expect(got.savingsCentsPer100Km).toBeLessThan(0);
   });
 
   it("returns null when the fuel price hasn't loaded yet", () => {
     expect(
-      thermalEquivalentCost({
-        chargeKWh: 50,
+      fuelPriceComparison({
+        evPriceCentsPerKWh: 35,
         evConsumptionKWhPer100Km: 20,
         thermalConsumptionLPer100Km: 6,
         fuelPriceCentsPerLiter: null,
@@ -272,12 +309,12 @@ describe("thermalEquivalentCost", () => {
     ).toBeNull();
   });
 
-  it("returns null for a non-positive consumption or charge amount", () => {
+  it("returns null for a non-positive price or consumption", () => {
     expect(
-      thermalEquivalentCost({ chargeKWh: 0, evConsumptionKWhPer100Km: 20, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
+      fuelPriceComparison({ evPriceCentsPerKWh: 0, evConsumptionKWhPer100Km: 20, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
     ).toBeNull();
     expect(
-      thermalEquivalentCost({ chargeKWh: 50, evConsumptionKWhPer100Km: 0, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
+      fuelPriceComparison({ evPriceCentsPerKWh: 35, evConsumptionKWhPer100Km: 0, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
     ).toBeNull();
   });
 });

@@ -267,6 +267,62 @@ export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
   return `${(priceCentsPerKWh / 100).toFixed(2)} €/kWh`;
 }
 
+// Default assumptions for the essence/électrique cost comparison (see
+// fuelPriceComparison) — editable by the user (see FilterPanel), not
+// persisted across sessions: same treatment as chargeKWh/chargeMinutes.
+// Plausible round numbers for a typical compact EV/petrol car rather than a
+// real vehicle profile, which this app doesn't model.
+export const DEFAULT_EV_CONSUMPTION_KWH_PER_100KM = 17;
+export const DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM = 6.5;
+
+/**
+ * Compares a station's own €/kWh rate against an equivalent thermal
+ * (essence) car for the same distance — the essence/électrique argument
+ * shown in StationDetails. Works directly off the tariff's per-kWh rate
+ * (not a specific charge amount), so it's just as meaningful in "€/kWh"
+ * mode as in "recharge" mode — a rate comparison doesn't need a session
+ * size at all, unlike tariffCostBreakdown's totals.
+ *
+ * equivalentFuelPriceCentsPerLiter is the fuel price at which a thermal car
+ * would cost exactly the same per 100km as this electricity rate — useful
+ * on its own even before/regardless of a live fuel price ("this is like
+ * paying X €/L for petrol"). savingsCentsPer100Km/savingsPercent instead
+ * compare against the real fuelPriceCentsPerLiter (see
+ * hooks/useFuelPrice.js), and can come out negative for an unusually
+ * expensive tariff — callers should handle that case explicitly rather
+ * than assume electricity always wins.
+ *
+ * Returns null when any input is missing or non-positive — in particular
+ * before hooks/useFuelPrice.js has resolved a real fuel price.
+ */
+export function fuelPriceComparison({
+  evPriceCentsPerKWh,
+  evConsumptionKWhPer100Km,
+  thermalConsumptionLPer100Km,
+  fuelPriceCentsPerLiter,
+}) {
+  if (
+    !(evPriceCentsPerKWh > 0) ||
+    !(evConsumptionKWhPer100Km > 0) ||
+    !(thermalConsumptionLPer100Km > 0) ||
+    !(fuelPriceCentsPerLiter > 0)
+  ) {
+    return null;
+  }
+  const evCostCentsPer100Km = evPriceCentsPerKWh * evConsumptionKWhPer100Km;
+  const thermalCostCentsPer100Km = fuelPriceCentsPerLiter * thermalConsumptionLPer100Km;
+  const equivalentFuelPriceCentsPerLiter = evCostCentsPer100Km / thermalConsumptionLPer100Km;
+  const savingsCentsPer100Km = thermalCostCentsPer100Km - evCostCentsPer100Km;
+  const savingsPercent = (savingsCentsPer100Km / thermalCostCentsPer100Km) * 100;
+  return {
+    evCostCentsPer100Km,
+    thermalCostCentsPer100Km,
+    equivalentFuelPriceCentsPerLiter,
+    savingsCentsPer100Km,
+    savingsPercent,
+  };
+}
+
 /**
  * Break a tariff's estimated cost for a chargeKWh/chargeMinutes session
  * down into its known components — energy (€/kWh × kWh), time (a
@@ -277,45 +333,6 @@ export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
  * callers can render only the lines that apply; total is null only when
  * none of the three are known at all.
  */
-// Default assumptions for the essence/électrique cost comparison (see
-// thermalEquivalentCost) — editable by the user (see FilterPanel), not
-// persisted across sessions: same treatment as chargeKWh/chargeMinutes.
-// Plausible round numbers for a typical compact EV/petrol car rather than a
-// real vehicle profile, which this app doesn't model.
-export const DEFAULT_EV_CONSUMPTION_KWH_PER_100KM = 17;
-export const DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM = 6.5;
-
-/**
- * What the same chargeKWh of energy is worth in distance, and what
- * covering that same distance would cost in fuel — the "essence/électrique"
- * comparison shown alongside a recharge's cost (see StationDetails.jsx's
- * FuelComparison). Deliberately doesn't compare against a specific tariff's
- * price itself: callers already have that via tariffCostBreakdown and can
- * diff the two totals themselves.
- *
- * Returns null when any input is missing or non-positive — in particular
- * before hooks/useFuelPrice.js has resolved a real fuel price.
- */
-export function thermalEquivalentCost({
-  chargeKWh,
-  evConsumptionKWhPer100Km,
-  thermalConsumptionLPer100Km,
-  fuelPriceCentsPerLiter,
-}) {
-  if (
-    !(chargeKWh > 0) ||
-    !(evConsumptionKWhPer100Km > 0) ||
-    !(thermalConsumptionLPer100Km > 0) ||
-    !(fuelPriceCentsPerLiter > 0)
-  ) {
-    return null;
-  }
-  const km = (chargeKWh / evConsumptionKWhPer100Km) * 100;
-  const liters = (km / 100) * thermalConsumptionLPer100Km;
-  const thermalCostCents = liters * fuelPriceCentsPerLiter;
-  return { km, thermalCostCents };
-}
-
 export function tariffCostBreakdown(tariff, chargeKWh, chargeMinutes) {
   const energy = tariff.energy_price_cents_per_kwh != null ? (tariff.energy_price_cents_per_kwh / 100) * chargeKWh : null;
   const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * chargeMinutes : null;
