@@ -331,16 +331,22 @@ export function fuelPriceComparison({
 /**
  * Break a tariff's estimated cost for a chargeKWh/chargeMinutes session
  * down into its known components — energy (€/kWh × kWh), time (a
- * per-minute rate × minutes charging, e.g. Freshmile's "0,40 € par
+ * per-minute rate × billable minutes, e.g. Freshmile's "0,40 € par
  * minute"), and a flat session fee (a one-time amount just for starting,
  * e.g. Izivia's "2,3€ la session de charge") — plus their sum. Each
  * component is null when the tariff doesn't carry that kind of price, so
  * callers can render only the lines that apply; total is null only when
  * none of the three are known at all.
+ *
+ * Billable minutes excludes tariff.session_price_grace_minutes when set
+ * (e.g. Izivia's "surcoût de 0,30€/min après 1h de charge" — the
+ * per-minute rate only applies beyond that threshold, so a 45-minute
+ * charge under a 60-minute grace period owes nothing for time at all).
  */
 export function tariffCostBreakdown(tariff, chargeKWh, chargeMinutes) {
   const energy = tariff.energy_price_cents_per_kwh != null ? (tariff.energy_price_cents_per_kwh / 100) * chargeKWh : null;
-  const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * chargeMinutes : null;
+  const billableMinutes = Math.max(chargeMinutes - (tariff.session_price_grace_minutes ?? 0), 0);
+  const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * billableMinutes : null;
   const fee = tariff.session_fee_cents != null ? tariff.session_fee_cents / 100 : null;
   if (energy == null && time == null && fee == null) {
     return { energy, time, fee, total: null };

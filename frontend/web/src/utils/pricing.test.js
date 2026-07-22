@@ -10,6 +10,7 @@ import {
   priceTier,
   offPeakRecommendation,
   fuelPriceComparison,
+  tariffCostBreakdown,
 } from "./pricing.js";
 import { groupStationsByLocation } from "./stationGrouping.js";
 
@@ -316,6 +317,37 @@ describe("fuelPriceComparison", () => {
     expect(
       fuelPriceComparison({ evPriceCentsPerKWh: 35, evConsumptionKWhPer100Km: 0, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
     ).toBeNull();
+  });
+});
+
+describe("tariffCostBreakdown", () => {
+  // Regression for the real Izivia wording: "Surcoût de 0,30€/min après 1h
+  // de charge" — the per-minute rate must not apply to the first 60
+  // minutes at all.
+  function graceTariff(overrides) {
+    return tariff({
+      energy_price_cents_per_kwh: 35,
+      session_price_cents_per_min: 30,
+      session_price_grace_minutes: 60,
+      ...overrides,
+    });
+  }
+
+  it("charges nothing for time when the session stays within the grace period", () => {
+    const got = tariffCostBreakdown(graceTariff(), 10, 45);
+    expect(got.time).toBe(0);
+    expect(got.total).toBeCloseTo(3.5); // energy only: 0,35€ x 10 kWh
+  });
+
+  it("only bills the minutes beyond the grace period", () => {
+    const got = tariffCostBreakdown(graceTariff(), 10, 90);
+    expect(got.time).toBeCloseTo(9); // (90 - 60) min x 0,30€
+    expect(got.total).toBeCloseTo(3.5 + 9);
+  });
+
+  it("behaves exactly as before when a tariff has no grace period", () => {
+    const got = tariffCostBreakdown(tariff({ energy_price_cents_per_kwh: 35, session_price_cents_per_min: 30 }), 10, 45);
+    expect(got.time).toBeCloseTo(13.5); // full 45 min x 0,30€, from minute 1
   });
 });
 

@@ -342,6 +342,137 @@ func TestNormalizeIziviaTariffsInfersKindAndSkipsZeroPrice(t *testing.T) {
 	}
 }
 
+// realIziviaDayNightSurchargeText is the exact production wording reported:
+// two cheap time-of-day windows, an outside-hours default price, and a
+// per-minute surcharge that only kicks in after an hour of charging.
+const realIziviaDayNightSurchargeText = "-- De 9h à 11h et de 15h00 à 17h00 : 0,30€/kWh; " +
+	"-- En dehors de ces horaires : 0,35€/kWh. " +
+	"-- Surcoût de 0,30€/min après 1h de charge, quelque soit l'horaire. " +
+	"Toutes minutes et kWh entamées sont dues. " +
+	"-L'horaire de branchement définit la tarification pour toute la session."
+
+func TestParseIziviaTimeOfDayWindowsAt(t *testing.T) {
+	t.Run("real production text yields five contiguous 24h windows", func(t *testing.T) {
+		// "Now" doesn't matter for the windows themselves, only for which one
+		// is picked as the snapshot (checked separately below).
+		windows, snapshot := parseIziviaTimeOfDayWindowsAt(realIziviaDayNightSurchargeText, time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+		want := []map[string]any{
+			{"startTime": "00:00", "endTime": "09:00", "energyPriceCentsPerKwh": 35.0},
+			{"startTime": "09:00", "endTime": "11:00", "energyPriceCentsPerKwh": 30.0},
+			{"startTime": "11:00", "endTime": "15:00", "energyPriceCentsPerKwh": 35.0},
+			{"startTime": "15:00", "endTime": "17:00", "energyPriceCentsPerKwh": 30.0},
+			{"startTime": "17:00", "endTime": "24:00", "energyPriceCentsPerKwh": 35.0},
+		}
+		if len(windows) != len(want) {
+			t.Fatalf("got %d windows, want %d: %+v", len(windows), len(want), windows)
+		}
+		for i, w := range windows {
+			if w["startTime"] != want[i]["startTime"] || w["endTime"] != want[i]["endTime"] || w["energyPriceCentsPerKwh"] != want[i]["energyPriceCentsPerKwh"] {
+				t.Errorf("window %d = %+v, want %+v", i, w, want[i])
+			}
+		}
+		if snapshot == nil {
+			t.Fatal("snapshot = nil, want a price")
+		}
+	})
+
+	// Regression: previously the whole time-of-day structure was collapsed
+	// into a single flat price (matchEuroCentsFirstNonZero's first non-zero
+	// match, 0,30€/kWh), silently discarding the 0,35€/kWh default that
+	// actually applies 20 of the 24 hours.
+	cases := []struct {
+		name string
+		at   time.Time
+		want float64
+	}{
+		{"inside the first cheap window", time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), 30},
+		{"inside the gap between the two cheap windows", time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC), 35},
+		{"inside the second cheap window", time.Date(2026, 1, 1, 16, 0, 0, 0, time.UTC), 30},
+		{"late evening, outside both cheap windows", time.Date(2026, 1, 1, 20, 0, 0, 0, time.UTC), 35},
+		{"early morning, outside both cheap windows", time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), 35},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, snapshot := parseIziviaTimeOfDayWindowsAt(realIziviaDayNightSurchargeText, c.at)
+			if snapshot == nil || *snapshot != c.want {
+				t.Errorf("snapshot at %s = %v, want %v", c.at.Format("15:04"), deref(snapshot), c.want)
+			}
+		})
+	}
+
+	t.Run("plain flat-price text doesn't match", func(t *testing.T) {
+		windows, snapshot := parseIziviaTimeOfDayWindowsAt("0,45€/kWh (Dont 15% de frais de service)", time.Now())
+		if windows != nil || snapshot != nil {
+			t.Errorf("got (%v, %v), want (nil, nil) for a text with no time-of-day wording", windows, snapshot)
+		}
+	})
+
+	t.Run("time ranges without an outside-hours price don't match", func(t *testing.T) {
+		windows, snapshot := parseIziviaTimeOfDayWindowsAt("De 9h à 11h : 0,30€/kWh.", time.Now())
+		if windows != nil || snapshot != nil {
+			t.Errorf("got (%v, %v), want (nil, nil): no \"en dehors\" clause to anchor the default price", windows, snapshot)
+		}
+	})
+}
+
+func TestParseIziviaSessionSurcharge(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantPrice *float64
+		wantGrace *float64
+	}{
+		{"hours wording", "Surcoût de 0,30€/min après 1h de charge, quelque soit l'horaire.", ptr(30), ptr(60)},
+		{"hours+minutes wording", "0,20€/min après 1h30 de charge", ptr(20), ptr(90)},
+		{"minutes-only wording", "0,20€/min après 90 min de charge", ptr(20), ptr(90)},
+		{"flat rate with no grace wording still yields the price", "0,40€/min", ptr(40), nil},
+		{"no per-minute price at all", "0,35€/kWh", nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			price, grace := parseIziviaSessionSurcharge(c.text)
+			if !floatPtrEqual(price, c.wantPrice) {
+				t.Errorf("price = %v, want %v", deref(price), deref(c.wantPrice))
+			}
+			if !floatPtrEqual(grace, c.wantGrace) {
+				t.Errorf("grace = %v, want %v", deref(grace), deref(c.wantGrace))
+			}
+		})
+	}
+}
+
+func TestNormalizeIziviaTariffsAtRealDayNightSurchargeText(t *testing.T) {
+	pricing := []any{
+		map[string]any{
+			"chargingStations": []any{
+				map[string]any{"pricingInfos": []any{realIziviaDayNightSurchargeText}},
+			},
+		},
+	}
+	// 13:00 falls in the 11h-15h gap between the two cheap windows, so the
+	// snapshot must be the 0,35€ default, not the 0,30€ special-hours price.
+	at := time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)
+	tariffs := normalizeIziviaTariffsAt(nil, pricing, at)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	tariff := tariffs[0]
+
+	if tariff.EnergyPriceCentsPerKWh == nil || *tariff.EnergyPriceCentsPerKWh != 35 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 35 (the outside-hours default at 13:00)", deref(tariff.EnergyPriceCentsPerKWh))
+	}
+	if tariff.SessionPriceCentsPerMin == nil || *tariff.SessionPriceCentsPerMin != 30 {
+		t.Errorf("SessionPriceCentsPerMin = %v, want 30", deref(tariff.SessionPriceCentsPerMin))
+	}
+	if tariff.SessionPriceGraceMinutes == nil || *tariff.SessionPriceGraceMinutes != 60 {
+		t.Errorf("SessionPriceGraceMinutes = %v, want 60 (surcharge starts after 1h of charging)", deref(tariff.SessionPriceGraceMinutes))
+	}
+	windows, _ := tariff.Extra["windows"].([]map[string]any)
+	if len(windows) != 5 {
+		t.Errorf("Extra[\"windows\"] has %d entries, want 5 (full 24h coverage)", len(windows))
+	}
+}
+
 func TestIziviaTariffKindFromConnectorStats(t *testing.T) {
 	acStation := map[string]any{"chargingConnectorsStats": []any{
 		map[string]any{"standard": "t2", "maxPowerInW": 25000.0}, // AC even >22kW

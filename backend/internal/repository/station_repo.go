@@ -221,14 +221,18 @@ func stationSelectedPriceFragment(sourcesParamIdx int, exclude bool) string {
 
 // stationTotalCentsExpr estimates the total cost (in cents) of a session
 // delivering the caller's chosen kWh over the caller's chosen minutes, for a
-// single tariff row: energy price × kWh, plus any per-minute rate × minutes,
-// plus any flat one-time session fee. chargeKWhIdx/chargeMinutesIdx are the
+// single tariff row: energy price × kWh, plus any per-minute rate × billable
+// minutes, plus any flat one-time session fee. Billable minutes excludes
+// session_price_grace_minutes (e.g. Izivia's "surcoût de 0,30€/min après 1h
+// de charge" — the per-minute rate only applies beyond that threshold;
+// GREATEST(...,0) keeps a session shorter than the grace period from
+// producing a negative minute count). chargeKWhIdx/chargeMinutesIdx are the
 // positional $N args holding those two session parameters. Mirrors
 // utils/pricing.js#tariffCostBreakdown's total, so the price-range filter's
 // "recharge" mode matches what the frontend actually displays for a station.
 func stationTotalCentsExpr(chargeKWhIdx, chargeMinutesIdx int) string {
 	return fmt.Sprintf(
-		`(current_window_price(t.extra, t.energy_price_cents_per_kwh) * $%[1]d + COALESCE(t.session_price_cents_per_min, 0) * $%[2]d + COALESCE(t.session_fee_cents, 0))`,
+		`(current_window_price(t.extra, t.energy_price_cents_per_kwh) * $%[1]d + COALESCE(t.session_price_cents_per_min, 0) * GREATEST($%[2]d - COALESCE(t.session_price_grace_minutes, 0), 0) + COALESCE(t.session_fee_cents, 0))`,
 		chargeKWhIdx, chargeMinutesIdx,
 	)
 }

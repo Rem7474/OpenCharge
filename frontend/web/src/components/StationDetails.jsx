@@ -20,6 +20,18 @@ import { useFuelPrice } from "../hooks/useFuelPrice.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 import FreshmileAvailability from "./FreshmileAvailability.jsx";
 
+// Shared by TariffCost and TariffTimeAndFee so the grace-period wording
+// (e.g. Izivia's "après 1h de charge") can't drift between the two places
+// a tariff's time cost renders.
+function timeLine(tariff, chargeMinutes, time) {
+  return (
+    <div>
+      Temps ({chargeMinutes} min
+      {tariff.session_price_grace_minutes ? `, ${tariff.session_price_grace_minutes} min offertes` : ""}) : {time.toFixed(2)} €
+    </div>
+  );
+}
+
 // TariffCost renders a tariff's price for the active mode: in "recharge"
 // mode, a breakdown of every cost component the tariff actually carries
 // (energy for chargeKWh, a per-minute rate for chargeMinutes, and any flat
@@ -42,13 +54,29 @@ function TariffCost({ tariff, priceMode, chargeKWh, chargeMinutes }) {
           Énergie ({chargeKWh} kWh) : {energy.toFixed(2)} €
         </div>
       )}
-      {time != null && (
-        <div>
-          Temps ({chargeMinutes} min) : {time.toFixed(2)} €
-        </div>
-      )}
+      {time != null && timeLine(tariff, chargeMinutes, time)}
       {fee != null && <div>Frais de session : {fee.toFixed(2)} €</div>}
       <div className="price">Total estimé : {total.toFixed(2)} €</div>
+    </div>
+  );
+}
+
+// HourlyPriceChart only ever shows a windowed tariff's energy/kWh side —
+// but the same tariff can independently carry a per-minute rate and/or a
+// flat session fee (e.g. Izivia's day/night pricing plus its "surcoût
+// après 1h de charge"), which would otherwise never be shown anywhere:
+// TariffCost, the only other place these render, is entirely skipped for
+// a windowed tariff (see TariffDisplay). Passing chargeKWh=0 to
+// tariffCostBreakdown here is deliberate — this only ever reads its
+// time/fee fields, never energy (already covered by the chart) or total
+// (a single blended figure doesn't make sense when energy varies by hour).
+function TariffTimeAndFee({ tariff, chargeMinutes }) {
+  const { time, fee } = tariffCostBreakdown(tariff, 0, chargeMinutes);
+  if (time == null && fee == null) return null;
+  return (
+    <div className="tariff-cost-breakdown">
+      {time != null && timeLine(tariff, chargeMinutes, time)}
+      {fee != null && <div>Frais de session : {fee.toFixed(2)} €</div>}
     </div>
   );
 }
@@ -60,11 +88,15 @@ function TariffCost({ tariff, priceMode, chargeKWh, chargeMinutes }) {
 // instead of repeating the same hasHourlyPricing(...) ? <A/> : <B/> check
 // three times.
 function TariffDisplay({ tariff, priceMode, chargeKWh, chargeMinutes }) {
-  return hasHourlyPricing(tariff) ? (
-    <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
-  ) : (
-    <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-  );
+  if (hasHourlyPricing(tariff)) {
+    return (
+      <>
+        <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
+        {priceMode === PRICE_MODE_RECHARGE && <TariffTimeAndFee tariff={tariff} chargeMinutes={chargeMinutes} />}
+      </>
+    );
+  }
+  return <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />;
 }
 
 function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
@@ -77,7 +109,10 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
       <TariffDisplay tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
       {tariff.service_fee_percent != null && <div>Frais de service : {tariff.service_fee_percent}%</div>}
       {priceMode !== PRICE_MODE_RECHARGE && tariff.session_price_cents_per_min != null && (
-        <div>{(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min</div>
+        <div>
+          {(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min
+          {tariff.session_price_grace_minutes ? ` après ${tariff.session_price_grace_minutes} min de charge` : ""}
+        </div>
       )}
       {priceMode !== PRICE_MODE_RECHARGE && tariff.session_fee_cents != null && (
         <div>{(tariff.session_fee_cents / 100).toFixed(2)} € / session</div>
