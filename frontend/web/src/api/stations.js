@@ -99,3 +99,15 @@ export async function fetchFreshmileAvailability(locationId, { signal } = {}) {
   if (!res.ok) await throwForStatus(res, `GET /freshmile/availability/${locationId}`);
   return res.json();
 }
+
+/**
+ * A nationwide-average fuel price (SP95-E10 today), for the
+ * essence/électrique cost comparison (see utils/pricing.js#
+ * thermalEquivalentCost) — already averaged and cached server-side (see
+ * backend api/fuelprice.go), so this is cheap to call once per session.
+ */
+export async function fetchFuelPrice({ signal } = {}) {
+  const res = await fetch(`${API_BASE}/fuel-price`, { signal });
+  if (!res.ok) await throwForStatus(res, "GET /fuel-price");
+  return res.json();
+}

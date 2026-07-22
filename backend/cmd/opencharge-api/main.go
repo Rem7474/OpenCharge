@@ -40,6 +40,7 @@ func main() {
 	tariffRepo := repository.NewTariffRepository(pool)
 	stationsHandler := api.NewStationsHandler(stationRepo, tariffRepo)
 	freshmileHandler := api.NewFreshmileHandler()
+	fuelPriceHandler := api.NewFuelPriceHandler()
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -60,6 +61,7 @@ func main() {
 	router.Get("/stations/{id}", stationsHandler.GetStation)
 	router.Get("/sources", stationsHandler.ListSources)
 	router.Get("/freshmile/availability/{locationId}", freshmileHandler.GetAvailability)
+	router.Get("/fuel-price", fuelPriceHandler.GetFuelPrice)
 
 	server := &http.Server{
 		Addr:              addr,

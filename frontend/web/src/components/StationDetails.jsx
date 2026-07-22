@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star, Copy, Check } from "lucide-react";
+import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star, Copy, Check, Fuel } from "lucide-react";
 import { fetchStationDetails } from "../api/stations.js";
 import {
   connectorPriceKind,
@@ -7,6 +7,7 @@ import {
   formatPrice,
   hasHourlyPricing,
   tariffCostBreakdown,
+  thermalEquivalentCost,
   bestTariffForSource,
   cheapestTariff,
   PRICE_MODE_RECHARGE,
@@ -15,6 +16,7 @@ import {
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import { findFreshmileSiteMeta } from "../utils/freshmile.js";
 import { useFreshmileAvailability } from "../hooks/useFreshmileAvailability.js";
+import { useFuelPrice } from "../hooks/useFuelPrice.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 import FreshmileAvailability from "./FreshmileAvailability.jsx";
 
@@ -86,6 +88,37 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
   );
 }
 
+// Shown once per connector, alongside whichever price is already
+// highlighted there — the distance reachable on chargeKWh doesn't depend on
+// which tariff is cheapest, so this doesn't repeat per tariff row the way
+// TariffCost does. tariff is whichever one ConnectorPriceSection is already
+// treating as "the" price for this connector (its best selected-source
+// tariff, or the overall best); fuelPrice is the nationwide-average SP95-E10
+// price from hooks/useFuelPrice.js (null while loading, in which case this
+// renders nothing rather than guessing).
+function FuelComparison({ tariff, chargeKWh, chargeMinutes, evConsumptionKWhPer100Km, thermalConsumptionLPer100Km, fuelPrice }) {
+  if (!tariff || !fuelPrice) return null;
+  const { total: electricCostEuros } = tariffCostBreakdown(tariff, chargeKWh, chargeMinutes);
+  if (electricCostEuros == null) return null;
+  const equivalence = thermalEquivalentCost({
+    chargeKWh,
+    evConsumptionKWhPer100Km,
+    thermalConsumptionLPer100Km,
+    fuelPriceCentsPerLiter: fuelPrice.pricePerLiterCents,
+  });
+  if (!equivalence) return null;
+  const thermalCostEuros = equivalence.thermalCostCents / 100;
+  const savingsPercent = ((thermalCostEuros - electricCostEuros) / thermalCostEuros) * 100;
+  return (
+    <p className="fuel-comparison">
+      <Fuel size={13} strokeWidth={2.2} />
+      {"≈"} {Math.round(equivalence.km)} km parcourus — un thermique équivalent{fuelPrice.live ? "" : " (estimation)"} coûterait{" "}
+      {thermalCostEuros.toFixed(2)} € en essence
+      {savingsPercent > 0 && ` (−${Math.round(savingsPercent)} % vs cette recharge)`}
+    </p>
+  );
+}
+
 // One physical site can expose several connectors (points of charge) —
 // each with its own independent set of tariffs, since a source can price
 // e.g. a CCS plug differently from a T2 plug at the same location (see
@@ -101,6 +134,9 @@ function ConnectorPriceSection({
   priceMode,
   chargeKWh,
   chargeMinutes,
+  evConsumptionKWhPer100Km,
+  thermalConsumptionLPer100Km,
+  fuelPrice,
   excludeSubscriptionPlans,
 }) {
   // GET /stations/{id} always returns every known tariff, including
@@ -182,6 +218,17 @@ function ConnectorPriceSection({
       )}
       {!overallBest && selectedEntries.length === 0 && <p>Aucun tarif connu pour ce connecteur.</p>}
 
+      {priceMode === PRICE_MODE_RECHARGE && (
+        <FuelComparison
+          tariff={overallBeatsSelection ? overallBest : (cheapestSelected?.tariff ?? overallBest)}
+          chargeKWh={chargeKWh}
+          chargeMinutes={chargeMinutes}
+          evConsumptionKWhPer100Km={evConsumptionKWhPer100Km}
+          thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
+          fuelPrice={fuelPrice}
+        />
+      )}
+
       {tariffs.length > 0 && (
         <details className="connector-all-tariffs">
           <summary>Tous les tarifs ({tariffs.length})</summary>
@@ -201,11 +248,14 @@ export default function StationDetails({
   priceMode,
   chargeKWh,
   chargeMinutes,
+  evConsumptionKWhPer100Km,
+  thermalConsumptionLPer100Km,
   excludeSubscriptionPlans,
 }) {
   const [details, setDetails] = useState(null);
   const [error, setError] = useState(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  const fuelPrice = useFuelPrice();
 
   useEffect(() => {
     if (!site) return undefined;
@@ -369,6 +419,9 @@ export default function StationDetails({
               priceMode={priceMode}
               chargeKWh={chargeKWh}
               chargeMinutes={chargeMinutes}
+              evConsumptionKWhPer100Km={evConsumptionKWhPer100Km}
+              thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
+              fuelPrice={fuelPrice}
               excludeSubscriptionPlans={excludeSubscriptionPlans}
             />
           ))}

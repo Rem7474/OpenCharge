@@ -277,6 +277,45 @@ export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
  * callers can render only the lines that apply; total is null only when
  * none of the three are known at all.
  */
+// Default assumptions for the essence/électrique cost comparison (see
+// thermalEquivalentCost) — editable by the user (see FilterPanel), not
+// persisted across sessions: same treatment as chargeKWh/chargeMinutes.
+// Plausible round numbers for a typical compact EV/petrol car rather than a
+// real vehicle profile, which this app doesn't model.
+export const DEFAULT_EV_CONSUMPTION_KWH_PER_100KM = 17;
+export const DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM = 6.5;
+
+/**
+ * What the same chargeKWh of energy is worth in distance, and what
+ * covering that same distance would cost in fuel — the "essence/électrique"
+ * comparison shown alongside a recharge's cost (see StationDetails.jsx's
+ * FuelComparison). Deliberately doesn't compare against a specific tariff's
+ * price itself: callers already have that via tariffCostBreakdown and can
+ * diff the two totals themselves.
+ *
+ * Returns null when any input is missing or non-positive — in particular
+ * before hooks/useFuelPrice.js has resolved a real fuel price.
+ */
+export function thermalEquivalentCost({
+  chargeKWh,
+  evConsumptionKWhPer100Km,
+  thermalConsumptionLPer100Km,
+  fuelPriceCentsPerLiter,
+}) {
+  if (
+    !(chargeKWh > 0) ||
+    !(evConsumptionKWhPer100Km > 0) ||
+    !(thermalConsumptionLPer100Km > 0) ||
+    !(fuelPriceCentsPerLiter > 0)
+  ) {
+    return null;
+  }
+  const km = (chargeKWh / evConsumptionKWhPer100Km) * 100;
+  const liters = (km / 100) * thermalConsumptionLPer100Km;
+  const thermalCostCents = liters * fuelPriceCentsPerLiter;
+  return { km, thermalCostCents };
+}
+
 export function tariffCostBreakdown(tariff, chargeKWh, chargeMinutes) {
   const energy = tariff.energy_price_cents_per_kwh != null ? (tariff.energy_price_cents_per_kwh / 100) * chargeKWh : null;
   const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * chargeMinutes : null;

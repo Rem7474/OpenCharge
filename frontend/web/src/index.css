@@ -630,6 +630,30 @@ a {
   font-size: 13px;
 }
 
+.fuel-comparison-inputs {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.fuel-comparison-inputs summary {
+  cursor: pointer;
+  color: var(--color-muted);
+  font-weight: 600;
+}
+
+.fuel-comparison-inputs label {
+  display: block;
+  margin-top: 6px;
+}
+
+.fuel-comparison-inputs input {
+  width: 64px;
+  padding: 3px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
 .filter-price-range {
   margin-top: 12px;
   padding-top: 12px;
@@ -1133,6 +1157,20 @@ a {
   margin: 4px 0 0;
   font-size: 11px;
   color: var(--color-accent);
+}
+
+.fuel-comparison {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.fuel-comparison svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 /* --- Onboarding (operator/plan selection, full-page) --- */

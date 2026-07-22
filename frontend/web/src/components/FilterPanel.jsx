@@ -26,6 +26,10 @@ export default function FilterPanel({
   onChangeChargeKWh,
   chargeMinutes,
   onChangeChargeMinutes,
+  evConsumptionKWhPer100Km,
+  onChangeEvConsumptionKWhPer100Km,
+  thermalConsumptionLPer100Km,
+  onChangeThermalConsumptionLPer100Km,
   showAllStations,
   onChangeShowAllStations,
   excludeSubscriptionPlans,
@@ -142,6 +146,34 @@ export default function FilterPanel({
                 min de charge
               </label>
             </div>
+          )}
+
+          {priceMode === PRICE_MODE_RECHARGE && (
+            <details className="fuel-comparison-inputs">
+              <summary>Comparer avec un thermique</summary>
+              <label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={0.5}
+                  value={evConsumptionKWhPer100Km}
+                  onChange={(e) => onChangeEvConsumptionKWhPer100Km(Number(e.target.value))}
+                />{" "}
+                kWh/100km (véhicule électrique)
+              </label>
+              <label>
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  step={0.1}
+                  value={thermalConsumptionLPer100Km}
+                  onChange={(e) => onChangeThermalConsumptionLPer100Km(Number(e.target.value))}
+                />{" "}
+                L/100km (équivalent essence)
+              </label>
+            </details>
           )}
 
           <div className="filter-price-range">

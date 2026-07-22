@@ -9,6 +9,7 @@ import {
   cheapestPriceAcrossStations,
   priceTier,
   offPeakRecommendation,
+  thermalEquivalentCost,
 } from "./pricing.js";
 import { groupStationsByLocation } from "./stationGrouping.js";
 
@@ -244,6 +245,40 @@ describe("offPeakRecommendation", () => {
 
   it("returns null for a flat tariff with no windows at all", () => {
     expect(offPeakRecommendation(tariff({ energy_price_cents_per_kwh: 30 }))).toBeNull();
+  });
+});
+
+describe("thermalEquivalentCost", () => {
+  it("computes reachable distance and its thermal-fuel equivalent cost", () => {
+    const got = thermalEquivalentCost({
+      chargeKWh: 50,
+      evConsumptionKWhPer100Km: 20,
+      thermalConsumptionLPer100Km: 6,
+      fuelPriceCentsPerLiter: 180,
+    });
+    expect(got).not.toBeNull();
+    expect(got.km).toBe(250); // 50 kWh / (20 kWh/100km) * 100
+    expect(got.thermalCostCents).toBeCloseTo(2700); // 250km / 100 * 6L * 180cts
+  });
+
+  it("returns null when the fuel price hasn't loaded yet", () => {
+    expect(
+      thermalEquivalentCost({
+        chargeKWh: 50,
+        evConsumptionKWhPer100Km: 20,
+        thermalConsumptionLPer100Km: 6,
+        fuelPriceCentsPerLiter: null,
+      })
+    ).toBeNull();
+  });
+
+  it("returns null for a non-positive consumption or charge amount", () => {
+    expect(
+      thermalEquivalentCost({ chargeKWh: 0, evConsumptionKWhPer100Km: 20, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
+    ).toBeNull();
+    expect(
+      thermalEquivalentCost({ chargeKWh: 50, evConsumptionKWhPer100Km: 0, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
+    ).toBeNull();
   });
 });
 
