@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -46,7 +46,7 @@ func NewIRVEIngester(stations *repository.StationRepository, url string) *IRVEIn
 const irveBulkChunkSize = 500
 
 func (ing *IRVEIngester) Run(ctx context.Context) (int, error) {
-	log.Printf("irve: downloading %s", ing.URL)
+	slog.Info("downloading", "source", "irve", "url", ing.URL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ing.URL, nil)
 	if err != nil {
 		return 0, err
@@ -65,7 +65,7 @@ func (ing *IRVEIngester) Run(ctx context.Context) (int, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&collection); err != nil {
 		return 0, fmt.Errorf("decode irve geojson: %w", err)
 	}
-	log.Printf("irve: %d features downloaded", len(collection.Features))
+	slog.Info("features downloaded", "source", "irve", "count", len(collection.Features))
 
 	// Normalize all features first
 	var stations []domain.Station
@@ -89,10 +89,10 @@ func (ing *IRVEIngester) Run(ctx context.Context) (int, error) {
 			return count, fmt.Errorf("bulk upsert chunk %d-%d: %w", i, end, err)
 		}
 		count += len(chunk)
-		log.Printf("irve: %d/%d upserted", count, len(stations))
+		slog.Info("upsert progress", "source", "irve", "upserted", count, "total", len(stations))
 	}
 
-	log.Printf("irve: done, %d stations upserted", count)
+	slog.Info("ingestion done", "source", "irve", "upserted", count)
 	return count, nil
 }
 

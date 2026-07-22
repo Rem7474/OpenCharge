@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   connectorPriceKind,
   tariffAppliesToBucket,
@@ -8,6 +8,7 @@ import {
   pickPriceCentsPerKWh,
   cheapestPriceAcrossStations,
   priceTier,
+  offPeakRecommendation,
 } from "./pricing.js";
 import { groupStationsByLocation } from "./stationGrouping.js";
 
@@ -189,6 +190,60 @@ describe("cheapestPriceAcrossStations", () => {
   it("ignores connectors with no known price and returns null if none have one", () => {
     const stations = [station({ pricingSummary: {} }), station({ pricingSummary: {} })];
     expect(cheapestPriceAcrossStations(stations, false)).toBeNull();
+  });
+});
+
+describe("offPeakRecommendation", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function windowedTariff(windows) {
+    return tariff({ energy_price_cents_per_kwh: null, extra: { windows } });
+  }
+
+  it("recommends the cheapest window when it meaningfully beats the current price", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 10, 0)); // 10:00, inside the peak window
+    const t = windowedTariff([
+      { startTime: "07:00", endTime: "22:00", energyPriceCentsPerKwh: 45 },
+      { startTime: "22:00", endTime: "07:00", energyPriceCentsPerKwh: 20 },
+    ]);
+    const rec = offPeakRecommendation(t);
+    expect(rec).not.toBeNull();
+    expect(rec.startTime).toBe("22:00");
+    expect(rec.endTime).toBe("07:00");
+    expect(rec.priceCentsPerKWh).toBe(20);
+    expect(rec.currentPriceCentsPerKWh).toBe(45);
+    expect(Math.round(rec.savingsPercent)).toBe(56);
+  });
+
+  it("returns null when the current window is already the cheapest one", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 23, 0)); // 23:00, inside the cheap window
+    const t = windowedTariff([
+      { startTime: "07:00", endTime: "22:00", energyPriceCentsPerKwh: 45 },
+      { startTime: "22:00", endTime: "07:00", energyPriceCentsPerKwh: 20 },
+    ]);
+    expect(offPeakRecommendation(t)).toBeNull();
+  });
+
+  it("returns null when the gap is too small to be worth recommending", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 10, 0));
+    const t = windowedTariff([
+      { startTime: "07:00", endTime: "22:00", energyPriceCentsPerKwh: 30 },
+      { startTime: "22:00", endTime: "07:00", energyPriceCentsPerKwh: 29.5 },
+    ]);
+    expect(offPeakRecommendation(t)).toBeNull();
+  });
+
+  it("returns null for a tariff with a single (non-varying) window", () => {
+    expect(offPeakRecommendation(tariff({ extra: { windows: [{ startTime: "00:00", endTime: "24:00", energyPriceCentsPerKwh: 30 }] } }))).toBeNull();
+  });
+
+  it("returns null for a flat tariff with no windows at all", () => {
+    expect(offPeakRecommendation(tariff({ energy_price_cents_per_kwh: 30 }))).toBeNull();
   });
 });
 

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -32,7 +32,7 @@ func mustLoadElectraLocation() *time.Location {
 	if err != nil {
 		// Should be unreachable with time/tzdata embedded; fall back to UTC
 		// rather than panic; a stale mapping is better than a crashed run.
-		log.Printf("electra: failed to load Europe/Paris timezone, falling back to UTC: %v", err)
+		slog.Warn("failed to load Europe/Paris timezone, falling back to UTC", "source", "electra", "error", err)
 		return time.UTC
 	}
 	return loc
@@ -72,7 +72,7 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("electra: %d stations downloaded", len(stations))
+	slog.Info("stations downloaded", "source", "electra", "count", len(stations))
 
 	linked := 0
 	for i := 0; i < len(stations); i += ingestionBulkChunkSize {
@@ -95,9 +95,9 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 		if err != nil {
 			return linked, err
 		}
-		log.Printf("electra: %d/%d processed", linked, len(stations))
+		slog.Info("processing progress", "source", "electra", "processed", linked, "total", len(stations))
 	}
-	log.Printf("electra: done, %d source stations processed", linked)
+	slog.Info("ingestion done", "source", "electra", "processed", linked)
 
 	// Only sweep after every station in this run was written successfully
 	// (see repository.SweepStaleSourceData) — a run that returned early on error above
@@ -115,7 +115,7 @@ func (ing *ElectraIngester) Run(ctx context.Context) (int, error) {
 }
 
 func (ing *ElectraIngester) fetch(ctx context.Context) ([]map[string]any, error) {
-	log.Printf("electra: downloading %s", ing.URL)
+	slog.Info("downloading", "source", "electra", "url", ing.URL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ing.URL, nil)
 	if err != nil {
 		return nil, err

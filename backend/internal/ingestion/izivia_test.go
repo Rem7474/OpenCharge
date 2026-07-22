@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,9 +61,9 @@ func TestIziviaPostJSONRetryLogUsesLabelNotJustURL(t *testing.T) {
 	defer srv.Close()
 
 	var logBuf bytes.Buffer
-	prevOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(prevOutput)
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	defer slog.SetDefault(prevLogger)
 
 	ing := newTestIziviaIngester()
 	label := srv.URL + " (square centerLng=2.2 centerLat=46.2 zoom=7)"

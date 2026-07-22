@@ -3,7 +3,7 @@ package ingestion
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"regexp"
 	"strconv"
@@ -46,7 +46,7 @@ func withRetries(ctx context.Context, sourceName, label string, maxRetries int, 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			wait := (1 << (attempt - 1)) * backoff
-			log.Printf("%s: retrying %s in %v (attempt %d/%d) after: %v", sourceName, label, wait, attempt+1, maxRetries+1, lastErr)
+			slog.Warn("retrying request", "source", sourceName, "label", label, "wait", wait, "attempt", attempt+1, "maxAttempts", maxRetries+1, "error", lastErr)
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():

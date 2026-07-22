@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star } from "lucide-react";
+import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star, Copy, Check } from "lucide-react";
 import { fetchStationDetails } from "../api/stations.js";
 import {
   connectorPriceKind,
@@ -205,6 +205,7 @@ export default function StationDetails({
 }) {
   const [details, setDetails] = useState(null);
   const [error, setError] = useState(null);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => {
     if (!site) return undefined;
@@ -231,6 +232,17 @@ export default function StationDetails({
   // must run on every render regardless of whether site is null.
   const { imgPreviewUrl, locationId } = findFreshmileSiteMeta(details);
   const freshmileAvailability = useFreshmileAvailability(locationId);
+
+  // Shares the current URL as-is rather than rebuilding it from site.key:
+  // MapPage's selectSite already wrote /station/<id> here on selection (or
+  // StationDeepLink resolved it from one on load), so location.href is
+  // already the right link to hand out.
+  const copyLink = () => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 1500);
+    });
+  };
 
   if (!site) return null;
 
@@ -259,9 +271,20 @@ export default function StationDetails({
             {first.enseigne ? ` · ${first.enseigne}` : ""}
           </div>
         </div>
-        <button className="close-btn" onClick={onClose} aria-label="Fermer">
-          <X size={15} strokeWidth={2.2} />
-        </button>
+        <div className="station-header-actions">
+          <button
+            type="button"
+            className="copy-link-btn"
+            onClick={copyLink}
+            aria-label="Copier le lien de cette borne"
+            title="Copier le lien"
+          >
+            {linkCopied ? <Check size={14} strokeWidth={2.4} /> : <Copy size={14} strokeWidth={2.2} />}
+          </button>
+          <button className="close-btn" onClick={onClose} aria-label="Fermer">
+            <X size={15} strokeWidth={2.2} />
+          </button>
+        </div>
       </div>
 
       {imgPreviewUrl ? (

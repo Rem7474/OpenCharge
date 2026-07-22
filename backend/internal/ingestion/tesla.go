@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"net/url"
 	"strings"
@@ -158,11 +158,11 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 			slugs = append(slugs, slug)
 		}
 	}
-	log.Printf("tesla: %d locations downloaded, %d open superchargers", len(locations), len(slugs))
+	slog.Info("locations downloaded", "source", "tesla", "locations", len(locations), "openSuperchargers", len(slugs))
 
 	processed, firstErr := ing.processSlugs(ctx, allocCtx, slugs)
 
-	log.Printf("tesla: done, %d stations processed", processed)
+	slog.Info("ingestion done", "source", "tesla", "processed", processed)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
 	// processed > 0 guards against a run that silently processed
@@ -191,14 +191,14 @@ func (ing *TeslaIngester) RetryFailed(ctx context.Context, failures []FailedFetc
 	seen := map[string]struct{}{}
 	for _, f := range failures {
 		if f.Kind != failKindTeslaSupercharger {
-			log.Printf("tesla: skipping failure of unknown kind %q", f.Kind)
+			slog.Warn("skipping failure of unknown kind", "source", "tesla", "kind", f.Kind)
 			continue
 		}
 		var params struct {
 			Slug string `json:"slug"`
 		}
 		if err := json.Unmarshal(f.Params, &params); err != nil || params.Slug == "" {
-			log.Printf("tesla: skipping unreadable %s failure: %v", f.Kind, err)
+			slog.Warn("skipping unreadable failure", "source", "tesla", "kind", f.Kind, "error", err)
 			continue
 		}
 		if _, dup := seen[params.Slug]; dup {
@@ -208,13 +208,13 @@ func (ing *TeslaIngester) RetryFailed(ctx context.Context, failures []FailedFetc
 		slugs = append(slugs, params.Slug)
 	}
 
-	log.Printf("tesla: retrying %d superchargers from %d recorded failure(s)", len(slugs), len(failures))
+	slog.Info("retrying recorded failures", "source", "tesla", "superchargers", len(slugs), "failures", len(failures))
 
 	allocCtx, cancelAlloc := ing.newChromeAllocator(ctx)
 	defer cancelAlloc()
 
 	processed, err := ing.processSlugs(ctx, allocCtx, slugs)
-	log.Printf("tesla: retry done, %d stations processed", processed)
+	slog.Info("retry done", "source", "tesla", "processed", processed)
 	return processed, err
 }
 
@@ -253,7 +253,7 @@ func (ing *TeslaIngester) processSlugs(ctx, allocCtx context.Context, slugs []st
 		for slug := range slugCh {
 			item, ok, err := ing.fetchAndNormalizeSupercharger(allocCtx, slug)
 			if err != nil {
-				log.Printf("tesla: supercharger %s failed: %v", slug, err)
+				slog.Warn("supercharger failed", "source", "tesla", "slug", slug, "error", err)
 				// Not recorded when the run itself is shutting down: those
 				// slugs didn't fail on their own — see the same guard in
 				// izivia.go's worker.
@@ -340,7 +340,7 @@ func (ing *TeslaIngester) writeResults(ctx context.Context, resultsCh <-chan nor
 		if err != nil {
 			return err
 		}
-		log.Printf("tesla: %d/%d processed", processed, total)
+		slog.Info("processing progress", "source", "tesla", "processed", processed, "total", total)
 		return nil
 	}
 
@@ -389,7 +389,7 @@ func (ing *TeslaIngester) fetchAndNormalizeSupercharger(allocCtx context.Context
 }
 
 func (ing *TeslaIngester) fetchLocations(allocCtx context.Context) ([]map[string]any, error) {
-	log.Printf("tesla: downloading %s", ing.URL)
+	slog.Info("downloading", "source", "tesla", "url", ing.URL)
 	body, err := ing.fetchViaChromeWithRetries(allocCtx, ing.URL)
 	if err != nil {
 		return nil, fmt.Errorf("download tesla locations: %w", err)

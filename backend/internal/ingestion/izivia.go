@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -131,11 +131,11 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("izivia: %d unique markers found", len(markers))
+	slog.Info("unique markers found", "source", "izivia", "count", len(markers))
 
 	result, firstErr := ing.processMarkers(ctx, markers)
 
-	log.Printf("izivia: done, %d stations processed", result)
+	slog.Info("ingestion done", "source", "izivia", "processed", result)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData) —
 	// firstErr covers both ctx cancellation and a write failure. result
@@ -185,12 +185,12 @@ func (ing *IziviaIngester) RetryFailed(ctx context.Context, failures []FailedFet
 		case failKindIziviaSquare:
 			var square iziviaSquare
 			if err := json.Unmarshal(f.Params, &square); err != nil {
-				log.Printf("izivia: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "izivia", "kind", f.Kind, "error", err)
 				continue
 			}
 			squareMarkers, err := ing.fetchSquareMarkers(ctx, square)
 			if err != nil {
-				log.Printf("izivia: markers square still failing: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
+				slog.Warn("markers square still failing", "source", "izivia", "centerLng", square.CenterLng, "centerLat", square.CenterLat, "zoom", square.Zoom, "error", err)
 				if ctx.Err() == nil {
 					ing.Failures.Record(failKindIziviaSquare, iziviaBaseURL+"/map/markers", square, err)
 				}
@@ -202,18 +202,18 @@ func (ing *IziviaIngester) RetryFailed(ctx context.Context, failures []FailedFet
 		case failKindIziviaStation:
 			var marker map[string]any
 			if err := json.Unmarshal(f.Params, &marker); err != nil {
-				log.Printf("izivia: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "izivia", "kind", f.Kind, "error", err)
 				continue
 			}
 			addMarker(marker)
 		default:
-			log.Printf("izivia: skipping failure of unknown kind %q", f.Kind)
+			slog.Warn("skipping failure of unknown kind", "source", "izivia", "kind", f.Kind)
 		}
 	}
 
-	log.Printf("izivia: retrying %d markers from %d recorded failure(s)", len(markers), len(failures))
+	slog.Info("retrying recorded failures", "source", "izivia", "markers", len(markers), "failures", len(failures))
 	processed, err := ing.processMarkers(ctx, markers)
-	log.Printf("izivia: retry done, %d stations processed", processed)
+	slog.Info("retry done", "source", "izivia", "processed", processed)
 	return processed, err
 }
 
@@ -245,7 +245,7 @@ func (ing *IziviaIngester) processMarkers(ctx context.Context, markers []map[str
 			item, ok, err := ing.fetchAndNormalizeMarker(pipelineCtx, marker)
 			if err != nil {
 				stationID, _ := marker["id"].(string)
-				log.Printf("izivia: station %s failed: %v", stationID, err)
+				slog.Warn("station failed", "source", "izivia", "stationId", stationID, "error", err)
 				// Not recorded when the pipeline itself is shutting down
 				// (timeout/SIGINT/write error): those markers didn't fail on
 				// their own, and recording the cancellation-error flood
@@ -339,7 +339,7 @@ func (ing *IziviaIngester) writeResults(ctx context.Context, resultsCh <-chan no
 		if err != nil {
 			return err
 		}
-		log.Printf("izivia: %d/%d processed", processed, total)
+		slog.Info("processing progress", "source", "izivia", "processed", processed, "total", total)
 		return nil
 	}
 
@@ -709,7 +709,7 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 				markers, err := ing.fetchSquareMarkers(ctx, square)
 				if err != nil {
 					atomic.AddInt64(&failed, 1)
-					log.Printf("izivia: markers square failed: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
+					slog.Warn("markers square failed", "source", "izivia", "centerLng", square.CenterLng, "centerLat", square.CenterLat, "zoom", square.Zoom, "error", err)
 					if ctx.Err() == nil {
 						ing.Failures.Record(failKindIziviaSquare, iziviaBaseURL+"/map/markers", square, err)
 					}

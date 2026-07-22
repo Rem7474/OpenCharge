@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -133,7 +133,7 @@ func (l *FailureLog) Save() error {
 	if err := os.Rename(tmp, l.path); err != nil {
 		return fmt.Errorf("rename failure log into place: %w", err)
 	}
-	log.Printf("%s: %d failed fetch(es) saved to %s — replay them with -retry-failed", l.source, len(items), l.path)
+	slog.Warn("failed fetch(es) saved for later retry", "source", l.source, "count", len(items), "path", l.path)
 	return nil
 }
 
@@ -142,7 +142,7 @@ func (l *FailureLog) Save() error {
 // so the error is logged rather than returned.
 func (l *FailureLog) saveAndLog() {
 	if err := l.Save(); err != nil {
-		log.Printf("%s: saving failure log: %v", l.source, err)
+		slog.Error("saving failure log", "source", l.source, "error", err)
 	}
 }
 

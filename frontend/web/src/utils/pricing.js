@@ -204,6 +204,42 @@ export function currentEnergyPriceCentsPerKWh(tariff) {
   return (match ?? priced[0]).energyPriceCentsPerKwh;
 }
 
+// Minimum saving (%) worth surfacing as a recommendation — a 1-2% gap
+// between "now" and the cheapest window isn't worth telling anyone to
+// change their charging habits over.
+const MIN_OFFPEAK_SAVINGS_PERCENT = 5;
+
+/**
+ * Whether waiting for this tariff's cheapest window would meaningfully beat
+ * the price right now — the "charge at off-peak hours" tip shown next to
+ * HourlyPriceChart. null when the tariff has no varying price (see
+ * hasHourlyPricing), when the current price already IS the cheapest window
+ * (nothing to recommend), or when the gap is too small to bother with (see
+ * MIN_OFFPEAK_SAVINGS_PERCENT).
+ */
+export function offPeakRecommendation(tariff) {
+  if (!hasHourlyPricing(tariff)) return null;
+  const priced = tariff.extra.windows.filter((w) => w.energyPriceCentsPerKwh != null);
+  if (priced.length < 2) return null;
+
+  const currentPriceCentsPerKWh = currentEnergyPriceCentsPerKWh(tariff);
+  if (currentPriceCentsPerKWh == null) return null;
+
+  const cheapest = priced.reduce((min, w) => (w.energyPriceCentsPerKwh < min.energyPriceCentsPerKwh ? w : min));
+  if (cheapest.energyPriceCentsPerKwh >= currentPriceCentsPerKWh) return null;
+
+  const savingsPercent = ((currentPriceCentsPerKWh - cheapest.energyPriceCentsPerKwh) / currentPriceCentsPerKWh) * 100;
+  if (savingsPercent < MIN_OFFPEAK_SAVINGS_PERCENT) return null;
+
+  return {
+    startTime: cheapest.startTime,
+    endTime: cheapest.endTime,
+    priceCentsPerKWh: cheapest.energyPriceCentsPerKwh,
+    currentPriceCentsPerKWh,
+    savingsPercent,
+  };
+}
+
 export const PRICE_MODE_PER_KWH = "per_kwh";
 export const PRICE_MODE_RECHARGE = "recharge";
 

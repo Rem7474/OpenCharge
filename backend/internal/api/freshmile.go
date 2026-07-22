@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -108,7 +108,7 @@ func (h *FreshmileHandler) GetAvailability(w http.ResponseWriter, r *http.Reques
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		log.Printf("api: freshmile availability proxy: %v", err)
+		slog.Error("freshmile availability proxy", "error", err)
 		writeError(w, http.StatusBadGateway, "failed to reach freshmile")
 		return
 	}
@@ -120,7 +120,7 @@ func (h *FreshmileHandler) GetAvailability(w http.ResponseWriter, r *http.Reques
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		log.Printf("api: freshmile availability proxy: upstream http %d: %s", resp.StatusCode, body)
+		slog.Error("freshmile availability proxy: unexpected upstream status", "status", resp.StatusCode, "body", string(body))
 		writeError(w, http.StatusBadGateway, "freshmile returned an unexpected response")
 		return
 	}
@@ -129,7 +129,7 @@ func (h *FreshmileHandler) GetAvailability(w http.ResponseWriter, r *http.Reques
 		Data map[string]any `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		log.Printf("api: freshmile availability proxy: decode upstream body: %v", err)
+		slog.Error("freshmile availability proxy: decode upstream body", "error", err)
 		writeError(w, http.StatusBadGateway, "freshmile returned an unexpected response")
 		return
 	}

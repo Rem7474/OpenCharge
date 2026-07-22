@@ -4,17 +4,29 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
 	"opencharge/internal/ingestion"
+	"opencharge/internal/logging"
 	"opencharge/internal/repository"
 )
 
+// fatal logs msg at error level with the given structured attrs, then exits
+// — slog has no built-in Fatal (unlike the stdlib log package this replaces),
+// so every former log.Fatalf call site in this file goes through this
+// instead of duplicating the log-then-os.Exit(1) pair everywhere.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
+}
+
 func main() {
+	slog.SetDefault(logging.New())
+
 	var (
 		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
 		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
@@ -32,7 +44,7 @@ func main() {
 	flag.Parse()
 
 	if *source == "" {
-		log.Fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
+		fatal("missing -source flag: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
 	}
 
 	// Canceling ctx on SIGINT/SIGTERM (instead of Go's default of killing
@@ -45,7 +57,7 @@ func main() {
 
 	pool, err := repository.Open(ctx, *dsn)
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		fatal("connect to database", "error", err)
 	}
 	defer pool.Close()
 
@@ -69,21 +81,21 @@ func main() {
 		path := failureLogPath(source)
 		failures, err := ingestion.LoadFailedFetches(path)
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("%s: no failed-URL file at %s, nothing to retry", source, path)
+			slog.Info("no failed-URL file, nothing to retry", "source", source, "path", path)
 			return nil, false
 		}
 		if err != nil {
-			log.Fatalf("%s: read failed-URL file: %v", source, err)
+			fatal("read failed-URL file", "source", source, "error", err)
 		}
 		if len(failures) == 0 {
-			log.Printf("%s: %s lists no failures, nothing to retry", source, path)
+			slog.Info("failed-URL file lists no failures, nothing to retry", "source", source, "path", path)
 			return nil, false
 		}
 		return failures, true
 	}
 	skipRetryUnsupported := func(source string) bool {
 		if *retryFailed {
-			log.Printf("%s: single-download source, no per-URL failure tracking — re-run without -retry-failed instead", source)
+			slog.Info("single-download source, no per-URL failure tracking — re-run without -retry-failed instead", "source", source)
 			return true
 		}
 		return false
@@ -96,9 +108,9 @@ func main() {
 		ingester := ingestion.NewIRVEIngester(stationRepo, *irveURL)
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("irve ingestion failed: %v", err)
+			fatal("irve ingestion failed", "error", err)
 		}
-		log.Printf("irve ingestion complete: %d stations", count)
+		slog.Info("irve ingestion complete", "stations", count)
 	}
 	runElectra := func() {
 		if skipRetryUnsupported("electra") {
@@ -108,9 +120,9 @@ func main() {
 		ingester.MaxLinkDistanceM = *linkMaxM
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("electra ingestion failed: %v", err)
+			fatal("electra ingestion failed", "error", err)
 		}
-		log.Printf("electra ingestion complete: %d stations", count)
+		slog.Info("electra ingestion complete", "stations", count)
 	}
 	runIzivia := func() {
 		ingester := ingestion.NewIziviaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, ingestion.DefaultIziviaConfig())
@@ -124,16 +136,16 @@ func main() {
 			}
 			count, err := ingester.RetryFailed(ctx, failures)
 			if err != nil {
-				log.Fatalf("izivia retry failed: %v", err)
+				fatal("izivia retry failed", "error", err)
 			}
-			log.Printf("izivia retry complete: %d stations", count)
+			slog.Info("izivia retry complete", "stations", count)
 			return
 		}
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("izivia ingestion failed: %v", err)
+			fatal("izivia ingestion failed", "error", err)
 		}
-		log.Printf("izivia ingestion complete: %d stations", count)
+		slog.Info("izivia ingestion complete", "stations", count)
 	}
 	runTesla := func() {
 		ingester := ingestion.NewTeslaIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *teslaURL, ingestion.DefaultTeslaConfig())
@@ -148,16 +160,16 @@ func main() {
 			}
 			count, err := ingester.RetryFailed(ctx, failures)
 			if err != nil {
-				log.Fatalf("tesla retry failed: %v", err)
+				fatal("tesla retry failed", "error", err)
 			}
-			log.Printf("tesla retry complete: %d stations", count)
+			slog.Info("tesla retry complete", "stations", count)
 			return
 		}
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("tesla ingestion failed: %v", err)
+			fatal("tesla ingestion failed", "error", err)
 		}
-		log.Printf("tesla ingestion complete: %d stations", count)
+		slog.Info("tesla ingestion complete", "stations", count)
 	}
 	runFreshmile := func() {
 		ingester := ingestion.NewFreshmileIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *freshmileURL, ingestion.DefaultFreshmileConfig())
@@ -171,16 +183,16 @@ func main() {
 			}
 			count, err := ingester.RetryFailed(ctx, failures)
 			if err != nil {
-				log.Fatalf("freshmile retry failed: %v", err)
+				fatal("freshmile retry failed", "error", err)
 			}
-			log.Printf("freshmile retry complete: %d locations", count)
+			slog.Info("freshmile retry complete", "locations", count)
 			return
 		}
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("freshmile ingestion failed: %v", err)
+			fatal("freshmile ingestion failed", "error", err)
 		}
-		log.Printf("freshmile ingestion complete: %d locations", count)
+		slog.Info("freshmile ingestion complete", "locations", count)
 	}
 	runFastned := func() {
 		if skipRetryUnsupported("fastned") {
@@ -191,9 +203,9 @@ func main() {
 		ingester := ingestion.NewFastnedIngester(pool, stationRepo, tariffRepo)
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("fastned ingestion failed: %v", err)
+			fatal("fastned ingestion failed", "error", err)
 		}
-		log.Printf("fastned ingestion complete: %d stations", count)
+		slog.Info("fastned ingestion complete", "stations", count)
 	}
 	runLidl := func() {
 		if skipRetryUnsupported("lidl") {
@@ -204,9 +216,9 @@ func main() {
 		ingester := ingestion.NewLidlIngester(pool, stationRepo, tariffRepo)
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("lidl ingestion failed: %v", err)
+			fatal("lidl ingestion failed", "error", err)
 		}
-		log.Printf("lidl ingestion complete: %d stations", count)
+		slog.Info("lidl ingestion complete", "stations", count)
 	}
 	runChargenow := func() {
 		ingester := ingestion.NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *chargenowURL, ingestion.DefaultChargenowConfig())
@@ -220,16 +232,16 @@ func main() {
 			}
 			count, err := ingester.RetryFailed(ctx, failures)
 			if err != nil {
-				log.Fatalf("chargenow retry failed: %v", err)
+				fatal("chargenow retry failed", "error", err)
 			}
-			log.Printf("chargenow retry complete: %d stations", count)
+			slog.Info("chargenow retry complete", "stations", count)
 			return
 		}
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("chargenow ingestion failed: %v", err)
+			fatal("chargenow ingestion failed", "error", err)
 		}
-		log.Printf("chargenow ingestion complete: %d stations", count)
+		slog.Info("chargenow ingestion complete", "stations", count)
 	}
 	runIonity := func() {
 		if skipRetryUnsupported("ionity") {
@@ -240,9 +252,9 @@ func main() {
 		ingester := ingestion.NewIonityIngester(pool, stationRepo, tariffRepo)
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("ionity ingestion failed: %v", err)
+			fatal("ionity ingestion failed", "error", err)
 		}
-		log.Printf("ionity ingestion complete: %d stations", count)
+		slog.Info("ionity ingestion complete", "stations", count)
 	}
 	runEborn := func() {
 		if skipRetryUnsupported("eborn") {
@@ -253,9 +265,9 @@ func main() {
 		ingester := ingestion.NewEbornIngester(pool, stationRepo, tariffRepo)
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("eborn ingestion failed: %v", err)
+			fatal("eborn ingestion failed", "error", err)
 		}
-		log.Printf("eborn ingestion complete: %d stations", count)
+		slog.Info("eborn ingestion complete", "stations", count)
 	}
 	runSowatt := func() {
 		if skipRetryUnsupported("sowatt") {
@@ -266,9 +278,9 @@ func main() {
 		ingester := ingestion.NewSowattIngester(pool, stationRepo, tariffRepo)
 		count, err := ingester.Run(ctx)
 		if err != nil {
-			log.Fatalf("sowatt ingestion failed: %v", err)
+			fatal("sowatt ingestion failed", "error", err)
 		}
-		log.Printf("sowatt ingestion complete: %d stations", count)
+		slog.Info("sowatt ingestion complete", "stations", count)
 	}
 
 	switch *source {
@@ -311,7 +323,7 @@ func main() {
 		runEborn()
 		runSowatt()
 	default:
-		log.Fatalf("unknown -source %q: expected irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all", *source)
+		fatal("unknown -source flag", "source", *source, "expected", "irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
 	}
 }
 
