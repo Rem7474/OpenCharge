@@ -1,20 +1,19 @@
 import { useEffect, useState } from "react";
-
-const FRESHMILE_LOCATION_API_BASE = "https://prod-driver-api.freshmile.com/charge/api/v2/locations";
+import { fetchFreshmileAvailability } from "../api/stations.js";
 
 /**
- * Polls Freshmile's own public API directly from the browser for a site's
- * live is_available status. The ingested value (see backend
- * ingestion/freshmile.go, station_tariffs.extra) is only as fresh as the
- * last ingestion run and goes stale between runs — this reflects right
- * now, at the cost of one extra request per station the user actually
- * opens (never during map browsing/listing).
+ * Shows a site's live is_available status, fetched through our own backend
+ * (see api/stations.js#fetchFreshmileAvailability and backend
+ * api/freshmile.go) rather than calling Freshmile's API directly from the
+ * browser — a direct call was tried first, but is blocked by CORS in
+ * production (Freshmile's API sends no Access-Control-Allow-Origin header,
+ * confirmed against the real deployment).
  *
- * This is a direct frontend -> Freshmile call, tried first as the simplest
- * option. If it turns out to be blocked by CORS in production, the planned
- * fallback is a small backend proxy endpoint forwarding the same GET — not
- * built yet, since it's only worth adding once the direct call is actually
- * confirmed not to work. Any failure here (CORS, network, non-2xx) quietly
+ * The ingested value (see backend ingestion/freshmile.go,
+ * station_tariffs.extra) is only as fresh as the last ingestion run and
+ * goes stale between runs — this reflects right now, at the cost of one
+ * extra request per station the user actually opens (never during map
+ * browsing/listing). Any failure here (network, upstream error) quietly
  * hides the badge rather than showing an error: this is a nice-to-have on
  * top of the station's already-known (ingested) data, not something the
  * rest of the page depends on.
@@ -29,10 +28,9 @@ export default function FreshmileAvailability({ locationId }) {
     }
     const controller = new AbortController();
     setStatus("loading");
-    fetch(`${FRESHMILE_LOCATION_API_BASE}/${locationId}`, { signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`http ${res.status}`))))
+    fetchFreshmileAvailability(locationId, { signal: controller.signal })
       .then((body) => {
-        const isAvailable = body?.data?.is_available;
+        const isAvailable = body?.isAvailable;
         setStatus(isAvailable == null ? "unknown" : isAvailable ? "available" : "unavailable");
       })
       .catch((err) => {

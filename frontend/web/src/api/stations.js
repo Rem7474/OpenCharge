@@ -85,3 +85,17 @@ export async function fetchSources({ signal } = {}) {
   if (!res.ok) await throwForStatus(res, "GET /sources");
   return res.json();
 }
+
+/**
+ * A site's live is_available status, via our own backend (see
+ * components/FreshmileAvailability.jsx) rather than calling Freshmile's API
+ * directly from the browser: that direct call is blocked by CORS in
+ * production (Freshmile's API sends no Access-Control-Allow-Origin header —
+ * confirmed against the real deployment), so the backend proxies it
+ * (GET /freshmile/availability/{locationId} — see backend api/freshmile.go).
+ */
+export async function fetchFreshmileAvailability(locationId, { signal } = {}) {
+  const res = await fetch(`${API_BASE}/freshmile/availability/${encodeURIComponent(locationId)}`, { signal });
+  if (!res.ok) await throwForStatus(res, `GET /freshmile/availability/${locationId}`);
+  return res.json();
+}
