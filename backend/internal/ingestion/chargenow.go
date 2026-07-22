@@ -30,10 +30,16 @@ const (
 
 // chargenowHeaders mirrors the browser request ChargeNow's WAF accepts —
 // same reasoning as izivia.go's iziviaHeaders: plain net/http requests
-// without these get rejected outright. rest-api-path is the load-bearing
-// one and is set per-request (see doRequest), not here, since its value
-// differs between /query ("clusters", confirmed against a real response)
-// and /tariffs/.../prices (unverified — see doRequest's comment).
+// without these get rejected outright. rest-api-path is deliberately NOT
+// here even though it's a real header ChargeNow's WAF checks: it's a
+// per-request routing key (see doRequest's doc comment — its value picks
+// which internal microservice actually handles the request), set
+// per-request there instead. A previous version of this map set it to
+// "clusters" here as a blanket default, which — once doRequest's own
+// per-request value became conditional (empty means "send no header at
+// all", needed for /tariffs/.../prices) — silently won back via this
+// map's own for-range loop before the per-request logic ran, defeating
+// the whole fix.
 var chargenowHeaders = map[string]string{
 	"accept":          "application/json, text/plain, */*",
 	"accept-language": "fr,fr-FR;q=0.9,en;q=0.8",
@@ -42,7 +48,6 @@ var chargenowHeaders = map[string]string{
 	"dnt":             "1",
 	"origin":          "https://chargenow.com",
 	"referer":         "https://chargenow.com/web/fr/cn-fr/map",
-	"rest-api-path":   "clusters",
 	"sec-fetch-dest":  "empty",
 	"sec-fetch-mode":  "cors",
 	"sec-fetch-site":  "same-origin",
@@ -427,7 +432,10 @@ func (ing *ChargenowIngester) processPoolBatch(ctx context.Context, pools []char
 			return 0, fmt.Errorf("marshal chargenow price batch: %w", err)
 		}
 		respBody, err := ing.withRetries(ctx, ing.BaseURL+chargenowPricesPath, func() ([]byte, int, error) {
-			return ing.doRequest(ctx, ing.BaseURL+chargenowPricesPath, "prices", body)
+			// No rest-api-path header on this request — see doRequest's doc
+			// comment for why setting one here previously broke every price
+			// fetch.
+			return ing.doRequest(ctx, ing.BaseURL+chargenowPricesPath, "", body)
 		})
 		if err != nil {
 			log.Printf("chargenow: price batch [%d:%d] failed, skipping: %v", start, end, err)
@@ -807,16 +815,23 @@ func (ing *ChargenowIngester) withRetries(ctx context.Context, label string, do 
 }
 
 // doRequest performs a single HTTP request with ChargeNow's WAF-required
-// headers. restAPIPath is the load-bearing one: confirmed "clusters" for
-// /query against a real response; "prices" for /tariffs/.../prices is an
-// educated guess (same "last meaningful path segment" pattern) that has
-// NOT been verified against a live response — this project's sandbox has
-// no network access to chargenow.com to confirm it. If the price-fetch
-// phase starts failing in production with a WAF-shaped rejection (opaque
-// 403/406, not an ordinary "unknown charge_point" or auth error from
-// ChargeNow's own API), check this value first — capture the real header
-// from a browser DevTools request to /tariffs/CHARGENOW_PRIME/prices and
-// update this constant.
+// headers. restAPIPath is a routing key, not a path-derived label: the
+// single /api/map/v1/fr/... facade dispatches to a completely different
+// internal microservice (and body/response schema) depending on its value
+// — confirmed against real traffic: "clusters" routes searchCriteria bbox
+// queries to /poi-static-data/v1/poi-cluster-search (what /query uses for
+// discovery, see fetchQuery), "charge-points" routes
+// DCSChargePointDynStatusRequest queries to
+// /poi-availability/v2/charge-points/query, and "pools" routes dcsPoolIds
+// lookups elsewhere — none of which this ingester needs beyond discovery.
+//
+// /tariffs/CHARGENOW_PRIME/prices takes no rest-api-path header at all — a
+// previous guess set it to "prices" (following the same "last meaningful
+// path segment" pattern as "clusters"), which in fact routed every price
+// request to the cluster-search microservice instead, which rejected it
+// (its payload has no searchCriteria to validate) and quietly broke price
+// fetching for every run. restAPIPath == "" (see the prices call site in
+// processPoolBatch) leaves the header unset entirely.
 func (ing *ChargenowIngester) doRequest(ctx context.Context, url, restAPIPath string, body []byte) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -825,7 +840,9 @@ func (ing *ChargenowIngester) doRequest(ctx context.Context, url, restAPIPath st
 	for k, v := range chargenowHeaders {
 		req.Header.Set(k, v)
 	}
-	req.Header.Set("rest-api-path", restAPIPath)
+	if restAPIPath != "" {
+		req.Header.Set("rest-api-path", restAPIPath)
+	}
 	resp, err := ing.client.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("chargenow request to %s: %w", url, err)

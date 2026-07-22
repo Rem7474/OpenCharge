@@ -193,8 +193,25 @@ func TestChargenowIngester_Run(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case chargenowQueryPath:
+			// Confirmed against real traffic: ChargeNow's /query facade
+			// routes a searchCriteria (bbox) discovery request to its
+			// cluster-search backend only when rest-api-path is exactly
+			// "clusters" — anything else (or a different endpoint's own
+			// value bleeding in here) routes to the wrong microservice.
+			if got := r.Header.Get("rest-api-path"); got != "clusters" {
+				t.Errorf("query request rest-api-path = %q, want clusters", got)
+			}
 			_ = json.NewEncoder(w).Encode(queryResp)
 		case chargenowPricesPath:
+			// Pins a real production bug: /tariffs/.../prices takes no
+			// rest-api-path header at all. Setting one (previously
+			// "prices", following the same pattern as the query
+			// endpoint's "clusters") in fact routed every price request
+			// to the cluster-search backend instead, which rejected it
+			// outright — silently breaking price fetching on every run.
+			if got := r.Header.Get("rest-api-path"); got != "" {
+				t.Errorf("prices request rest-api-path = %q, want no header at all", got)
+			}
 			priceRequests++
 			var items []chargenowPriceQueryItem
 			if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
