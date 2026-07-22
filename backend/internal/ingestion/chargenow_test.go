@@ -390,9 +390,15 @@ func TestChargenowIngester_RunStreamsMultipleBatches(t *testing.T) {
 // then-price-everything-then-write-everything pipeline would have.
 //
 // consumePools is single-threaded (one batch at a time), so by the time
-// the second batch's price request reaches the test server, the first
-// batch's database write has already completed synchronously — this test
-// relies on that ordering to cancel ctx at exactly that point, deterministically.
+// the first price request belonging to the second pool batch reaches the
+// test server, the first batch's database write has already completed
+// synchronously — this test relies on that ordering to cancel ctx at
+// exactly that point, deterministically. Each pool batch's own price
+// items are further split into chargenowPriceBatchSize-sized HTTP
+// requests (see processPoolBatch), so "the second pool batch's first
+// request" is not simply "the second price request overall" whenever a
+// pool batch needs more than one of those to cover all its items —
+// requestsPerPoolBatch below computes the real boundary.
 func TestChargenowIngester_RunKeepsAlreadyWrittenBatchesOnCancellation(t *testing.T) {
 	pool := setupLinkingTestPool(t)
 	bgCtx := context.Background()
@@ -426,6 +432,17 @@ func TestChargenowIngester_RunKeepsAlreadyWrittenBatchesOnCancellation(t *testin
 	runCtx, cancelRun := context.WithCancel(bgCtx)
 	defer cancelRun()
 
+	// Every pool here sits exactly on a CCS (dc) IRVE station, but
+	// FindNearestStationsForKind always falls back to the nearest overall
+	// candidate even for the "wrong" kind when nothing better is in range
+	// (see its doc comment) — so both the ac and dc lookups resolve to
+	// that same station, and each pool contributes 2 price items, not 1.
+	// The first pool batch's items are split into this many
+	// chargenowPriceBatchSize-sized requests before the second pool
+	// batch's own first request begins.
+	const itemsPerPool = 2
+	requestsPerPoolBatch := int32((chargenowPoolBatchSize*itemsPerPool + chargenowPriceBatchSize - 1) / chargenowPriceBatchSize)
+
 	var priceBatches int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -433,12 +450,13 @@ func TestChargenowIngester_RunKeepsAlreadyWrittenBatchesOnCancellation(t *testin
 			_ = json.NewEncoder(w).Encode(queryResp)
 		case chargenowPricesPath:
 			n := atomic.AddInt32(&priceBatches, 1)
-			if n >= 2 {
-				// consumePools only reaches a second batch's price
-				// request after the first batch's write has already
-				// completed (single-threaded consumer) — cancel now and
-				// answer nothing, simulating a SIGINT/idle-timeout
-				// landing exactly between batches.
+			if n > requestsPerPoolBatch {
+				// The first pool batch's write has already completed
+				// (single-threaded consumer) by the time its own price
+				// requests are all done and the second pool batch's
+				// first one arrives — cancel now and answer nothing,
+				// simulating a SIGINT/idle-timeout landing exactly
+				// between batches.
 				cancelRun()
 				time.Sleep(50 * time.Millisecond)
 				return

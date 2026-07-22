@@ -103,24 +103,34 @@ const (
 	// heartbeat, a slow-but-healthy throttled run looks identical to a
 	// hung one for that whole stretch.
 	chargenowProgressLogInterval = 10 * time.Second
-	// How many (charge_point, power_type, power) triples go in one POST to
-	// the prices endpoint — same reasoning as ingestionBulkChunkSize:
-	// bound request/response size without turning thousands of pools into
-	// thousands of round trips.
-	chargenowPriceBatchSize = 200
+	// chargenowPriceBatchSize is how many (charge_point, power_type, power)
+	// triples go in one POST to the prices endpoint. Deliberately small and
+	// close to real traffic (every captured real request has 1-3 items,
+	// for a single pool's charge points) rather than batching many pools
+	// together: confirmed in production that a single much larger request
+	// (74 items, from batching a whole chargenowPoolBatchSize worth of
+	// pools into it) gets a 403 from ChargeNow's WAF even once request
+	// *rate* is already throttled to something safe (chargenowMinRequestInterval)
+	// — request *size* looks like an independent signal it also checks.
+	// processPoolBatch's own price-fetch loop already slices a pool
+	// batch's full item list into as many chargenowPriceBatchSize-sized
+	// requests as it takes, so shrinking this doesn't lose anything, just
+	// trades fewer/bigger requests for more/smaller ones.
+	chargenowPriceBatchSize = 3
 	// chargenowPoolBatchSize bounds how many pools are correlated, priced,
-	// and written together as one unit before the pipeline moves on to
-	// the next — half of chargenowPriceBatchSize since each pool
-	// contributes up to 2 price items (AC and DC), so a batch this size
-	// produces at most one price request rather than needing its own
-	// internal pagination. Pools are fed into a batch as they're
-	// discovered (see scanPools), interleaved with pricing and writing,
-	// rather than only starting once the whole map has been scanned —
-	// same durability rationale as freshmile.go's streaming pipeline: a
-	// run cut short (SIGINT, the idle watchdog giving up) keeps whatever
-	// has already been priced and written instead of losing everything
-	// gathered so far.
-	chargenowPoolBatchSize = chargenowPriceBatchSize / 2
+	// and written together as one unit before the pipeline moves on to the
+	// next. No longer tied to chargenowPriceBatchSize (seeing prices sent
+	// in small batches): this is purely about our own database-write
+	// efficiency (one bulk round trip per batch — see
+	// writeSourceStationChunk), which has nothing to do with what
+	// ChargeNow's API tolerates per request. Pools are fed into a batch as
+	// they're discovered (see scanPools), interleaved with pricing and
+	// writing, rather than only starting once the whole map has been
+	// scanned — same durability rationale as freshmile.go's streaming
+	// pipeline: a run cut short (SIGINT, the idle watchdog giving up)
+	// keeps whatever has already been priced and written instead of
+	// losing everything gathered so far.
+	chargenowPoolBatchSize = 100
 
 	// chargenowFlushTimeout bounds how long a single batch write is
 	// allowed to take — same rationale and value as izivia.go's
