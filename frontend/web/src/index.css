@@ -741,6 +741,12 @@ a {
 }
 
 .price-mode-toggle button {
+  /* Without this, some browsers keep their native button chrome (a subtle
+     border/background) even with border:none/background:none below,
+     making the unpressed button look like its own separate boxed control
+     instead of a plain segment of the pill. */
+  appearance: none;
+  -webkit-appearance: none;
   border: none;
   background: none;
   padding: 4px 10px;
