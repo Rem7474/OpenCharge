@@ -14,6 +14,7 @@ import {
 } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import { findFreshmileSiteMeta } from "../utils/freshmile.js";
+import { useFreshmileAvailability } from "../hooks/useFreshmileAvailability.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 import FreshmileAvailability from "./FreshmileAvailability.jsx";
 
@@ -95,6 +96,7 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
 function ConnectorPriceSection({
   connectorSummary,
   detail,
+  connectorAvailability,
   selectedSources,
   priceMode,
   chargeKWh,
@@ -150,6 +152,12 @@ function ConnectorPriceSection({
         <Zap size={13} strokeWidth={2.2} />
         {formatConnectorLabel(connectorSummary.connectors?.[0]?.kind) || "Connecteur"}
         {connectorSummary.connectors?.[0]?.maxPowerKw ? ` · ${connectorSummary.connectors[0].maxPowerKw}kW` : ""}
+        {connectorAvailability && (
+          <span className={`connector-availability${connectorAvailability.available === 0 ? " connector-availability--none" : ""}`}>
+            {connectorAvailability.available}/{connectorAvailability.total} disponible
+            {connectorAvailability.available > 1 ? "s" : ""}
+          </span>
+        )}
       </h4>
 
       {selectedTariffs.length === 0 && selectedEntries.length > 0 && (
@@ -217,6 +225,13 @@ export default function StationDetails({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [site?.key]);
 
+  // findFreshmileSiteMeta tolerates details being null (still loading) or
+  // site being null (nothing selected) — computed unconditionally, ahead of
+  // the early return below, since useFreshmileAvailability is a hook and
+  // must run on every render regardless of whether site is null.
+  const { imgPreviewUrl, locationId } = findFreshmileSiteMeta(details);
+  const freshmileAvailability = useFreshmileAvailability(locationId);
+
   if (!site) return null;
 
   // Name/address/operator are identical for every connector of a site (same
@@ -229,7 +244,6 @@ export default function StationDetails({
   // identical across every connector of the same site.
   const firstDetail = details?.[0]?.station;
   const connectors = site.stations.map((s) => s.connectors?.[0]).filter(Boolean);
-  const { imgPreviewUrl, locationId } = findFreshmileSiteMeta(details);
 
   return (
     <div className="sidebar">
@@ -253,12 +267,12 @@ export default function StationDetails({
       {imgPreviewUrl ? (
         <div className="station-preview">
           <img src={imgPreviewUrl} alt="" className="station-preview-image" loading="lazy" />
-          {locationId != null && <FreshmileAvailability locationId={locationId} />}
+          <FreshmileAvailability availability={freshmileAvailability} />
         </div>
       ) : (
-        locationId != null && (
+        freshmileAvailability && (
           <div className="station-preview station-preview--no-image">
-            <FreshmileAvailability locationId={locationId} />
+            <FreshmileAvailability availability={freshmileAvailability} />
           </div>
         )
       )}
@@ -327,6 +341,7 @@ export default function StationDetails({
               key={connectorSummary.id}
               connectorSummary={connectorSummary}
               detail={details[i]}
+              connectorAvailability={freshmileAvailability?.connectorAvailability?.[connectorSummary.connectors?.[0]?.kind]}
               selectedSources={selectedSources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}

@@ -760,6 +760,10 @@ a {
   color: var(--color-accent);
 }
 
+.station-preview--no-image .freshmile-availability--partial {
+  color: var(--color-accent-mid);
+}
+
 .station-preview--no-image .freshmile-availability--unavailable {
   color: var(--color-accent-high);
 }
@@ -768,12 +772,12 @@ a {
   color: #7fe08b;
 }
 
-.freshmile-availability--unavailable {
-  color: #f3a3a3;
+.freshmile-availability--partial {
+  color: #f0c36d;
 }
 
-.freshmile-availability--loading {
-  color: #d8d8d8;
+.freshmile-availability--unavailable {
+  color: #f3a3a3;
 }
 
 .station-meta-card {
@@ -872,6 +876,17 @@ a {
   font-size: 13px;
   font-weight: 700;
   color: var(--color-muted);
+}
+
+.connector-availability {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.connector-availability--none {
+  color: var(--color-accent-high);
 }
 
 .connector-price-section .station-price-block,
