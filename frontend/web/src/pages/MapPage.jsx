@@ -43,7 +43,9 @@ const DEFAULT_FILTERS = {
 };
 
 export default function MapPage() {
-  const [selectedStationId, setSelectedStationId] = useState(null);
+  // The site (group of same-location connectors) whose detail card is open
+  // — see StationMarkers/StationDetails and utils/stationGrouping.js.
+  const [selectedSite, setSelectedSite] = useState(null);
   const [filters, setFilters] = useState(() => readStoredFilters() ?? DEFAULT_FILTERS);
   // Onboarding is shown automatically only the first time the app is
   // opened (nothing persisted yet) — every later visit goes straight to
@@ -64,6 +66,16 @@ export default function MapPage() {
         ? prev.connectorTypes.filter((t) => t !== type)
         : [...prev.connectorTypes, type],
     }));
+  };
+
+  // Switching price mode also resets any active price-range filter: its
+  // unit/meaning changes with the mode (a plain €/kWh rate vs. a total for
+  // the configured session — see FilterPanel's label and the backend's
+  // chargeKWh/chargeMinutes params), so a bound set in one mode is
+  // meaningless carried over into the other.
+  const changePriceMode = (mode) => {
+    setPriceMode(mode);
+    setFilters((prev) => ({ ...prev, minPriceCentsPerKwh: null, maxPriceCentsPerKwh: null }));
   };
 
   const setMinPowerKw = (minPowerKw) => setFilters((prev) => ({ ...prev, minPowerKw }));
@@ -119,7 +131,7 @@ export default function MapPage() {
         onToggleSource={toggleSource}
         onSelectPlan={selectPlan}
         priceMode={priceMode}
-        onChangePriceMode={setPriceMode}
+        onChangePriceMode={changePriceMode}
         chargeKWh={chargeKWh}
         onChangeChargeKWh={setChargeKWh}
         chargeMinutes={chargeMinutes}
@@ -147,10 +159,11 @@ export default function MapPage() {
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
             <StationMarkers
-              onSelect={setSelectedStationId}
+              onSelect={setSelectedSite}
               selectedSources={filters.sources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}
+              chargeMinutes={chargeMinutes}
               showAllStations={filters.showAllStations}
               selectedConnectorTypes={filters.connectorTypes}
               minPowerKw={filters.minPowerKw}
@@ -161,10 +174,10 @@ export default function MapPage() {
             <GeolocateControl />
           </MapContainer>
         </div>
-        {selectedStationId && (
+        {selectedSite && (
           <StationDetails
-            stationId={selectedStationId}
-            onClose={() => setSelectedStationId(null)}
+            site={selectedSite}
+            onClose={() => setSelectedSite(null)}
             selectedSources={filters.sources}
             priceMode={priceMode}
             chargeKWh={chargeKWh}

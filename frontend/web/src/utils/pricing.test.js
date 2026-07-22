@@ -6,8 +6,21 @@ import {
   bestTariffForSource,
   cheapestTariff,
   pickPriceCentsPerKWh,
+  cheapestPriceAcrossStations,
   priceTier,
 } from "./pricing.js";
+import { groupStationsByLocation } from "./stationGrouping.js";
+
+function station(overrides) {
+  return {
+    id: "irve:test",
+    name: "Test",
+    location: { lat: 45.9, lng: 6.1 },
+    connectors: [{ kind: "T2" }],
+    pricingSummary: {},
+    ...overrides,
+  };
+}
 
 function tariff(overrides) {
   return {
@@ -152,5 +165,41 @@ describe("priceTier", () => {
   });
   it("returns null for an unknown price", () => {
     expect(priceTier(null)).toBeNull();
+  });
+});
+
+describe("cheapestPriceAcrossStations", () => {
+  it("picks the cheapest connector's price, not the first one", () => {
+    const stations = [
+      station({ connectors: [{ kind: "T2" }], pricingSummary: { ac_min_cents_per_kwh: 40 } }),
+      station({ connectors: [{ kind: "CCS" }], pricingSummary: { dc_min_cents_per_kwh: 25 } }),
+    ];
+    expect(cheapestPriceAcrossStations(stations, false)).toBe(25);
+  });
+  it("reads selectedSourcesPricing instead when hasSelection is true", () => {
+    const stations = [
+      station({
+        connectors: [{ kind: "T2" }],
+        pricingSummary: { ac_min_cents_per_kwh: 10 },
+        selectedSourcesPricing: { ac_min_cents_per_kwh: 50 },
+      }),
+    ];
+    expect(cheapestPriceAcrossStations(stations, true)).toBe(50);
+  });
+  it("ignores connectors with no known price and returns null if none have one", () => {
+    const stations = [station({ pricingSummary: {} }), station({ pricingSummary: {} })];
+    expect(cheapestPriceAcrossStations(stations, false)).toBeNull();
+  });
+});
+
+describe("groupStationsByLocation", () => {
+  it("groups connectors sharing the exact same coordinates into one site", () => {
+    const a = station({ id: "irve:a", location: { lat: 45.9, lng: 6.1 } });
+    const b = station({ id: "irve:b", location: { lat: 45.9, lng: 6.1 } });
+    const c = station({ id: "irve:c", location: { lat: 46.0, lng: 6.2 } });
+    const sites = groupStationsByLocation([a, b, c]);
+    expect(sites).toHaveLength(2);
+    const siteAB = sites.find((s) => s.stations.length === 2);
+    expect(siteAB.stations.map((s) => s.id).sort()).toEqual(["irve:a", "irve:b"]);
   });
 });

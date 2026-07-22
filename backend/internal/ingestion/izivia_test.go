@@ -156,8 +156,8 @@ func TestIziviaGetJSONGivesUpAfterMaxRetries(t *testing.T) {
 	if !strings.Contains(err.Error(), srv.URL) {
 		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
 	}
-	if got := atomic.LoadInt32(&requests); got != iziviaMaxRetries+1 {
-		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, iziviaMaxRetries+1, iziviaMaxRetries)
+	if got := atomic.LoadInt32(&requests); got != defaultMaxRetries+1 {
+		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, defaultMaxRetries+1, defaultMaxRetries)
 	}
 }
 

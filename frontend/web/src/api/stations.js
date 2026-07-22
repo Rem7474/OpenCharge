@@ -27,6 +27,11 @@ async function throwForStatus(res, what) {
  * both pricingSummary and selectedSourcesPricing server-side (see backend
  * GET /stations docs), so the price used for the map marker never assumes
  * a paid subscription.
+ *
+ * chargeKWh/chargeMinutes, when given alongside min/maxPriceCentsPerKwh,
+ * switch the price-range filter server-side to the total cost of a session
+ * of that size (energy + time + flat fee) instead of a plain €/kWh rate —
+ * see backend GET /stations docs.
  */
 export async function fetchStationsInBBox(
   bbox,
@@ -38,6 +43,8 @@ export async function fetchStationsInBBox(
     minPowerKw,
     minPriceCentsPerKwh,
     maxPriceCentsPerKwh,
+    chargeKWh,
+    chargeMinutes,
     excludeSubscriptionPlans,
     limit,
     signal,
@@ -52,6 +59,8 @@ export async function fetchStationsInBBox(
   if (minPowerKw != null) params.set("minPowerKw", String(minPowerKw));
   if (minPriceCentsPerKwh != null) params.set("minPriceCentsPerKwh", String(minPriceCentsPerKwh));
   if (maxPriceCentsPerKwh != null) params.set("maxPriceCentsPerKwh", String(maxPriceCentsPerKwh));
+  if (chargeKWh != null) params.set("chargeKWh", String(chargeKWh));
+  if (chargeMinutes != null) params.set("chargeMinutes", String(chargeMinutes));
   if (excludeSubscriptionPlans) params.set("excludeSubscriptionPlans", "true");
   params.set("limit", String(limit ?? 500));
 
@@ -74,5 +83,19 @@ export async function fetchStationDetails(id, { signal } = {}) {
 export async function fetchSources({ signal } = {}) {
   const res = await fetch(`${API_BASE}/sources`, { signal });
   if (!res.ok) await throwForStatus(res, "GET /sources");
+  return res.json();
+}
+
+/**
+ * A site's live is_available status, via our own backend (see
+ * components/FreshmileAvailability.jsx) rather than calling Freshmile's API
+ * directly from the browser: that direct call is blocked by CORS in
+ * production (Freshmile's API sends no Access-Control-Allow-Origin header —
+ * confirmed against the real deployment), so the backend proxies it
+ * (GET /freshmile/availability/{locationId} — see backend api/freshmile.go).
+ */
+export async function fetchFreshmileAvailability(locationId, { signal } = {}) {
+  const res = await fetch(`${API_BASE}/freshmile/availability/${encodeURIComponent(locationId)}`, { signal });
+  if (!res.ok) await throwForStatus(res, `GET /freshmile/availability/${locationId}`);
   return res.json();
 }

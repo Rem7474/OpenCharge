@@ -13,7 +13,10 @@ import {
   SUBSCRIPTION_PLAN,
 } from "../utils/pricing.js";
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
+import { findFreshmileSiteMeta } from "../utils/freshmile.js";
+import { useFreshmileAvailability } from "../hooks/useFreshmileAvailability.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
+import FreshmileAvailability from "./FreshmileAvailability.jsx";
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
 // mode, a breakdown of every cost component the tariff actually carries
@@ -83,43 +86,35 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
   );
 }
 
-export default function StationDetails({
-  stationId,
-  onClose,
+// One physical site can expose several connectors (points of charge) —
+// each with its own independent set of tariffs, since a source can price
+// e.g. a CCS plug differently from a T2 plug at the same location (see
+// backend station_repo.go's connector-kind bucketing). This renders one
+// connector's full price section — everything StationDetails used to show
+// for "the" station, now scoped to a single connector — so the parent can
+// stack one per connector on the same card (see StationDetails' render).
+function ConnectorPriceSection({
+  connectorSummary,
+  detail,
+  connectorAvailability,
   selectedSources,
   priceMode,
   chargeKWh,
   chargeMinutes,
   excludeSubscriptionPlans,
 }) {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    if (!stationId) return;
-    const controller = new AbortController();
-    setData(null);
-    setError(null);
-    fetchStationDetails(stationId, { signal: controller.signal })
-      .then(setData)
-      .catch((err) => {
-        if (err.name !== "AbortError") setError(err);
-      });
-    return () => controller.abort();
-  }, [stationId]);
-
   // GET /stations/{id} always returns every known tariff, including
   // subscription-plan ones — the "Exclure les tarifs abonnés" filter is
   // applied client-side here so the detail panel matches what the map
   // marker already shows (the marker's price comes from the API's own
   // excludeSubscriptionPlans param — see api/stations.js).
   const tariffs = useMemo(() => {
-    const all = data?.tariffs ?? [];
+    const all = detail?.tariffs ?? [];
     return excludeSubscriptionPlans ? all.filter((t) => t.plan !== SUBSCRIPTION_PLAN) : all;
-  }, [data, excludeSubscriptionPlans]);
+  }, [detail, excludeSubscriptionPlans]);
 
-  const stationConnectorType = data ? data.station.connectors?.[0]?.kind : null;
-  const connectorKind = data ? connectorPriceKind(stationConnectorType) : null;
+  const stationConnectorType = detail ? detail.station.connectors?.[0]?.kind : null;
+  const connectorKind = connectorPriceKind(stationConnectorType);
   const selectedEntries = Object.entries(selectedSources);
   const selectedTariffs = useMemo(
     () =>
@@ -143,120 +138,216 @@ export default function StationDetails({
     [selectedTariffs]
   );
   const overallBest = useMemo(
-    () => (data ? cheapestTariff(tariffs, connectorKind, stationConnectorType) : null),
-    [data, tariffs, connectorKind, stationConnectorType]
+    () => (detail ? cheapestTariff(tariffs, connectorKind, stationConnectorType) : null),
+    [detail, tariffs, connectorKind, stationConnectorType]
   );
   const overallBeatsSelection =
     overallBest &&
     (!cheapestSelected ||
       currentEnergyPriceCentsPerKWh(overallBest) < currentEnergyPriceCentsPerKWh(cheapestSelected.tariff));
 
-  if (!stationId) return null;
+  return (
+    <div className="connector-price-section">
+      <h4 className="connector-price-section-heading">
+        <Zap size={13} strokeWidth={2.2} />
+        {formatConnectorLabel(connectorSummary.connectors?.[0]?.kind) || "Connecteur"}
+        {connectorSummary.connectors?.[0]?.maxPowerKw ? ` · ${connectorSummary.connectors[0].maxPowerKw}kW` : ""}
+        {connectorAvailability && (
+          <span className={`connector-availability${connectorAvailability.available === 0 ? " connector-availability--none" : ""}`}>
+            {connectorAvailability.available}/{connectorAvailability.total} disponible
+            {connectorAvailability.available > 1 ? "s" : ""}
+          </span>
+        )}
+      </h4>
+
+      {selectedTariffs.length === 0 && selectedEntries.length > 0 && (
+        <p>Aucun tarif connu pour ce connecteur pour les réseaux sélectionnés.</p>
+      )}
+      {selectedTariffs.map(({ source, plan, tariff }) => (
+        <div className="station-price-block" key={`${source}:${plan}`}>
+          <div className="source-name">
+            {formatSourceLabel(source)} · {formatPlanLabel(plan)}
+          </div>
+          <TariffDisplay tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
+        </div>
+      ))}
+      {overallBest && overallBeatsSelection && (
+        <div className="station-price-block best-overall">
+          <div className="source-name">
+            <Star size={12} strokeWidth={2.4} /> Meilleur prix toutes sources · {formatSourceLabel(overallBest.source)}{" "}
+            · {formatPlanLabel(overallBest.plan)}
+          </div>
+          <TariffDisplay tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
+        </div>
+      )}
+      {!overallBest && selectedEntries.length === 0 && <p>Aucun tarif connu pour ce connecteur.</p>}
+
+      {tariffs.length > 0 && (
+        <details className="connector-all-tariffs">
+          <summary>Tous les tarifs ({tariffs.length})</summary>
+          {tariffs.map((t, i) => (
+            <TariffRow tariff={t} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} key={i} />
+          ))}
+        </details>
+      )}
+    </div>
+  );
+}
+
+export default function StationDetails({
+  site,
+  onClose,
+  selectedSources,
+  priceMode,
+  chargeKWh,
+  chargeMinutes,
+  excludeSubscriptionPlans,
+}) {
+  const [details, setDetails] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!site) return undefined;
+    const controller = new AbortController();
+    setDetails(null);
+    setError(null);
+    Promise.all(site.stations.map((s) => fetchStationDetails(s.id, { signal: controller.signal })))
+      .then(setDetails)
+      .catch((err) => {
+        if (err.name !== "AbortError") setError(err);
+      });
+    return () => controller.abort();
+    // Re-fetches only when the site itself changes (site.key, its stable
+    // location-based identity — see utils/stationGrouping.js), not on every
+    // re-render that hands down a structurally-equal but new `site` object
+    // reference (StationMarkers recomputes the grouping on every station
+    // list refresh).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [site?.key]);
+
+  // findFreshmileSiteMeta tolerates details being null (still loading) or
+  // site being null (nothing selected) — computed unconditionally, ahead of
+  // the early return below, since useFreshmileAvailability is a hook and
+  // must run on every render regardless of whether site is null.
+  const { imgPreviewUrl, locationId } = findFreshmileSiteMeta(details);
+  const freshmileAvailability = useFreshmileAvailability(locationId);
+
+  if (!site) return null;
+
+  // Name/address/operator are identical for every connector of a site (same
+  // physical location) — the list response already has them, so the header
+  // renders immediately without waiting on the per-connector detail fetch.
+  const first = site.stations[0];
+  // Access type/24-7/PMR/etc. are metadata-only fields the list endpoint
+  // doesn't carry (see api/dto.go's stationDetailDTO vs stationListItemDTO);
+  // take them from whichever connector's detail loaded first — in practice
+  // identical across every connector of the same site.
+  const firstDetail = details?.[0]?.station;
+  const connectors = site.stations.map((s) => s.connectors?.[0]).filter(Boolean);
 
   return (
     <div className="sidebar">
       <div aria-live="polite">
-        {error && (
-          <p role="alert">
-            {friendlyFetchErrorMessage(error)}
-          </p>
-        )}
-        {!data && !error && <p>Chargement…</p>}
+        {error && <p role="alert">{friendlyFetchErrorMessage(error)}</p>}
+        {!details && !error && <p>Chargement…</p>}
       </div>
-      {data && (
-        <>
-          <div className="station-header">
-            <div className="station-header-text">
-              <h2>{data.station.name || "Station sans nom"}</h2>
-              <div className="station-header-sub">
-                {data.station.operator || "Opérateur inconnu"}
-                {data.station.enseigne ? ` · ${data.station.enseigne}` : ""}
-              </div>
-            </div>
-            <button className="close-btn" onClick={onClose} aria-label="Fermer">
-              <X size={15} strokeWidth={2.2} />
-            </button>
+      <div className="station-header">
+        <div className="station-header-text">
+          <h2>{first.name || "Station sans nom"}</h2>
+          <div className="station-header-sub">
+            {first.operator || "Opérateur inconnu"}
+            {first.enseigne ? ` · ${first.enseigne}` : ""}
           </div>
+        </div>
+        <button className="close-btn" onClick={onClose} aria-label="Fermer">
+          <X size={15} strokeWidth={2.2} />
+        </button>
+      </div>
 
-          <div className="station-meta-card">
-            <div className="station-meta-row">
-              <MapPin size={15} strokeWidth={2} className="station-meta-icon" />
-              <span>
-                {data.station.address.street}
-                <br />
-                {data.station.address.postalCode} {data.station.address.city}
+      {imgPreviewUrl ? (
+        <div className="station-preview">
+          <img src={imgPreviewUrl} alt="" className="station-preview-image" loading="lazy" />
+          <FreshmileAvailability availability={freshmileAvailability} />
+        </div>
+      ) : (
+        freshmileAvailability && (
+          <div className="station-preview station-preview--no-image">
+            <FreshmileAvailability availability={freshmileAvailability} />
+          </div>
+        )
+      )}
+
+      <div className="station-meta-card">
+        <div className="station-meta-row">
+          <MapPin size={15} strokeWidth={2} className="station-meta-icon" />
+          <span>
+            {first.address.street}
+            <br />
+            {first.address.postalCode} {first.address.city}
+          </span>
+        </div>
+
+        {connectors.length > 0 && (
+          <div className="connector-badges">
+            {connectors.map((c, i) => (
+              <span className="connector-badge" key={i}>
+                <Zap size={13} strokeWidth={2.2} />
+                {formatConnectorLabel(c.kind)}
+                {c.maxPowerKw ? ` · ${c.maxPowerKw}kW` : ""}
               </span>
-            </div>
+            ))}
+          </div>
+        )}
 
-            {data.station.connectors.length > 0 && (
-              <div className="connector-badges">
-                {data.station.connectors.map((c, i) => (
-                  <span className="connector-badge" key={i}>
-                    <Zap size={13} strokeWidth={2.2} />
-                    {formatConnectorLabel(c.kind)}
-                    {c.maxPowerKw ? ` · ${c.maxPowerKw}kW` : ""}
-                  </span>
-                ))}
-              </div>
-            )}
-
+        {firstDetail && (
+          <>
             <div className="station-meta-row">
               <Clock size={15} strokeWidth={2} className="station-meta-icon" />
               <span>
-                {data.station.accessType || "Accès inconnu"} · {data.station.is24_7 ? "24/7" : "horaires limités"}
-                {data.station.openingHours && data.station.openingHours !== "24/7" && ` (${data.station.openingHours})`}
+                {firstDetail.accessType || "Accès inconnu"} · {firstDetail.is24_7 ? "24/7" : "horaires limités"}
+                {firstDetail.openingHours && firstDetail.openingHours !== "24/7" && ` (${firstDetail.openingHours})`}
               </span>
             </div>
 
-            {data.station.pdcCount != null && (
+            {firstDetail.pdcCount != null && (
               <div className="station-meta-row">
                 <Building2 size={15} strokeWidth={2} className="station-meta-icon" />
-                <span>{data.station.pdcCount} point(s) de charge sur site</span>
+                <span>{firstDetail.pdcCount} point(s) de charge sur site</span>
               </div>
             )}
-            {data.station.accessibilityPmr && (
+            {firstDetail.accessibilityPmr && (
               <div className="station-meta-row">
                 <Accessibility size={15} strokeWidth={2} className="station-meta-icon" />
-                <span>{data.station.accessibilityPmr}</span>
+                <span>{firstDetail.accessibilityPmr}</span>
               </div>
             )}
-            {data.station.cableT2Attached != null && (
+            {firstDetail.cableT2Attached != null && (
               <div className="station-meta-row">
                 <Cable size={15} strokeWidth={2} className="station-meta-icon" />
-                <span>Câble T2 {data.station.cableT2Attached ? "attaché" : "non attaché"}</span>
+                <span>Câble T2 {firstDetail.cableT2Attached ? "attaché" : "non attaché"}</span>
               </div>
             )}
-          </div>
+          </>
+        )}
+      </div>
 
+      {details && (
+        <>
           <h3 className="section-heading">
-            <Tag size={15} strokeWidth={2.2} /> Prix
+            <Tag size={15} strokeWidth={2.2} /> Prix par connecteur
           </h3>
-          {selectedTariffs.length === 0 && selectedEntries.length > 0 && (
-            <p>Aucun tarif connu à cette station pour les réseaux sélectionnés.</p>
-          )}
-          {selectedTariffs.map(({ source, plan, tariff }) => (
-            <div className="station-price-block" key={`${source}:${plan}`}>
-              <div className="source-name">
-                {formatSourceLabel(source)} · {formatPlanLabel(plan)}
-              </div>
-              <TariffDisplay tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-            </div>
-          ))}
-          {overallBest && overallBeatsSelection && (
-            <div className="station-price-block best-overall">
-              <div className="source-name">
-                <Star size={12} strokeWidth={2.4} /> Meilleur prix toutes sources · {formatSourceLabel(overallBest.source)}{" "}
-                · {formatPlanLabel(overallBest.plan)}
-              </div>
-              <TariffDisplay tariff={overallBest} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-            </div>
-          )}
-          {!overallBest && selectedEntries.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
-
-          <h3 className="section-heading">Tous les tarifs</h3>
-          {tariffs.length === 0 && <p>Aucun tarif connu pour cette station.</p>}
-          {tariffs.map((t, i) => (
-            <TariffRow tariff={t} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} key={i} />
+          {site.stations.map((connectorSummary, i) => (
+            <ConnectorPriceSection
+              key={connectorSummary.id}
+              connectorSummary={connectorSummary}
+              detail={details[i]}
+              connectorAvailability={freshmileAvailability?.connectorAvailability?.[connectorSummary.connectors?.[0]?.kind]}
+              selectedSources={selectedSources}
+              priceMode={priceMode}
+              chargeKWh={chargeKWh}
+              chargeMinutes={chargeMinutes}
+              excludeSubscriptionPlans={excludeSubscriptionPlans}
+            />
           ))}
         </>
       )}

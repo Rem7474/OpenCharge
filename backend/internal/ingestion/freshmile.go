@@ -9,7 +9,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,14 +102,16 @@ type FreshmileConfig struct {
 	Workers int
 }
 
-// DefaultFreshmileConfig: Workers=24. Each location costs one HTTP round
-// trip (GET /locations/{id}, unlike Izivia's two), so this is the same
-// kind of I/O-bound single-host fan-out as Izivia's worker count, just
-// tuned down a bit given how retry-heavy this API already is (see
-// freshmileMaxRetries) — too high a worker count would only mean more
-// requests piling up in backoff at once against the same flaky gateway.
+// freshmileDefaultWorkers: 24. Each location costs one HTTP round trip
+// (GET /locations/{id}, unlike Izivia's two), so this is the same kind of
+// I/O-bound single-host fan-out as Izivia's worker count, just tuned down
+// a bit given how retry-heavy this API already is (see defaultMaxRetries
+// in common.go) — too high a worker count would only mean more requests
+// piling up in backoff at once against the same flaky gateway.
+const freshmileDefaultWorkers = 24
+
 func DefaultFreshmileConfig() FreshmileConfig {
-	return FreshmileConfig{Workers: 24}
+	return FreshmileConfig{Workers: freshmileDefaultWorkers}
 }
 
 type FreshmileIngester struct {
@@ -121,18 +122,24 @@ type FreshmileIngester struct {
 	BaseURL          string
 	Config           FreshmileConfig
 	MaxLinkDistanceM float64
-	client           *http.Client
-	retryBackoff     time.Duration // unexported: overridden by tests to keep them fast
+	// Failures, when set, records every request that failed for good
+	// (location detail fetch, map-locations tile scan) so a later
+	// -retry-failed pass can replay just those — see FailureLog.
+	Failures *FailureLog
+	// IdleTimeout bounds how long Run/RetryFailed goes without a single
+	// successful request before giving up on the whole run — see
+	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
+	IdleTimeout  time.Duration
+	idle         *idleWatchdog // set by Run/RetryFailed, read by doGet
+	client       *http.Client
+	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
 }
 
 func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, baseURL string, cfg FreshmileConfig) *FreshmileIngester {
 	if baseURL == "" {
 		baseURL = DefaultFreshmileBaseURL
 	}
-	workers := cfg.Workers
-	if workers <= 0 {
-		workers = 24
-	}
+	workers := effectiveWorkers(cfg.Workers, freshmileDefaultWorkers)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = max(workers, freshmileScanWorkers)
 	return &FreshmileIngester{
@@ -143,9 +150,19 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 		BaseURL:          baseURL,
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
+		IdleTimeout:      DefaultIdleTimeout,
 		client:           &http.Client{Timeout: 60 * time.Second, Transport: transport},
 		retryBackoff:     2 * time.Second,
 	}
+}
+
+// startIdleWatchdog wraps ctx with this ingester's idle watchdog (see
+// idleWatchdog) and records it on ing.idle so doGet can Ping it. The
+// returned cancel must be deferred immediately by the caller.
+func (ing *FreshmileIngester) startIdleWatchdog(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel, watchdog := startIdleWatchdog(ctx, ing.IdleTimeout)
+	ing.idle = watchdog
+	return ctx, cancel
 }
 
 // Run discovers Freshmile locations (recursively resolving map clusters
@@ -159,9 +176,101 @@ func NewFreshmileIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 // everything — discovery alone used to take the vast majority of a run's
 // wall-clock time with nothing durable to show for it yet.
 func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
+	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 	runStart := time.Now()
 
-	// pipelineCtx (not ctx directly) governs scanLocationIDs and the
+	processed, err := ing.runPipeline(ctx, ing.scanLocationIDs)
+
+	log.Printf("freshmile: done, %d locations processed", processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	// processed > 0 guards against a scan that silently found/fetched
+	// nothing (e.g. Freshmile's map-locations API down for the whole run)
+	// looking identical to "France has zero stations" and wiping the
+	// entire known dataset — see the same guard in izivia.go for the
+	// production incident that motivated it.
+	if err == nil && processed > 0 {
+		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart.Add(-repository.StaleSourceDataGracePeriod)); sweepErr != nil {
+			return processed, sweepErr
+		}
+	}
+	return processed, err
+}
+
+// RetryFailed replays only the requests a previous run recorded as failed
+// (see FailureLog): failed map tiles are re-scanned (re-discovering and
+// fetching whatever locations they cover) and failed location details are
+// re-fetched directly by id. Requests that fail again are re-recorded, so
+// the failure file always reflects what's still outstanding. No stale-data
+// sweep happens here: a retry pass only touches the previously-failed
+// subset, so most known locations legitimately go un-refreshed.
+func (ing *FreshmileIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
+	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
+
+	var ids []int
+	var tiles []freshmileBBox
+	seenIDs := map[int]struct{}{}
+	for _, f := range failures {
+		switch f.Kind {
+		case failKindFreshmileLocation:
+			var params struct {
+				ID int `json:"id"`
+			}
+			if err := json.Unmarshal(f.Params, &params); err != nil || params.ID == 0 {
+				log.Printf("freshmile: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			if _, dup := seenIDs[params.ID]; dup {
+				continue
+			}
+			seenIDs[params.ID] = struct{}{}
+			ids = append(ids, params.ID)
+		case failKindFreshmileTile:
+			var bbox freshmileBBox
+			if err := json.Unmarshal(f.Params, &bbox); err != nil {
+				log.Printf("freshmile: skipping unreadable %s failure: %v", f.Kind, err)
+				continue
+			}
+			tiles = append(tiles, bbox)
+		default:
+			log.Printf("freshmile: skipping failure of unknown kind %q", f.Kind)
+		}
+	}
+
+	log.Printf("freshmile: retrying %d locations and %d map tiles from %d recorded failure(s)", len(ids), len(tiles), len(failures))
+
+	// A location fed directly by id may also be re-discovered by a retried
+	// tile's scan; the resulting duplicate fetch is harmless (the write
+	// path upserts) and rare enough not to be worth threading the seen-set
+	// across the two feeds.
+	feed := func(feedCtx context.Context, idCh chan<- int) {
+		for _, id := range ids {
+			select {
+			case idCh <- id:
+			case <-feedCtx.Done():
+				return
+			}
+		}
+		if len(tiles) > 0 {
+			ing.scanBBoxes(feedCtx, idCh, tiles)
+		}
+	}
+	processed, err := ing.runPipeline(ctx, feed)
+	log.Printf("freshmile: retry done, %d locations processed", processed)
+	return processed, err
+}
+
+// runPipeline runs the shared discover→fetch→write pipeline behind both a
+// full Run and a RetryFailed pass: feed streams location IDs onto idCh
+// (a full run's feed is scanLocationIDs; a retry pass feeds recorded IDs
+// and re-scans failed tiles), detail-fetch workers consume them, and a
+// single writer batches results onto the database.
+func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx context.Context, idCh chan<- int)) (int, error) {
+	// pipelineCtx (not ctx directly) governs the feed and the
 	// detail-fetch workers, so that once writeResults returns — whether
 	// because the pipeline finished normally or because a flush failed —
 	// we can force those two stages to unwind via cancelPipeline below.
@@ -191,7 +300,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	go func() {
 		defer scanWG.Done()
 		defer close(idCh)
-		ing.scanLocationIDs(pipelineCtx, idCh)
+		feed(pipelineCtx, idCh)
 	}()
 
 	var workerWG sync.WaitGroup
@@ -202,6 +311,12 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 			if err != nil {
 				atomic.AddInt64(&fetchFailed, 1)
 				log.Printf("freshmile: location %d failed: %v", id, err)
+				// Not recorded when the pipeline itself is shutting down:
+				// those locations didn't fail on their own — see the same
+				// guard in izivia.go's worker.
+				if pipelineCtx.Err() == nil {
+					ing.Failures.Record(failKindFreshmileLocation, fmt.Sprintf("%s/locations/%d", ing.BaseURL, id), map[string]int{"id": id}, err)
+				}
 				continue
 			}
 			if !ok {
@@ -216,10 +331,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 		}
 	}
 
-	workers := ing.Config.Workers
-	if workers <= 0 {
-		workers = 24
-	}
+	workers := effectiveWorkers(ing.Config.Workers, freshmileDefaultWorkers)
 	for i := 0; i < workers; i++ {
 		workerWG.Add(1)
 		go worker()
@@ -259,18 +371,19 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 	scanWG.Wait()
 	workerWG.Wait()
 
-	log.Printf("freshmile: done, %d locations processed", processed)
-
-	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
-	// processed > 0 guards against a scan that silently found/fetched
-	// nothing (e.g. Freshmile's map-locations API down for the whole run)
-	// looking identical to "France has zero stations" and wiping the
-	// entire known dataset — see the same guard in izivia.go for the
-	// production incident that motivated it.
-	if err == nil && processed > 0 {
-		if sweepErr := repository.SweepStaleSourceData(ctx, ing.Pool, "freshmile", runStart.Add(-repository.StaleSourceDataGracePeriod)); sweepErr != nil {
-			return processed, sweepErr
-		}
+	// A run cut short by ctx (a SIGINT, or the idle watchdog giving up —
+	// see idleWatchdog) can still end with a nil write error: flushes are
+	// deliberately decoupled from ctx (see writeResults), so the last
+	// collected batch commits fine and the pipeline just drains early.
+	// Without surfacing this here, such a truncated run looked fully
+	// successful to Run(), which then attempted the stale-data sweep with
+	// an already-expired ctx — the sweep query's own "context deadline
+	// exceeded" failure was the only thing that stopped it from wiping
+	// every location the run never got to visit. context.Cause (not plain
+	// ctx.Err()) so the caller sees *why* — e.g. "no successful request in
+	// the last 5m0s..." — rather than the generic "context canceled".
+	if err == nil {
+		err = context.Cause(ctx)
 	}
 	return processed, err
 }
@@ -290,7 +403,8 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 		// Always decoupled from ctx (context.WithoutCancel), not just once
 		// ctx has already ended: this batch is fully collected in memory
 		// by this point, so once we've committed to writing it, a SIGINT
-		// or -timeout landing mid-query shouldn't be able to abort it —
+		// or the idle watchdog giving up landing mid-query shouldn't be
+		// able to abort it —
 		// checking ctx.Err() only at the top of flush() left a race where
 		// cancellation arriving after that check but before the query
 		// finished still aborted an in-progress write
@@ -354,9 +468,14 @@ func (ing *FreshmileIngester) fetchAndNormalizeLocation(ctx context.Context, id 
 	return normalizedSourceStation{Station: src, Tariffs: normalizeFreshmileTariffs(details)}, true, nil
 }
 
-// freshmileBBox is a [minLng,minLat,maxLng,maxLat] map-locations query box.
+// freshmileBBox is a [minLng,minLat,maxLng,maxLat] map-locations query
+// box. The JSON tags matter: a failed tile is persisted as this struct in
+// the failure log (see FailureLog) and read back by RetryFailed.
 type freshmileBBox struct {
-	MinLng, MinLat, MaxLng, MaxLat float64
+	MinLng float64 `json:"minLng"`
+	MinLat float64 `json:"minLat"`
+	MaxLng float64 `json:"maxLng"`
+	MaxLat float64 `json:"maxLat"`
 }
 
 // scanLocationIDs scans map-locations across metropolitan France, starting
@@ -400,6 +519,13 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 	// of France goes stale run after run instead of the miss rotating.
 	rand.Shuffle(len(initial), func(i, j int) { initial[i], initial[j] = initial[j], initial[i] })
 
+	ing.scanBBoxes(ctx, idCh, initial)
+}
+
+// scanBBoxes is scanLocationIDs' engine, starting from an arbitrary list
+// of initial boxes rather than always the full-France grid — RetryFailed
+// reuses it to re-scan just the tiles a previous run recorded as failed.
+func (ing *FreshmileIngester) scanBBoxes(ctx context.Context, idCh chan<- int, initial []freshmileBBox) {
 	var (
 		mu   sync.Mutex
 		seen = map[int]struct{}{}
@@ -445,6 +571,13 @@ func (ing *FreshmileIngester) scanLocationIDs(ctx context.Context, idCh chan<- i
 		features, err := ing.fetchMapLocations(ctx, bbox, sem)
 		if err != nil {
 			log.Printf("freshmile: map-locations bbox %+v failed: %v", bbox, err)
+			// A failed tile drops its whole branch of the subdivision tree
+			// (a region can go missing from discovery entirely), so it's
+			// worth recording for a targeted retry — unless the scan is
+			// just being canceled, see the same guard in izivia.go.
+			if ctx.Err() == nil {
+				ing.Failures.Record(failKindFreshmileTile, ing.mapLocationsURL(bbox), bbox, err)
+			}
 			return
 		}
 		for _, f := range features {
@@ -533,9 +666,13 @@ func subdivideBBox(b freshmileBBox) []freshmileBBox {
 	}
 }
 
-func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox, sem chan struct{}) ([]map[string]any, error) {
-	url := fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
+func (ing *FreshmileIngester) mapLocationsURL(bbox freshmileBBox) string {
+	return fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
 		ing.BaseURL, bbox.MinLng, bbox.MinLat, bbox.MaxLng, bbox.MaxLat, freshmileZoom)
+}
+
+func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox, sem chan struct{}) ([]map[string]any, error) {
+	url := ing.mapLocationsURL(bbox)
 	body, err := ing.getJSON(ctx, url, sem)
 	if err != nil {
 		return nil, err
@@ -549,55 +686,28 @@ func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshm
 	return collection.Features, nil
 }
 
-// freshmileMaxRetries is how many times a transient failure (network error
-// or 5xx, e.g. the Azure Application Gateway fronting Freshmile's API
-// occasionally returning 504 Gateway Timeout) is retried before giving up
-// on that request. 4xx responses are never retried — they won't succeed
-// on a second try.
+// getJSON performs a GET with retry/backoff on transient failures — see
+// the shared withRetries in common.go, which this uses the same
+// defaultMaxRetries budget as. Freshmile's map-locations failures make
+// that budget earn its keep more than most: a failure here isn't like a
+// single location's detail fetch failing (that just skips one station) —
+// scanLocationIDs drops the whole tile/cluster branch and never revisits
+// it, so a region can go permanently missing from discovery. That, plus
+// scanLocationIDs running freshmileScanWorkers requests concurrently
+// (more simultaneous load on the same gateway than a sequential scan
+// would produce), makes a short retry budget more likely to be exhausted
+// by the Azure Application Gateway's occasional 504s than it would be
+// elsewhere.
 //
-// A map-locations failure here isn't like a single location's detail
-// fetch failing (that just skips one station): scanLocationIDs drops the
-// whole tile/cluster branch and never revisits it, so a region can go
-// permanently missing from discovery. That, plus scanLocationIDs now
-// running freshmileScanWorkers requests concurrently (more simultaneous
-// load on the same gateway than the old sequential scan ever produced),
-// makes a short retry budget more likely to be exhausted by transient
-// 504s than it used to be — so this is deliberately more generous than a
-// single-request retry would normally need, with exponential backoff
-// instead of linear.
-const freshmileMaxRetries = 5
-
-// getJSON performs a GET with retry/backoff on transient failures. sem, if
-// non-nil, bounds how many of these requests run concurrently across all
-// callers sharing it (see scanLocationIDs) — it's acquired and released
-// around each individual attempt in doGet, not around the whole retry
-// loop, so a request that's sleeping between retries gives up its slot
-// instead of holding it idle for up to freshmileMaxRetries backoffs.
+// sem, if non-nil, bounds how many of these requests run concurrently
+// across all callers sharing it (see scanLocationIDs) — it's acquired and
+// released around each individual attempt in doGet, not around the whole
+// retry loop, so a request that's sleeping between retries gives up its
+// slot instead of holding it idle for up to defaultMaxRetries backoffs.
 func (ing *FreshmileIngester) getJSON(ctx context.Context, url string, sem chan struct{}) ([]byte, error) {
-	var lastErr error
-	for attempt := 0; attempt <= freshmileMaxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := (1 << (attempt - 1)) * ing.retryBackoff
-			log.Printf("freshmile: retrying %s in %v (attempt %d/%d) after: %v", url, backoff, attempt+1, freshmileMaxRetries+1, lastErr)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-
-		body, status, err := ing.doGet(ctx, url, sem)
-		if err == nil {
-			return body, nil
-		}
-		lastErr = err
-		// status == 0 means no HTTP response at all (network/timeout
-		// error) — treat that as transient too, same as a 5xx.
-		if status != 0 && status < 500 {
-			break
-		}
-	}
-	return nil, lastErr
+	return withRetries(ctx, "freshmile", url, defaultMaxRetries, ing.retryBackoff, func() ([]byte, int, error) {
+		return ing.doGet(ctx, url, sem)
+	})
 }
 
 // doGet performs a single GET, always including the full URL in any
@@ -633,6 +743,7 @@ func (ing *FreshmileIngester) doGet(ctx context.Context, url string, sem chan st
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("freshmile read body from %s: %w", url, err)
 	}
+	ing.idle.Ping()
 	return body, resp.StatusCode, nil
 }
 
@@ -679,9 +790,46 @@ func freshmileConnectorType(standard string) string {
 		return domain.ConnectorTypeCHAdeMO
 	case "IEC_62196_T2":
 		return domain.ConnectorTypeT2
+	case "DOMESTIC_E", "DOMESTIC_F":
+		return domain.ConnectorTypeEF
 	default:
 		return standard
 	}
+}
+
+// freshmileTariffKind classifies a connector's Kind (ac/dc): the
+// connector's own standard is authoritative whenever
+// domain.TariffKindForConnector can classify it (CCS/CHAdeMO are always
+// dc; T2/EF are always ac), regardless of how fast the station's OTHER
+// connectors are — mirroring izivia.go's iziviaConnectorKind, which
+// already gets this right. Falls back to a power-based heuristic (this
+// connector's own power, then the station-level best_power category)
+// only when the standard itself doesn't map to a known IRVE connector
+// type.
+//
+// The previous implementation used ONLY that power-based heuristic,
+// ignoring the connector's own standard entirely: a station with one
+// high-power DC connector (best_power.category "fast"/"superfast",
+// reported for the WHOLE station, not per connector) silently forced
+// every OTHER connector there — a plain Type 2 AC socket, even a 4kW
+// domestic plug — to "dc" too. That didn't just mislabel that one
+// connector's own tariff row: since every dc-kind tariff for a source
+// station correlates to the SAME nearest-dc IRVE row (see
+// writeSourceStationChunk), the cheaper, wrongly-dc-tagged AC price
+// could outcompete the genuine (higher) DC price in that station's
+// displayed DC price aggregate — e.g. a T2 22kW socket's 0,51€ rate
+// showing up as if it were the CCS connector's real 0,70€ DC rate.
+func freshmileTariffKind(connectorType string, power *float64, bestPowerCategory string) string {
+	if kind := domain.TariffKindForConnector(connectorType); kind != "" {
+		return kind
+	}
+	if power != nil && *power >= 50 {
+		return domain.TariffKindDC
+	}
+	if bestPowerCategory == "fast" || bestPowerCategory == "superfast" {
+		return domain.TariffKindDC
+	}
+	return domain.TariffKindAC
 }
 
 // freshmileTariffCandidate pairs a normalized tariff with whether it came
@@ -715,6 +863,21 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 			bestPowerCategory = strings.ToLower(stringValue(bestPower["category"]))
 		}
 	}
+	// Both are location-level (the whole physical site, not any one
+	// connector): locationID is the numeric id GET /locations/{id} itself
+	// takes, feeding the frontend's real-time is_available check directly
+	// against Freshmile's own API; imgPreviewURL is a Street View still
+	// Freshmile already generates for the site. Stashed into every
+	// connector's own tariff Extra below (harmlessly duplicated across
+	// them) since a single Freshmile location's connectors can end up
+	// correlated to several different IRVE station rows (one per connector
+	// kind — see freshmileTariffKind's doc comment), and there's no shared
+	// "site" row to attach them to instead; the frontend already re-groups
+	// those IRVE rows back into one site card (see
+	// utils/stationGrouping.js), so it can just read whichever connector's
+	// tariff has them.
+	locationID, _ := floatValue(details["id"])
+	imgPreviewURL := stringValue(details["img_preview_url"])
 
 	best := map[string]freshmileTariffCandidate{}
 	evses, _ := details["evses"].([]any)
@@ -734,7 +897,7 @@ func normalizeFreshmileTariffs(details map[string]any) []domain.StationTariff {
 				continue
 			}
 			candidate := freshmileTariffCandidate{
-				tariff:         normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory),
+				tariff:         normalizeFreshmileConnectorTariff(conn, tariffRaw, bestPowerCategory, locationID, imgPreviewURL),
 				isPreferential: parseBooleanLoose(stringValue(tariffRaw["is_preferential"])),
 			}
 			key := candidate.tariff.Kind + "\x00" + candidate.tariff.ConnectorType
@@ -783,15 +946,19 @@ func freshmileBetterCandidate(candidate, current freshmileTariffCandidate) bool 
 	return false
 }
 
-func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string) domain.StationTariff {
+func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPowerCategory string, locationID *float64, imgPreviewURL string) domain.StationTariff {
 	power, _ := floatValue(conn["power"])
-	kind := domain.TariffKindAC
-	if (power != nil && *power >= 50) || bestPowerCategory == "fast" || bestPowerCategory == "superfast" {
-		kind = domain.TariffKindDC
-	}
+	connectorType := freshmileConnectorType(stringValue(conn["standard"]))
+	kind := freshmileTariffKind(connectorType, power, bestPowerCategory)
 
 	extra := map[string]any{
 		"tariff": tariffRaw,
+	}
+	if locationID != nil {
+		extra["freshmile_location_id"] = int64(*locationID)
+	}
+	if imgPreviewURL != "" {
+		extra["img_preview_url"] = imgPreviewURL
 	}
 
 	t := domain.StationTariff{
@@ -800,7 +967,7 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 		Kind:          kind,
 		Model:         "freshmile_kwh",
 		Currency:      firstNonEmpty(stringValue(tariffRaw["currency"]), "EUR"),
-		ConnectorType: freshmileConnectorType(stringValue(conn["standard"])),
+		ConnectorType: connectorType,
 		Extra:         extra,
 	}
 
@@ -858,7 +1025,7 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 // "/" ("0,70 € / kWh"), or the word "par"/"per" ("0,25 € par kWh entamé").
 // Case-insensitive: production text isn't consistent about capitalizing
 // "kWh" (e.g. "0,50 € par kwh" — lowercase — was silently unmatched before).
-var freshmilePricePattern = regexp.MustCompile(`(?i)(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*(?:/|par|per)\s*(?:started\s+)?kwh`)
+var freshmilePricePattern = mustCompileFrenchWS(`(?i)(?:([\d.,]+)\s*€|€\s*([\d.,]+))\s*(?:/|par|per)\s*(?:started\s+)?kwh`)
 
 // freshmilePriceFromDescription extracts a €/kWh price (in cents) from a
 // Freshmile tariff's description field. Two shapes have been observed in

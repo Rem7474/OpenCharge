@@ -15,15 +15,21 @@ const (
 )
 
 // dcConnectorTypes/acConnectorTypes back TariffKindForConnector — the
-// single source of truth for AC/DC bucketing by connector type. Previously
-// duplicated independently in three places: frontend/web/src/utils/
-// pricing.js (its own JS sets), ingestion/izivia.go (iziviaConnectorKind,
-// its own vocabulary derived from Izivia's raw "standard" strings, not
-// IRVE's), and ingestion/freshmile.go (which derived kind purely from a
-// power threshold, not connector type at all). Izivia's and Freshmile's
-// own mapping functions still exist (their raw data doesn't use IRVE's
-// vocabulary directly), but for any code working in terms of IRVE-style
-// connector type strings, this is the one place the AC/DC split lives.
+// single source of truth for AC/DC bucketing once something is already
+// expressed in IRVE's own connector type vocabulary. Also duplicated
+// independently in frontend/web/src/utils/pricing.js (its own JS sets)
+// and ingestion/izivia.go (iziviaConnectorKind, which classifies directly
+// from Izivia's raw "standard" strings — its own vocabulary, never
+// translated to IRVE's — so it can't route through this function, but
+// follows the same standard-first/power-fallback principle).
+// ingestion/freshmile.go's freshmileTariffKind, by contrast, now maps its
+// raw "standard" to an IRVE connector type first (freshmileConnectorType)
+// and calls TariffKindForConnector on the result, falling back to a
+// power-based heuristic only when that mapping is unclassifiable. It
+// didn't always: freshmileTariffKind used to derive kind purely from a
+// power threshold, never consulting the connector's own standard at all
+// — a station-level "fast"/"superfast" best_power category silently
+// forced every connector there to dc, AC sockets included.
 var dcConnectorTypes = map[string]bool{ConnectorTypeCCS: true, ConnectorTypeCHAdeMO: true}
 var acConnectorTypes = map[string]bool{ConnectorTypeT2: true, ConnectorTypeEF: true}
 

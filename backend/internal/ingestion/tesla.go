@@ -60,8 +60,29 @@ type TeslaIngester struct {
 	// non-standard (e.g. the ingest Docker image's /usr/bin/chromium, or
 	// a local dev machine's Playwright-managed Chromium).
 	ChromeExecPath string
-	detailsURLFmt  string // get-charger-details endpoint, derived from URL's host
+	// Failures, when set, records every supercharger whose detail fetch
+	// failed for good so a later -retry-failed pass can replay just
+	// those — see FailureLog.
+	Failures *FailureLog
+	// IdleTimeout bounds how long Run/RetryFailed goes without a single
+	// successful request before giving up on the whole run — see
+	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
+	IdleTimeout   time.Duration
+	idle          *idleWatchdog // set by Run/RetryFailed, pinged after fetchViaChromeWithRetries succeeds
+	detailsURLFmt string        // get-charger-details endpoint, derived from URL's host
+	retryBackoff  time.Duration // unexported: overridden by tests to keep them fast
 }
+
+// teslaMaxRetries is smaller than the shared defaultMaxRetries (5, used
+// by every plain-HTTP source) because every attempt here is a real
+// browser tab: a stuck tab or a slow Akamai JS challenge can each cost up
+// to teslaFetchTimeout (45s), so retrying as aggressively as a cheap HTTP
+// request would could turn one bad URL into minutes of wall-clock time.
+// fetchViaChrome also has no HTTP status of its own to distinguish a
+// permanent failure from a transient one (unlike the other sources' 4xx
+// vs 5xx split), so every failure here is treated as potentially
+// transient and retried up to this smaller cap instead.
+const teslaMaxRetries = 2
 
 func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, teslaURL string, cfg TeslaConfig) *TeslaIngester {
 	if teslaURL == "" {
@@ -75,8 +96,19 @@ func NewTeslaIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStati
 		URL:              teslaURL,
 		Config:           cfg,
 		MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
+		IdleTimeout:      DefaultIdleTimeout,
 		detailsURLFmt:    teslaDetailsURLFmtFor(teslaURL),
+		retryBackoff:     2 * time.Second,
 	}
+}
+
+// startIdleWatchdog wraps ctx with this ingester's idle watchdog (see
+// idleWatchdog) and records it on ing.idle so successful fetches can Ping
+// it. The returned cancel must be deferred immediately by the caller.
+func (ing *TeslaIngester) startIdleWatchdog(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel, watchdog := startIdleWatchdog(ctx, ing.IdleTimeout)
+	ing.idle = watchdog
+	return ctx, cancel
 }
 
 // teslaDetailsURLFmtFor derives the get-charger-details endpoint from the
@@ -104,25 +136,12 @@ func teslaDetailsURLFmtFor(locationsURL string) string {
 // Electra/Izivia/Freshmile, just with browser tabs instead of HTTP
 // connections as the concurrency unit.
 func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
+	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
 	runStart := time.Now()
 
-	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
-		// headless Chrome and serves an "Access Denied" page instead of
-		// JSON (confirmed empirically — --headless=true and --headless=new
-		// both get denied; the working Playwright prototype this was
-		// ported from used headless=False for the same reason). Run a real
-		// "headed" Chrome instead, pointed at a virtual display (Xvfb) in
-		// the ingest Docker image — see its entrypoint.
-		chromedp.Flag("headless", false),
-		// Most container runtimes (including this project's Docker image)
-		// run as root, where Chromium's sandbox refuses to start at all.
-		chromedp.Flag("no-sandbox", true),
-	)
-	if ing.ChromeExecPath != "" {
-		allocOpts = append(allocOpts, chromedp.ExecPath(ing.ChromeExecPath))
-	}
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, allocOpts...)
+	allocCtx, cancelAlloc := ing.newChromeAllocator(ctx)
 	defer cancelAlloc()
 
 	locations, err := ing.fetchLocations(allocCtx)
@@ -141,6 +160,90 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	}
 	log.Printf("tesla: %d locations downloaded, %d open superchargers", len(locations), len(slugs))
 
+	processed, firstErr := ing.processSlugs(ctx, allocCtx, slugs)
+
+	log.Printf("tesla: done, %d stations processed", processed)
+
+	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
+	// processed > 0 guards against a run that silently processed
+	// nothing looking identical to "no Tesla stations exist" and wiping the
+	// entire known dataset — see the same guard in izivia.go.
+	if firstErr == nil && processed > 0 {
+		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
+			return processed, err
+		}
+	}
+	return processed, firstErr
+}
+
+// RetryFailed replays only the superchargers a previous run recorded as
+// failed (see FailureLog), skipping the full get-locations download.
+// Slugs that fail again are re-recorded, so the failure file always
+// reflects what's still outstanding. No stale-data sweep happens here: a
+// retry pass only touches the previously-failed subset, so most known
+// stations legitimately go un-refreshed.
+func (ing *TeslaIngester) RetryFailed(ctx context.Context, failures []FailedFetch) (int, error) {
+	defer ing.Failures.saveAndLog()
+	ctx, cancelIdle := ing.startIdleWatchdog(ctx)
+	defer cancelIdle()
+
+	var slugs []string
+	seen := map[string]struct{}{}
+	for _, f := range failures {
+		if f.Kind != failKindTeslaSupercharger {
+			log.Printf("tesla: skipping failure of unknown kind %q", f.Kind)
+			continue
+		}
+		var params struct {
+			Slug string `json:"slug"`
+		}
+		if err := json.Unmarshal(f.Params, &params); err != nil || params.Slug == "" {
+			log.Printf("tesla: skipping unreadable %s failure: %v", f.Kind, err)
+			continue
+		}
+		if _, dup := seen[params.Slug]; dup {
+			continue
+		}
+		seen[params.Slug] = struct{}{}
+		slugs = append(slugs, params.Slug)
+	}
+
+	log.Printf("tesla: retrying %d superchargers from %d recorded failure(s)", len(slugs), len(failures))
+
+	allocCtx, cancelAlloc := ing.newChromeAllocator(ctx)
+	defer cancelAlloc()
+
+	processed, err := ing.processSlugs(ctx, allocCtx, slugs)
+	log.Printf("tesla: retry done, %d stations processed", processed)
+	return processed, err
+}
+
+// newChromeAllocator builds the shared chromedp exec allocator every fetch
+// in a run goes through.
+func (ing *TeslaIngester) newChromeAllocator(ctx context.Context) (context.Context, context.CancelFunc) {
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+		// Deliberately NOT headless: Akamai's bot mitigation fingerprints
+		// headless Chrome and serves an "Access Denied" page instead of
+		// JSON (confirmed empirically — --headless=true and --headless=new
+		// both get denied; the working Playwright prototype this was
+		// ported from used headless=False for the same reason). Run a real
+		// "headed" Chrome instead, pointed at a virtual display (Xvfb) in
+		// the ingest Docker image — see its entrypoint.
+		chromedp.Flag("headless", false),
+		// Most container runtimes (including this project's Docker image)
+		// run as root, where Chromium's sandbox refuses to start at all.
+		chromedp.Flag("no-sandbox", true),
+	)
+	if ing.ChromeExecPath != "" {
+		allocOpts = append(allocOpts, chromedp.ExecPath(ing.ChromeExecPath))
+	}
+	return chromedp.NewExecAllocator(ctx, allocOpts...)
+}
+
+// processSlugs fetches details/pricing for every supercharger slug and
+// writes the results, concurrently — the shared pipeline behind both a
+// full Run and a RetryFailed pass.
+func (ing *TeslaIngester) processSlugs(ctx, allocCtx context.Context, slugs []string) (int, error) {
 	slugCh := make(chan string)
 	resultsCh := make(chan normalizedSourceStation)
 	var wg sync.WaitGroup
@@ -151,6 +254,12 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 			item, ok, err := ing.fetchAndNormalizeSupercharger(allocCtx, slug)
 			if err != nil {
 				log.Printf("tesla: supercharger %s failed: %v", slug, err)
+				// Not recorded when the run itself is shutting down: those
+				// slugs didn't fail on their own — see the same guard in
+				// izivia.go's worker.
+				if ctx.Err() == nil {
+					ing.Failures.Record(failKindTeslaSupercharger, fmt.Sprintf(ing.detailsURLFmt, url.QueryEscape(slug)), map[string]string{"slug": slug}, err)
+				}
 				continue
 			}
 			if !ok {
@@ -194,7 +303,7 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 		select {
 		case slugCh <- slug:
 		case <-ctx.Done():
-			firstErr = ctx.Err()
+			firstErr = context.Cause(ctx)
 		}
 	}
 	close(slugCh)
@@ -203,17 +312,14 @@ func (ing *TeslaIngester) Run(ctx context.Context) (int, error) {
 	if firstErr == nil {
 		firstErr = result.err
 	}
-
-	log.Printf("tesla: done, %d stations processed", result.processed)
-
-	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
-	// result.processed > 0 guards against a run that silently processed
-	// nothing looking identical to "no Tesla stations exist" and wiping the
-	// entire known dataset — see the same guard in izivia.go.
-	if firstErr == nil && result.processed > 0 {
-		if err := repository.SweepStaleSourceData(ctx, ing.Pool, "tesla", runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {
-			return result.processed, err
-		}
+	// Same guard as freshmile's runPipeline: a ctx expiring after the last
+	// write but before the caller's sweep decision must surface as an
+	// error, so a truncated run is never mistaken for a fully successful
+	// one (which would sweep stations the run never got to visit).
+	// context.Cause (not plain ctx.Err()) so the caller sees *why* — e.g.
+	// "no successful request in the last 5m0s..." — see idleWatchdog.
+	if firstErr == nil {
+		firstErr = context.Cause(ctx)
 	}
 	return result.processed, firstErr
 }
@@ -257,7 +363,7 @@ func (ing *TeslaIngester) writeResults(ctx context.Context, resultsCh <-chan nor
 // touching the database — writes are batched separately, see Run.
 func (ing *TeslaIngester) fetchAndNormalizeSupercharger(allocCtx context.Context, slug string) (normalizedSourceStation, bool, error) {
 	detailsURL := fmt.Sprintf(ing.detailsURLFmt, url.QueryEscape(slug))
-	body, err := fetchViaChrome(allocCtx, detailsURL)
+	body, err := ing.fetchViaChromeWithRetries(allocCtx, detailsURL)
 	if err != nil {
 		return normalizedSourceStation{}, false, fmt.Errorf("fetch charger details: %w", err)
 	}
@@ -284,7 +390,7 @@ func (ing *TeslaIngester) fetchAndNormalizeSupercharger(allocCtx context.Context
 
 func (ing *TeslaIngester) fetchLocations(allocCtx context.Context) ([]map[string]any, error) {
 	log.Printf("tesla: downloading %s", ing.URL)
-	body, err := fetchViaChrome(allocCtx, ing.URL)
+	body, err := ing.fetchViaChromeWithRetries(allocCtx, ing.URL)
 	if err != nil {
 		return nil, fmt.Errorf("download tesla locations: %w", err)
 	}
@@ -304,6 +410,24 @@ func (ing *TeslaIngester) fetchLocations(allocCtx context.Context) ([]map[string
 // bot-mitigation JS challenge (if any) to resolve, short enough that one
 // stuck tab can't stall a whole ingestion run indefinitely.
 const teslaFetchTimeout = 45 * time.Second
+
+// fetchViaChromeWithRetries retries fetchViaChrome on failure (see
+// teslaMaxRetries) via the shared withRetries in common.go, and pings the
+// idle watchdog once on success. fetchViaChrome has no HTTP status of its
+// own, so the retry helper's do closure always reports status 0 —
+// every failure is treated as potentially transient (network blip, a
+// slow Akamai challenge, a stuck tab), same as a plain network error
+// would be for the HTTP-based sources.
+func (ing *TeslaIngester) fetchViaChromeWithRetries(allocCtx context.Context, url string) ([]byte, error) {
+	body, err := withRetries(allocCtx, "tesla", url, teslaMaxRetries, ing.retryBackoff, func() ([]byte, int, error) {
+		body, err := fetchViaChrome(allocCtx, url)
+		return body, 0, err
+	})
+	if err == nil {
+		ing.idle.Ping()
+	}
+	return body, err
+}
 
 // fetchViaChrome navigates a fresh tab (its own chromedp.NewContext off
 // the shared allocator — cheap compared to launching a new browser) to

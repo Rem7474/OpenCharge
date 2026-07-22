@@ -38,10 +38,6 @@ func mustLoadElectraLocation() *time.Location {
 	return loc
 }
 
-// DefaultLinkMaxDistanceMeters is the default search radius used to
-// correlate an external source station with the nearest IRVE station.
-const DefaultLinkMaxDistanceMeters = 150.0
-
 type ElectraIngester struct {
 	Pool             *pgxpool.Pool
 	SourceStations   *repository.SourceStationRepository

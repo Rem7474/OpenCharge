@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -17,6 +17,23 @@ const FOCUSABLE_SELECTOR =
  * element, which might just be a close button).
  */
 export function useDialogA11y(containerRef, open, onClose, initialFocusRef) {
+  // Callers overwhelmingly pass an inline arrow function as onClose (e.g.
+  // `onClose={() => setOpen(false)}`), which is a brand new reference on
+  // every render of the caller. The setup/teardown effect below must only
+  // run once per open/close transition — not on every keystroke inside the
+  // dialog just because it caused the caller to re-render and hand down a
+  // new onClose — so the latest onClose is tracked in a ref instead of
+  // being a dependency. Previously onClose WAS a dependency: typing into
+  // any input inside the dialog re-triggered this effect on every
+  // keystroke, which re-ran the initial-focus logic below and yanked focus
+  // away from the field the user was actively typing into (back to the
+  // first focusable element, or the dialog container) after every single
+  // character.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
   useEffect(() => {
     if (!open) return undefined;
 
@@ -28,7 +45,7 @@ export function useDialogA11y(containerRef, open, onClose, initialFocusRef) {
     function handleKeyDown(e) {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab" || !container) return;
@@ -51,5 +68,5 @@ export function useDialogA11y(containerRef, open, onClose, initialFocusRef) {
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, onClose, containerRef]);
+  }, [open]);
 }

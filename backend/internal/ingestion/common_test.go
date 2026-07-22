@@ -1,6 +1,13 @@
 package ingestion
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestParsePriceText(t *testing.T) {
 	cases := []struct {
@@ -103,4 +110,199 @@ func floatPtrEqual(a, b *float64) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// TestWithRetriesRetriesTransientFailureThenSucceeds pins the shared
+// retry/backoff helper every fan-out source (izivia, freshmile,
+// chargenow, tesla) delegates to: a transient failure (status 0, e.g. a
+// network error, or a 5xx) is retried up to maxRetries times before
+// giving up.
+func TestWithRetriesRetriesTransientFailureThenSucceeds(t *testing.T) {
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 3 {
+			return nil, 502, errors.New("bad gateway")
+		}
+		return []byte("ok"), 200, nil
+	}
+
+	body, err := withRetries(context.Background(), "test", "label", defaultMaxRetries, time.Millisecond, do)
+	if err != nil {
+		t.Fatalf("withRetries: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Errorf("body = %q, want ok", body)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Errorf("attempts = %d, want 3 (2 failures + 1 success)", got)
+	}
+}
+
+// TestWithRetriesDoesNotRetryOnDefinitiveClientError pins the 4xx/5xx
+// split: a non-zero status below 500 is a permanent client error and
+// must stop retrying immediately, unlike status 0 (no response at all —
+// used by tesla's chromedp-based do, which has no HTTP status of its
+// own) or a 5xx, both always retried.
+func TestWithRetriesDoesNotRetryOnDefinitiveClientError(t *testing.T) {
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		atomic.AddInt32(&attempts, 1)
+		return nil, 404, errors.New("not found")
+	}
+
+	_, err := withRetries(context.Background(), "test", "label", defaultMaxRetries, time.Millisecond, do)
+	if err == nil {
+		t.Fatal("withRetries = nil error, want the 404 surfaced")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry on a definitive 4xx)", got)
+	}
+}
+
+// TestWithRetriesGivesUpAfterMaxRetries pins the exhaustion case with a
+// small maxRetries (mirroring tesla's teslaMaxRetries, smaller than the
+// shared defaultMaxRetries since each attempt there is a real browser
+// tab): maxRetries+1 total attempts, then the last error is returned.
+func TestWithRetriesGivesUpAfterMaxRetries(t *testing.T) {
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		atomic.AddInt32(&attempts, 1)
+		return nil, 0, errors.New("still stuck")
+	}
+
+	_, err := withRetries(context.Background(), "test", "label", teslaMaxRetries, time.Millisecond, do)
+	if err == nil || err.Error() != "still stuck" {
+		t.Errorf("withRetries error = %v, want the last attempt's error", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != teslaMaxRetries+1 {
+		t.Errorf("attempts = %d, want %d (initial attempt + %d retries)", got, teslaMaxRetries+1, teslaMaxRetries)
+	}
+}
+
+// TestWithRetriesStopsOnContextCancellation ensures a canceled ctx aborts
+// the backoff sleep between attempts instead of waiting it out, and
+// surfaces context.Cause (not a bare "context canceled" with no further
+// info) — see idleWatchdog for why a richer cause matters here.
+func TestWithRetriesStopsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var attempts int32
+	do := func() ([]byte, int, error) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n == 1 {
+			cancel()
+		}
+		return nil, 0, errors.New("network blip")
+	}
+
+	start := time.Now()
+	_, err := withRetries(ctx, "test", "label", defaultMaxRetries, time.Hour, do)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("withRetries took %v, want it to abort immediately on ctx cancellation instead of waiting out the hour-long backoff", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestEffectiveWorkers(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured int
+		fallback   int
+		want       int
+	}{
+		{"positive configured value wins", 10, 40, 10},
+		{"zero falls back", 0, 40, 40},
+		{"negative falls back", -1, 40, 40},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := effectiveWorkers(c.configured, c.fallback); got != c.want {
+				t.Errorf("effectiveWorkers(%d, %d) = %d, want %d", c.configured, c.fallback, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPriceRegexesToleratesNBSP pins a real production bug: Go's regexp
+// \s only matches ASCII whitespace, but French locale-aware number
+// formatting (e.g. JavaScript's Intl.NumberFormat('fr-FR',
+// {style:'currency', currency:'EUR'}), which is exactly the kind of code
+// that would generate a scraped tariff description) inserts U+00A0
+// (no-break space) or U+202F (narrow no-break space) between an amount
+// and its unit/currency symbol instead of a plain space — invisible when
+// printed/logged, but enough to make every \s-based price pattern here
+// silently stop matching real text that looks, character for character,
+// identical to a plain-space test fixture.
+func TestPriceRegexesToleratesNBSP(t *testing.T) {
+	const (
+		nbsp         = " "
+		narrowNBSP   = " "
+		regularSpace = " "
+	)
+	for _, space := range []string{regularSpace, nbsp, narrowNBSP} {
+		t.Run("space U+"+fmt.Sprintf("%04X", []rune(space)[0]), func(t *testing.T) {
+			text := "0,20" + space + "€" + space + "par" + space + "kWh"
+			price := matchEuroCentsFirstNonZero(pricePerKWhPattern, text)
+			if price == nil || *price != 20.0 {
+				t.Errorf("pricePerKWhPattern against %q = %v, want 20.0", text, price)
+			}
+
+			minText := "0,025" + space + "€" + space + "par" + space + "minute"
+			minPrice := matchEuroCentsFirstNonZero(pricePerMinutePattern, minText)
+			if minPrice == nil || *minPrice != 2.5 {
+				t.Errorf("pricePerMinutePattern against %q = %v, want 2.5", minText, minPrice)
+			}
+
+			fmText := "0,20" + space + "€" + space + "par" + space + "kwh"
+			if m := freshmilePricePattern.FindStringSubmatch(fmText); len(m) < 1 || (m[1] == "" && m[2] == "") {
+				t.Errorf("freshmilePricePattern against %q didn't match: %v", fmText, m)
+			}
+
+			kwText := "22" + space + "kW"
+			if m := iziviaPowerPattern.FindStringSubmatch(kwText); len(m) != 2 || m[1] != "22" {
+				t.Errorf("iziviaPowerPattern against %q = %v, want [.. 22]", kwText, m)
+			}
+		})
+	}
+}
+
+// TestNormalizeFreshmileTariffsToleratesNBSPBeforeCurrency reproduces a
+// real production Freshmile description reported as silently unparsed —
+// same text as
+// TestNormalizeFreshmileTariffsKWhEntameAndSubCentPerMinute, but with a
+// narrow no-break space (U+202F) before "€" instead of a plain space,
+// exactly what a French Intl.NumberFormat-based frontend actually emits.
+func TestNormalizeFreshmileTariffsToleratesNBSPBeforeCurrency(t *testing.T) {
+	nnbsp := " "
+	description := "Le prix dépend de l'énergie délivrée et du temps de branchement 0,20" + nnbsp + "€ par kWh entamé et 0,025" + nnbsp + "€ par minute La tarification continue tant que le véhicule est branché"
+
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"description": description,
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	got := tariffs[0]
+	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 20.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 20.0", got.EnergyPriceCentsPerKWh)
+	}
+	if got.SessionPriceCentsPerMin == nil || *got.SessionPriceCentsPerMin != 2.5 {
+		t.Errorf("SessionPriceCentsPerMin = %v, want 2.5", got.SessionPriceCentsPerMin)
+	}
 }

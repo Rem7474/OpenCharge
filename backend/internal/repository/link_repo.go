@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -209,6 +210,20 @@ const candidateKindFilterFragment = `
 // reordering the SQL's ORDER BY, so the index-accelerated pure-distance
 // scan that makes this fast at all is untouched.
 //
+// connectorType, when non-empty, takes priority over everything else below:
+// among the kind-matching candidates, an exact connector_type match (e.g.
+// "CCS") is preferred outright over a same-kind-but-different-connector one
+// (e.g. "CHAdeMO"), regardless of distance or power. This exists because a
+// single physical site can have TWO IRVE rows of the very same kind (e.g. a
+// CHAdeMO and a CCS row, both dc) — a source whose own tariffs already
+// distinguish connector types (today: only Freshmile, via
+// domain.StationTariff.ConnectorType) needs each tariff to land on its own
+// matching row, not just "whichever dc row is nearest" for both: confirmed
+// in production, a co-located CHAdeMO row kept a source's dc tariff while
+// its sibling CCS row got none, because the kind-only match above can only
+// ever resolve to a single station per (point, kind). Callers that don't
+// distinguish connector types (Electra, Izivia, ChargeNow, Tesla) pass "".
+//
 // When a point also sets TargetPowerKW, kind alone still isn't always
 // enough: IRVE can carry several same-kind rows at the same coordinates
 // (e.g. two DC connectors of different power for one physical location —
@@ -216,8 +231,11 @@ const candidateKindFilterFragment = `
 // rated power). Among the kind-matching candidates, the one whose own
 // power_kw is closest to TargetPowerKW is preferred over just the nearest;
 // a point with no TargetPowerKW (or candidates with no power_kw on file)
-// falls back to the plain nearest-of-kind behavior.
-func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points []NearestStationQuery, kind string, maxDistanceMeters float64) (map[int]NearestStationCandidate, error) {
+// falls back to the plain nearest-of-kind behavior. This tie-break only
+// ever runs once connectorType has failed to resolve a match (or wasn't
+// given), since an exact connector-type match is a strictly stronger
+// signal than power proximity.
+func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points []NearestStationQuery, kind string, connectorType string, maxDistanceMeters float64) (map[int]NearestStationCandidate, error) {
 	if len(points) == 0 {
 		return nil, nil
 	}
@@ -262,11 +280,11 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 	for rows.Next() {
 		var idx int32
 		var id *uuid.UUID
-		var operatorName, name, connectorType *string
+		var operatorName, name, rowConnectorType *string
 		var powerKW *float64
 		var distance *float64
 		var candidateKind *string
-		if err := rows.Scan(&idx, &id, &operatorName, &name, &connectorType, &powerKW, &distance, &candidateKind); err != nil {
+		if err := rows.Scan(&idx, &id, &operatorName, &name, &rowConnectorType, &powerKW, &distance, &candidateKind); err != nil {
 			return nil, fmt.Errorf("scan nearest station for kind %s (bulk): %w", kind, err)
 		}
 		if id == nil {
@@ -279,8 +297,8 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 		if name != nil {
 			c.Name = *name
 		}
-		if connectorType != nil {
-			c.ConnectorType = *connectorType
+		if rowConnectorType != nil {
+			c.ConnectorType = *rowConnectorType
 		}
 		ck := ""
 		if candidateKind != nil {
@@ -304,6 +322,28 @@ func (r *LinkRepository) FindNearestStationsForKind(ctx context.Context, points 
 		// the nearest kind match; candidates[0] (the overall nearest) is
 		// the fallback if none match.
 		best := candidates[0].candidate
+
+		// Tier 1: an exact connector_type match within this kind, if the
+		// caller asked for one, wins outright — see this method's doc
+		// comment for why that has to outrank both plain kind-matching and
+		// the power tie-break below.
+		if connectorType != "" {
+			foundExact := false
+			for _, c := range candidates {
+				if c.candidateKind == kind && strings.EqualFold(c.candidate.ConnectorType, connectorType) {
+					best = c.candidate
+					foundExact = true
+					break
+				}
+			}
+			if foundExact {
+				result[idx] = best
+				continue
+			}
+		}
+
+		// Tier 2: plain kind match, optionally power-tie-broken (unchanged
+		// from before connectorType existed).
 		haveKindMatch := false
 		var bestPowerDelta float64
 		targetPowerKW := targetPowerByIdx[idx]

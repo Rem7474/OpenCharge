@@ -52,15 +52,31 @@ type StationFilter struct {
 	// least this value. A station with power_kw unknown (NULL) never
 	// matches — an unknown power shouldn't pass a "≥X kW" filter.
 	MinPowerKW *float64
-	// MinPriceCentsPerKWh/MaxPriceCentsPerKWh, when set, restrict results to
-	// stations whose own "best price" (the same connector-kind-aware pick
-	// utils/pricing.js#pickPriceCentsPerKWh does client-side, from
-	// pricingSummary — the best price across ALL sources, not narrowed by
-	// Sources) falls in [min, max]. A station with no known price never
-	// matches either bound — an unknown price shouldn't pass a price-range
-	// filter any more than it should pass a HasTariffs one.
+	// MinPriceCentsPerKWh/MaxPriceCentsPerKWh, when set, restrict results by
+	// price. What "price" means depends on whether ChargeKWh is also set:
+	//   - ChargeKWh nil: a plain €/kWh rate — stations whose own "best price"
+	//     (the same connector-kind-aware pick utils/pricing.js#
+	//     pickPriceCentsPerKWh does client-side, from pricingSummary — the
+	//     best price across ALL sources, not narrowed by Sources) falls in
+	//     [min, max].
+	//   - ChargeKWh set: the estimated TOTAL cost (in cents) of a session
+	//     delivering ChargeKWh over ChargeMinutes (energy price × ChargeKWh,
+	//     plus any per-minute rate × ChargeMinutes, plus any flat session
+	//     fee) falls in [min, max] — matching what the frontend's "recharge"
+	//     display mode shows the user (see utils/pricing.js#
+	//     tariffCostBreakdown), rather than forcing them to reason in €/kWh
+	//     when that's not the unit they're looking at.
+	// A station with no known price never matches either bound — an unknown
+	// price shouldn't pass a price-range filter any more than it should pass
+	// a HasTariffs one.
 	MinPriceCentsPerKWh *float64
 	MaxPriceCentsPerKWh *float64
+	// ChargeKWh/ChargeMinutes, when set alongside Min/MaxPriceCentsPerKWh,
+	// switch the price-range filter into "total cost of this session" mode —
+	// see MinPriceCentsPerKWh's doc comment. ChargeMinutes nil is treated as
+	// 0 (no time-based cost).
+	ChargeKWh     *float64
+	ChargeMinutes *float64
 	// ExcludeSubscriptionPlans, when true, ignores tariffs on the
 	// TariffPlanSubscription plan when computing PricingSummary and
 	// SelectedSourcesPricing (and, transitively, the price-range filter

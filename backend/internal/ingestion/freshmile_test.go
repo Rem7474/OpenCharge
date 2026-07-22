@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -141,23 +142,16 @@ func TestFreshmilePriceFromDescription(t *testing.T) {
 	}
 }
 
-// TestNormalizeFreshmileTariffsDedupesToOnePerKind exercises the same
-// three-connector fixture the old per-plan version of this test used
-// (before every connector's custom_ref became its own Plan, see
-// normalizeFreshmileTariffs), but now expects a single collapsed "dc"
-// tariff: all three connectors resolve to Kind=dc here (best_power
-// category "fast" forces every connector to dc regardless of its own
-// power), and among them the two non-preferential candidates (70.0 and
-// the free one) beat the preferential 51.0 one on tier alone, then the
-// free (0.0) one wins on price within that tier.
 // TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType exercises a
-// three-connector fixture where every connector resolves to Kind=dc
-// (best_power category "fast" forces that regardless of each connector's
-// own power), but two distinct connector types are present (CCS and T2).
-// Dedup groups by (Kind, ConnectorType), not Kind alone, so this must
-// produce two tariffs: the lone CCS candidate survives as-is, and the two
-// T2 candidates resolve via freshmileBetterCandidate (free non-preferential
-// beats preferential regardless of price).
+// three-connector fixture with two distinct connector types: one CCS
+// (Kind=dc, from its own standard, regardless of the station-level
+// best_power category also being "fast" here) and two T2 (Kind=ac — T2 is
+// AC regardless of the station's best_power category; see
+// freshmileTariffKind). Dedup groups by (Kind, ConnectorType), not Kind
+// alone, so this must produce two tariffs: the lone CCS candidate
+// survives as-is, and the two T2 candidates resolve via
+// freshmileBetterCandidate (free non-preferential beats preferential
+// regardless of price).
 func TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType(t *testing.T) {
 	details := map[string]any{
 		"connectors": map[string]any{
@@ -211,7 +205,7 @@ func TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType(t *testing.T) {
 
 	tariffs := normalizeFreshmileTariffs(details)
 	if len(tariffs) != 2 {
-		t.Fatalf("got %d tariffs, want 2 (CCS and T2 stay separate within the dc kind)", len(tariffs))
+		t.Fatalf("got %d tariffs, want 2 (CCS/dc and T2/ac stay separate)", len(tariffs))
 	}
 
 	byConnector := map[string]domain.StationTariff{}
@@ -222,15 +216,15 @@ func TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType(t *testing.T) {
 		if tariff.Plan != domain.TariffPlanStandard {
 			t.Errorf("tariff %s: Plan = %q, want %q (custom_ref is no longer surfaced as Plan)", tariff.ConnectorType, tariff.Plan, domain.TariffPlanStandard)
 		}
-		if tariff.Kind != domain.TariffKindDC {
-			t.Errorf("tariff %s: Kind = %q, want dc (best_power_category=fast)", tariff.ConnectorType, tariff.Kind)
-		}
 		byConnector[tariff.ConnectorType] = tariff
 	}
 
 	ccs, ok := byConnector[domain.ConnectorTypeCCS]
 	if !ok {
 		t.Fatal("missing CCS tariff")
+	}
+	if ccs.Kind != domain.TariffKindDC {
+		t.Errorf("CCS Kind = %q, want dc", ccs.Kind)
 	}
 	if ccs.EnergyPriceCentsPerKWh == nil || *ccs.EnergyPriceCentsPerKWh != 70.0 {
 		t.Errorf("CCS EnergyPriceCentsPerKWh = %v, want 70.0 (only candidate for this connector type)", ccs.EnergyPriceCentsPerKWh)
@@ -239,6 +233,9 @@ func TestNormalizeFreshmileTariffsDedupesPerKindAndConnectorType(t *testing.T) {
 	t2, ok := byConnector[domain.ConnectorTypeT2]
 	if !ok {
 		t.Fatal("missing T2 tariff")
+	}
+	if t2.Kind != domain.TariffKindAC {
+		t.Errorf("T2 Kind = %q, want ac", t2.Kind)
 	}
 	if t2.EnergyPriceCentsPerKWh == nil || *t2.EnergyPriceCentsPerKWh != 0 {
 		t.Errorf("T2 EnergyPriceCentsPerKWh = %v, want 0 (the free, non-preferential candidate wins over the preferential 51 one)", t2.EnergyPriceCentsPerKWh)
@@ -441,6 +438,44 @@ func TestNormalizeFreshmileTariffsCombinedKWhAndPerMinute(t *testing.T) {
 	}
 }
 
+// TestNormalizeFreshmileTariffsKWhEntameAndSubCentPerMinute pins another
+// real production description shape: single-line (spaces, no newlines),
+// "kWh entamé" sitting between the energy price and the "et ..." per-minute
+// clause, and a sub-cent per-minute amount with three decimals (0,025 € →
+// 2.5 cents/min, which must survive the euro→cents conversion untruncated).
+func TestNormalizeFreshmileTariffsKWhEntameAndSubCentPerMinute(t *testing.T) {
+	details := map[string]any{
+		"evses": []any{
+			map[string]any{
+				"connectors": []any{
+					map[string]any{
+						"power":    22.0,
+						"standard": "IEC_62196_T2",
+						"tariff": map[string]any{
+							"currency":    "EUR",
+							"description": "Le prix dépend de l'énergie délivrée et du temps de branchement 0,20 € par kWh entamé et 0,025 € par minute La tarification continue tant que le véhicule est branché",
+						},
+					},
+				},
+			},
+		},
+	}
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 1 {
+		t.Fatalf("got %d tariffs, want 1", len(tariffs))
+	}
+	got := tariffs[0]
+	if got.EnergyPriceCentsPerKWh == nil || *got.EnergyPriceCentsPerKWh != 20.0 {
+		t.Errorf("EnergyPriceCentsPerKWh = %v, want 20.0", got.EnergyPriceCentsPerKWh)
+	}
+	if got.SessionPriceCentsPerMin == nil || *got.SessionPriceCentsPerMin != 2.5 {
+		t.Errorf("SessionPriceCentsPerMin = %v, want 2.5", got.SessionPriceCentsPerMin)
+	}
+	if got.Model != "freshmile_kwh_and_per_minute" {
+		t.Errorf("Model = %q, want freshmile_kwh_and_per_minute", got.Model)
+	}
+}
+
 func TestNormalizeFreshmileTariffsNoEvses(t *testing.T) {
 	if got := normalizeFreshmileTariffs(map[string]any{}); got != nil {
 		t.Errorf("normalizeFreshmileTariffs({}) = %v, want nil", got)
@@ -620,8 +655,8 @@ func TestGetJSONGivesUpAfterMaxRetries(t *testing.T) {
 	if !strings.Contains(err.Error(), srv.URL) {
 		t.Errorf("error %q does not contain the request URL %q", err.Error(), srv.URL)
 	}
-	if got := atomic.LoadInt32(&requests); got != freshmileMaxRetries+1 {
-		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, freshmileMaxRetries+1, freshmileMaxRetries)
+	if got := atomic.LoadInt32(&requests); got != defaultMaxRetries+1 {
+		t.Errorf("requests = %d, want %d (initial attempt + %d retries)", got, defaultMaxRetries+1, defaultMaxRetries)
 	}
 }
 
@@ -715,5 +750,126 @@ func TestNormalizeFreshmileRealPayloadEmptyEvses(t *testing.T) {
 
 	if tariffs := normalizeFreshmileTariffs(details); len(tariffs) != 0 {
 		t.Errorf("got %d tariffs, want 0 (no evses)", len(tariffs))
+	}
+}
+
+// TestFreshmileRunSurfacesContextErrorInsteadOfSweeping pins the fix for a
+// production failure: a run cut short by the CLI's -timeout still ended
+// with a nil pipeline error (writes are decoupled from ctx, so the last
+// batches commit fine), making the truncated run look fully successful —
+// Run() then attempted the stale-data sweep with an already-expired ctx
+// ("sweep stale source_stations for freshmile: context deadline exceeded"),
+// and only that query's own failure kept it from wiping every location the
+// run never got to visit. Run must report the ctx error itself and never
+// reach the sweep (the nil Pool here would panic if it did).
+func TestFreshmileRunSurfacesContextErrorInsteadOfSweeping(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"features": []}`)
+	}))
+	defer srv.Close()
+
+	ing := NewFreshmileIngester(nil, nil, nil, nil, srv.URL, FreshmileConfig{Workers: 2})
+	ing.retryBackoff = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	processed, err := ing.Run(ctx)
+	if processed != 0 {
+		t.Errorf("processed = %d, want 0", processed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+// realFreshmileAnnecyMixedConnectorsPayload is a real /locations/{id}
+// response (production, captured 2026-07-21) for a site mixing a CCS
+// connector (24kW, driving the whole location's best_power.category to
+// "fast") with several genuinely-AC Type 2 (22kW) and domestic (4kW)
+// connectors — see TestNormalizeFreshmileRealPayloadMixedConnectorKinds.
+const realFreshmileAnnecyMixedConnectorsPayload = `{"data":{"id":829320,"ref":"FREBNBTHPN1","name":"ANNECY - Route De Vignieres","evses_statuses":["AVAILABLE"],"is_available":true,"has_free_tariff":false,"is_favorite":false,"is_open":false,"is_private":false,"has_access_control":0,"twentyfourseven":false,"regular_hours":[],"coordinates":{"latitude":45.9078,"longitude":6.13666},"address":{"fullname":"Route de Vigni\u00e8res","city":"Annecy","postal_code":"74000","country":"FRA"},"evses":[{"id":936864,"custom_ref":"OHC3YQ1","status":"AVAILABLE","is_available":true,"is_remote_capable":false,"created_at":"2025-04-01T17:13:38.000000Z","updated_at":"2026-06-11T13:24:28.000000Z","location_id":829320,"connectors":[{"id":1021614,"ref":null,"power":24,"standard":"IEC_62196_T2_COMBO","is_remote_capable":false,"is_attached":false,"created_at":"2025-04-01T17:13:38.000000Z","updated_at":"2025-04-01T17:13:38.000000Z","tariff_id":4692,"evse_id":936864,"tariff":{"id":4692,"name":"Interop sortante - Normal kWh (20)","description":"{\"de\": \"\u20ac 0.70 / started kWh.\", \"en\": \"\u20ac 0.70 / started kWh.\", \"es\": \"\u20ac 0.70 / started kWh.\", \"fr\": \"0,70 \u20ac / kWh entam\u00e9.\", \"nl\": \"\u20ac 0.70 / started kWh.\"}","is_free":false,"currency":"EUR","provision":{"amount":50,"currency":"EUR"},"payment_authorization_amount":{"amount":50,"currency":"EUR"},"max_price":{"amount":166.67,"currency":"EUR"},"custom_ref":"normal-k-wh-interop-20","is_hidden":false,"is_preferential":false,"origin_ref":"normal-k-wh-interop-20","commissioned_at":null}}]},{"id":936865,"custom_ref":"OCYIR91","status":"AVAILABLE","is_available":true,"is_remote_capable":false,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2026-06-11T13:24:28.000000Z","location_id":829320,"connectors":[{"id":1021615,"ref":null,"power":22,"standard":"IEC_62196_T2","is_remote_capable":false,"is_attached":true,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2025-04-01T17:13:39.000000Z","tariff_id":3001,"evse_id":936865,"tariff":{"id":3001,"name":"Interop sortante - Lidl Rapide (20)","description":"{\"de\": \"0.51 \u20ac / kWh started.\", \"en\": \"0.51 \u20ac / kWh started.\", \"es\": \"0.51 \u20ac / kWh started.\", \"fr\": \"0,51 \u20ac / kWh entam\u00e9.\", \"nl\": \"0.51 \u20ac / kWh started.\"}","is_free":false,"currency":"EUR","provision":{"amount":50,"currency":"EUR"},"payment_authorization_amount":{"amount":50,"currency":"EUR"},"max_price":{"amount":166.67,"currency":"EUR"},"custom_ref":"lidl-rapide-interop","is_hidden":false,"is_preferential":false,"origin_ref":"lidl-rapide-interop","commissioned_at":null}}]},{"id":936866,"custom_ref":"OE2G1I1","status":"AVAILABLE","is_available":true,"is_remote_capable":false,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2026-06-11T13:24:28.000000Z","location_id":829320,"connectors":[{"id":1021616,"ref":null,"power":4,"standard":"DOMESTIC_F","is_remote_capable":false,"is_attached":true,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2025-04-01T17:13:39.000000Z","tariff_id":3001,"evse_id":936866,"tariff":{"id":3001,"name":"Interop sortante - Lidl Rapide (20)","description":"{\"de\": \"0.51 \u20ac / kWh started.\", \"en\": \"0.51 \u20ac / kWh started.\", \"es\": \"0.51 \u20ac / kWh started.\", \"fr\": \"0,51 \u20ac / kWh entam\u00e9.\", \"nl\": \"0.51 \u20ac / kWh started.\"}","is_free":false,"currency":"EUR","provision":{"amount":50,"currency":"EUR"},"payment_authorization_amount":{"amount":50,"currency":"EUR"},"max_price":{"amount":166.67,"currency":"EUR"},"custom_ref":"lidl-rapide-interop","is_hidden":false,"is_preferential":false,"origin_ref":"lidl-rapide-interop","commissioned_at":null}},{"id":1021617,"ref":null,"power":22,"standard":"IEC_62196_T2","is_remote_capable":false,"is_attached":true,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2025-04-01T17:13:39.000000Z","tariff_id":3001,"evse_id":936866,"tariff":{"id":3001,"name":"Interop sortante - Lidl Rapide (20)","description":"{\"de\": \"0.51 \u20ac / kWh started.\", \"en\": \"0.51 \u20ac / kWh started.\", \"es\": \"0.51 \u20ac / kWh started.\", \"fr\": \"0,51 \u20ac / kWh entam\u00e9.\", \"nl\": \"0.51 \u20ac / kWh started.\"}","is_free":false,"currency":"EUR","provision":{"amount":50,"currency":"EUR"},"payment_authorization_amount":{"amount":50,"currency":"EUR"},"max_price":{"amount":166.67,"currency":"EUR"},"custom_ref":"lidl-rapide-interop","is_hidden":false,"is_preferential":false,"origin_ref":"lidl-rapide-interop","commissioned_at":null}}]},{"id":936867,"custom_ref":"OSKSQ51","status":"AVAILABLE","is_available":true,"is_remote_capable":false,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2026-06-11T13:24:28.000000Z","location_id":829320,"connectors":[{"id":1021618,"ref":null,"power":4,"standard":"DOMESTIC_F","is_remote_capable":false,"is_attached":true,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2025-04-01T17:13:39.000000Z","tariff_id":3001,"evse_id":936867,"tariff":{"id":3001,"name":"Interop sortante - Lidl Rapide (20)","description":"{\"de\": \"0.51 \u20ac / kWh started.\", \"en\": \"0.51 \u20ac / kWh started.\", \"es\": \"0.51 \u20ac / kWh started.\", \"fr\": \"0,51 \u20ac / kWh entam\u00e9.\", \"nl\": \"0.51 \u20ac / kWh started.\"}","is_free":false,"currency":"EUR","provision":{"amount":50,"currency":"EUR"},"payment_authorization_amount":{"amount":50,"currency":"EUR"},"max_price":{"amount":166.67,"currency":"EUR"},"custom_ref":"lidl-rapide-interop","is_hidden":false,"is_preferential":false,"origin_ref":"lidl-rapide-interop","commissioned_at":null}},{"id":1021619,"ref":null,"power":22,"standard":"IEC_62196_T2","is_remote_capable":false,"is_attached":true,"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2025-04-01T17:13:39.000000Z","tariff_id":3001,"evse_id":936867,"tariff":{"id":3001,"name":"Interop sortante - Lidl Rapide (20)","description":"{\"de\": \"0.51 \u20ac / kWh started.\", \"en\": \"0.51 \u20ac / kWh started.\", \"es\": \"0.51 \u20ac / kWh started.\", \"fr\": \"0,51 \u20ac / kWh entam\u00e9.\", \"nl\": \"0.51 \u20ac / kWh started.\"}","is_free":false,"currency":"EUR","provision":{"amount":50,"currency":"EUR"},"payment_authorization_amount":{"amount":50,"currency":"EUR"},"max_price":{"amount":166.67,"currency":"EUR"},"custom_ref":"lidl-rapide-interop","is_hidden":false,"is_preferential":false,"origin_ref":"lidl-rapide-interop","commissioned_at":null}}]}],"evses_available_count":4,"evses_total_count":4,"evses_capabilities":["RFID_READER"],"connectors":{"best_power":{"category":"fast","kw":24},"types":["IEC_62196_T2_COMBO","IEC_62196_T2","DOMESTIC_F"]},"img_preview_url":"https://maps.googleapis.com/maps/api/streetview?size=640x640&location=45.9078,6.13666&key=AIzaSyBTzO4i4vUlvTN98zgI1ae8fMPVHXVZ-Uk","hotline":{"phone_number":null,"schedule":[]},"related_refs":["FREBNBNMAK1","FREBNBNMAK2","FREBNBTHPN2"],"created_at":"2025-04-01T17:13:39.000000Z","updated_at":"2026-01-26T15:17:01.000000Z"}}`
+
+// TestNormalizeFreshmileRealPayloadMixedConnectorKinds pins the fix for a
+// real production bug: a station whose best_power.category is
+// "fast"/"superfast" (reported for the WHOLE location, driven by its
+// fastest connector) used to force EVERY connector there to Kind=dc,
+// including a plain Type 2 AC socket and a 4kW domestic plug — because
+// freshmileTariffKind (then just power-based) never consulted the
+// connector's own standard at all. This fixture is a real /locations/{id}
+// response (production, captured 2026-07-21) for a site with exactly that
+// shape: one CCS connector (best_power.category "fast", driven by its
+// 24kW) plus several Type 2 (22kW) and domestic (4kW) connectors — both
+// genuinely AC. Before the fix, all three ended up Kind=dc, and the T2/
+// domestic tariffs (0,51€/kWh) could silently outcompete the CCS
+// connector's own, higher, genuinely-DC price (0,70€/kWh) in a station's
+// displayed DC price aggregate.
+func TestNormalizeFreshmileRealPayloadMixedConnectorKinds(t *testing.T) {
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(realFreshmileAnnecyMixedConnectorsPayload), &envelope); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	details := envelope.Data
+	if details == nil {
+		t.Fatal("fixture missing data envelope")
+	}
+
+	src, ok := normalizeFreshmileStation(details)
+	if !ok {
+		t.Fatal("normalizeFreshmileStation = false, want true")
+	}
+	if src.SourceStationID != "FREBNBTHPN1" {
+		t.Errorf("SourceStationID = %q, want FREBNBTHPN1", src.SourceStationID)
+	}
+
+	tariffs := normalizeFreshmileTariffs(details)
+	if len(tariffs) != 3 {
+		t.Fatalf("got %d tariffs, want 3 (CCS/dc, T2/ac, EF/ac) — got %+v", len(tariffs), tariffs)
+	}
+
+	byKey := map[string]domain.StationTariff{}
+	for _, tf := range tariffs {
+		byKey[tf.Kind+"/"+tf.ConnectorType] = tf
+	}
+
+	ccs, ok := byKey[domain.TariffKindDC+"/"+domain.ConnectorTypeCCS]
+	if !ok {
+		t.Fatalf("missing dc/CCS tariff, got %+v", byKey)
+	}
+	if ccs.EnergyPriceCentsPerKWh == nil || *ccs.EnergyPriceCentsPerKWh != 70.0 {
+		t.Errorf("CCS price = %v, want 70.0 (0,70€/kWh)", ccs.EnergyPriceCentsPerKWh)
+	}
+
+	t2, ok := byKey[domain.TariffKindAC+"/"+domain.ConnectorTypeT2]
+	if !ok {
+		t.Fatalf("missing ac/T2 tariff (T2 must NOT be forced to dc by the station's fast CCS connector), got %+v", byKey)
+	}
+	if t2.EnergyPriceCentsPerKWh == nil || *t2.EnergyPriceCentsPerKWh != 51.0 {
+		t.Errorf("T2 price = %v, want 51.0 (0,51€/kWh)", t2.EnergyPriceCentsPerKWh)
+	}
+
+	ef, ok := byKey[domain.TariffKindAC+"/"+domain.ConnectorTypeEF]
+	if !ok {
+		t.Fatalf("missing ac/EF tariff (DOMESTIC_F must map to EF and NOT be forced to dc), got %+v", byKey)
+	}
+	if ef.EnergyPriceCentsPerKWh == nil || *ef.EnergyPriceCentsPerKWh != 51.0 {
+		t.Errorf("DOMESTIC_F (EF) price = %v, want 51.0 (0,51€/kWh)", ef.EnergyPriceCentsPerKWh)
+	}
+
+	// The location-level id/img_preview_url must land in every connector's
+	// own tariff Extra (see normalizeFreshmileTariffs' doc comment) — this
+	// site's three tariffs correlate to three different IRVE station rows
+	// (one per connector kind), so there's no single shared place to store
+	// them other than duplicating across each connector's own tariff.
+	for key, tf := range byKey {
+		if got := tf.Extra["freshmile_location_id"]; got != int64(829320) {
+			t.Errorf("%s: freshmile_location_id = %v (%T), want int64(829320)", key, got, got)
+		}
+		wantImg := "https://maps.googleapis.com/maps/api/streetview?size=640x640&location=45.9078,6.13666&key=AIzaSyBTzO4i4vUlvTN98zgI1ae8fMPVHXVZ-Uk"
+		if got := tf.Extra["img_preview_url"]; got != wantImg {
+			t.Errorf("%s: img_preview_url = %v, want %v", key, got, wantImg)
+		}
 	}
 }

@@ -2,8 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { fetchStationsInBBox } from "../api/stations.js";
-import { pickPriceCentsPerKWh, formatPrice, priceTier, sourcePlanPairs } from "../utils/pricing.js";
+import {
+  cheapestPriceAcrossStations,
+  formatPrice,
+  priceTier,
+  sourcePlanPairs,
+  PRICE_MODE_RECHARGE,
+} from "../utils/pricing.js";
 import { friendlyFetchErrorMessage } from "../utils/format.js";
+import { groupStationsByLocation } from "../utils/stationGrouping.js";
 
 const MIN_ZOOM_TO_LOAD = 10;
 
@@ -25,6 +32,7 @@ export default function StationMarkers({
   selectedSources,
   priceMode,
   chargeKWh,
+  chargeMinutes,
   showAllStations,
   selectedConnectorTypes,
   minPowerKw,
@@ -61,6 +69,11 @@ export default function StationMarkers({
       minPowerKw,
       minPriceCentsPerKwh,
       maxPriceCentsPerKwh,
+      // Only meaningful (and only sent) in "recharge" mode: that's the only
+      // time the price-range filter means "total for this session" rather
+      // than a plain €/kWh rate — see FilterPanel's price-range label.
+      chargeKWh: priceMode === PRICE_MODE_RECHARGE ? chargeKWh : undefined,
+      chargeMinutes: priceMode === PRICE_MODE_RECHARGE ? chargeMinutes : undefined,
       excludeSubscriptionPlans,
       signal: controller.signal,
     })
@@ -84,10 +97,26 @@ export default function StationMarkers({
   useEffect(() => {
     load(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourcesKey, showAllStations, connectorTypesKey, minPowerKw, minPriceCentsPerKwh, maxPriceCentsPerKwh, excludeSubscriptionPlans]);
+  }, [
+    sourcesKey,
+    showAllStations,
+    connectorTypesKey,
+    minPowerKw,
+    minPriceCentsPerKwh,
+    maxPriceCentsPerKwh,
+    priceMode,
+    chargeKWh,
+    chargeMinutes,
+    excludeSubscriptionPlans,
+  ]);
 
   const belowMinZoom = map.getZoom() < MIN_ZOOM_TO_LOAD;
   const isEmpty = !loading && !error && !belowMinZoom && stations.length === 0;
+  // Several connectors of the same physical site share the exact same
+  // coordinates — one marker per site instead of one per connector, priced
+  // at whichever connector is cheapest (see utils/pricing.js#
+  // cheapestPriceAcrossStations).
+  const sites = groupStationsByLocation(stations);
 
   return (
     <>
@@ -104,30 +133,29 @@ export default function StationMarkers({
         )}
         {isEmpty && <div className="status-banner">Aucune borne ne correspond à vos filtres dans cette zone.</div>}
       </div>
-      {stations.map((station) => {
-        const connectorType = station.connectors?.[0]?.kind;
+      {sites.map((site) => {
         const hasSelection = Object.keys(selectedSources).length > 0;
-        const pricing = hasSelection ? station.selectedSourcesPricing : station.pricingSummary;
-        const priceCents = pickPriceCentsPerKWh(pricing, connectorType);
-        // With a sources selection active, a station with no tariff for any
-        // selected source/plan isn't relevant to what the user is looking
-        // for — hide it instead of showing a dead "—" marker they'd have to
-        // click through to learn nothing from.
+        const priceCents = cheapestPriceAcrossStations(site.stations, hasSelection);
+        // With a sources selection active, a site with no tariff for any
+        // selected source/plan on any of its connectors isn't relevant to
+        // what the user is looking for — hide it instead of showing a dead
+        // "—" marker they'd have to click through to learn nothing from.
         if (hasSelection && priceCents == null) return null;
         const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
         const tier = priceTier(priceCents);
+        const first = site.stations[0];
 
         return (
           <Marker
-            key={station.id}
-            position={[station.location.lat, station.location.lng]}
+            key={site.key}
+            position={[site.location.lat, site.location.lng]}
             icon={priceIcon(label, priceCents != null, tier)}
-            eventHandlers={{ click: () => onSelect(station.id) }}
+            eventHandlers={{ click: () => onSelect(site) }}
           >
             <Popup>
-              <strong>{station.name || "Station"}</strong>
+              <strong>{first.name || "Station"}</strong>
               <br />
-              {station.operator}
+              {first.operator}
               <br />
               {priceCents != null ? label : "Pas de tarif pour la sélection"}
             </Popup>

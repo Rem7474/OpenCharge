@@ -122,7 +122,54 @@ go run ./cmd/opencharge-ingest -source all        # les onze, dans cet ordre
 
 Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
 `-electra-url`, `-tesla-url`, `-freshmile-url`, `-chargenow-url`,
-`-link-max-distance-m`.
+`-link-max-distance-m`, `-idle-timeout`, `-failed-dir` (ou
+`INGEST_FAILED_DIR`), `-retry-failed`.
+
+### Arrêt automatique en cas de blocage (`-idle-timeout`)
+
+Izivia, Tesla, Freshmile et ChargeNow n'ont **pas** de timeout global fixe :
+scanner toute la France peut légitimement prendre plus d'une heure tant que
+le run progresse (Freshmile seul traite des dizaines de milliers
+d'emplacements par run), donc couper après une durée fixe finissait soit
+par interrompre un run sain, soit imposait une limite si généreuse qu'elle
+ne détectait jamais une source réellement en panne.
+
+À la place, `-idle-timeout` (défaut 5 min) mesure le temps écoulé depuis la
+**dernière requête réussie**, tous types confondus (scan de tuile/square,
+détail de station, lot de prix...) : tant qu'au moins une requête aboutit
+dans cette fenêtre, le run continue sans limite de durée globale. Si plus
+aucune requête n'aboutit pendant `-idle-timeout` (ex. l'API de la source
+tombe en panne en plein run), le run s'arrête avec un message explicite
+(`no successful request in the last 5m0s, aborting run`) plutôt que de
+continuer à retenter indéfiniment. Comme pour un Ctrl+C ou un `docker
+stop`, ce qui a déjà été écrit en base reste acquis, et aucun sweep de
+données périmées n'est tenté sur un run interrompu de la sorte (voir plus
+bas). `-idle-timeout 0` désactive complètement ce mécanisme.
+
+### Rejouer les URLs en échec
+
+Les sources qui fannent sur de nombreuses URLs (Izivia, Tesla, Freshmile,
+ChargeNow) sauvegardent en fin de run — même interrompu — chaque requête
+définitivement en échec (après épuisement de leurs retries HTTP) dans un
+JSON local par source : `<failed-dir>/<source>.json` (défaut :
+`ingest-failures/`, surchargeable via `-failed-dir` ou `INGEST_FAILED_DIR`).
+Chaque entrée garde l'URL, les paramètres nécessaires pour rejouer la
+requête (marker/square Izivia, slug Tesla, id de location ou tuile
+Freshmile, bbox ou pool ChargeNow) et l'erreur rencontrée.
+
+```bash
+go run ./cmd/opencharge-ingest -source freshmile -retry-failed  # ne rejoue que les échecs du run précédent
+```
+
+`-retry-failed` ne rescanne pas toute la France : il ne rejoue que les
+requêtes listées dans le fichier. Le fichier est réécrit à chaque passe
+avec les échecs restants (et supprimé quand tout a fini par passer), donc
+la commande peut être relancée jusqu'à convergence. Aucun sweep de données
+périmées n'est fait dans ce mode (la passe ne rafraîchit qu'un
+sous-ensemble des stations, le reste est légitimement non touché). Via
+Docker, le dossier est monté depuis l'hôte (`./ingest-failures`, voir
+`docker-compose.yml`), donc les fichiers survivent au conteneur `--rm` :
+`docker compose run --rm ingest -source freshmile -retry-failed`.
 
 IRVE doit toujours être ingéré en premier : c'est le référentiel contre
 lequel Electra, Izivia, Tesla, Freshmile et ChargeNow sont corrélés, et
@@ -151,18 +198,36 @@ seulement documenté dans `raw_text`.
 
 **ChargeNow** (`backend/internal/ingestion/chargenow.go`) scanne toute la
 France via son API de clusters/pools (`/api/map/v1/fr/query`, même logique
-de subdivision par bounding box que Freshmile), puis interroge son API de
-tarifs (`/tariffs/CHARGENOW_PRIME/prices`) pour chaque pool trouvé.
-Particularité : l'API de découverte de ChargeNow ne renvoie ni le type de
-connecteur ni la puissance de chaque point de charge (seulement son id),
-alors que l'API de tarifs a besoin de `power_type`/`power` pour répondre —
-l'ingester corrèle donc chaque pool avec la station IRVE la plus proche
-*avant* même d'interroger les tarifs, uniquement pour lire ce
-`connector_type`/`power_kw` déjà connu d'IRVE. Nécessite le header WAF
-`rest-api-path` sur chaque requête (`clusters` pour `/query`, confirmé ;
-`prices` pour `/tariffs/.../prices` est une supposition non vérifiée en
-conditions réelles — voir le commentaire sur `doRequest` si ce endpoint se
-met à échouer de façon suspecte).
+de subdivision par bounding box que Freshmile) — découverte, corrélation,
+tarification et écriture tournent en pipeline (comme Freshmile), par lots
+de 100 pools au fur et à mesure qu'ils sont découverts, plutôt qu'en trois
+phases séparées (tout découvrir, puis tout tarifer, puis tout écrire) :
+un arrêt en cours de route ne perd donc que le lot en cours, pas tout ce
+qui a déjà été récupéré. Particularité : l'API de découverte de ChargeNow
+ne renvoie ni le type de connecteur ni la puissance de chaque point de
+charge (seulement son id), alors que l'API de tarifs (`/tariffs/CHARGENOW_PRIME/prices`)
+a besoin de `power_type`/`power` pour répondre — l'ingester corrèle donc
+chaque pool avec la station IRVE la plus proche *avant* même d'interroger
+les tarifs, uniquement pour lire ce `connector_type`/`power_kw` déjà connu
+d'IRVE.
+
+Le header `rest-api-path` est un routage interne (confirmé sur du trafic
+réel) : `/query` en a besoin (`clusters` pour une recherche par bbox,
+`charge-points` pour un statut temps réel, `pools` pour une recherche par
+id — seul `clusters` est utilisé ici), mais `/tariffs/.../prices` n'en
+prend **aucun** — lui en envoyer un (même une valeur plausible) le
+fait dérouter vers le mauvais micro-service et casse silencieusement
+tous les tarifs. Confirmé en production que le vrai problème n'était pas
+le contenu des requêtes mais leur **volume** : une rafale de requêtes
+concurrentes (l'ancien `chargenowScanWorkers: 16`) ou un lot de prix trop
+gros (plusieurs dizaines d'éléments en un seul POST, alors qu'un vrai
+navigateur n'en envoie jamais plus de 1 à 3) suffisent à faire bloquer
+l'IP entière par le WAF de ChargeNow. Toutes les requêtes (découverte et
+tarifs confondues) passent donc par un limiteur de débit partagé
+(`chargenowMinRequestInterval`, 150ms, confirmé sûr en conditions
+réelles) et les lots de prix sont volontairement petits
+(`chargenowPriceBatchSize`, 3 éléments) pour ressembler à un usage
+normal du site plutôt qu'à un scraping massif.
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux
@@ -171,9 +236,10 @@ récursive des clusters) est parallélisé sur 16 requêtes concurrentes, et
 chaque emplacement découvert est immédiatement envoyé aux workers de
 détail (8 par défaut, `FreshmileConfig.Workers`) puis écrit en base par
 paquets de 200 au fur et à mesure — sans attendre la fin du scan complet.
-Un arrêt en cours de route (Ctrl+C, `docker stop`, ou le flag `-timeout`)
-n'efface donc pas le travail déjà fait : ce qui a été récupéré avant
-l'arrêt reste écrit en base, et le run suivant repart pour compléter.
+Un arrêt en cours de route (Ctrl+C, `docker stop`, ou `-idle-timeout` qui
+donne l'abandon faute de requête réussie — voir plus haut) n'efface donc
+pas le travail déjà fait : ce qui a été récupéré avant l'arrêt reste écrit
+en base, et le run suivant repart pour compléter.
 
 **Tesla nécessite Chromium — en mode "headed", pas headless.**
 `tesla.com/api/findus/*` est protégé par un bot-mitigation (Akamai) qui
@@ -225,7 +291,9 @@ go run ./cmd/opencharge-api
 ### `GET /stations`
 
 Query params : `bbox=minLng,minLat,maxLng,maxLat` (obligatoire),
-`operator`, `hasTariffs`, `source`, `limit`, `offset`.
+`operator`, `hasTariffs`, `source`, `connectorType`, `minPowerKw`,
+`minPriceCentsPerKwh`, `maxPriceCentsPerKwh`, `chargeKWh`,
+`chargeMinutes`, `excludeSubscriptionPlans`, `limit`, `offset`.
 
 `source` accepte une liste de paires `source:plan` séparées par des virgules
 (ex. `source=izivia:standard,electra:subscription`) ; une source sans `:plan`
@@ -233,6 +301,18 @@ est traitée comme `standard`. **Il ne filtre jamais les stations** : il
 contrôle uniquement pour quelles paires (source, plan) `selectedSourcesPricing`
 est calculé, afin que la carte puisse griser une station sans tarif pour la
 sélection au lieu de la masquer.
+
+`minPriceCentsPerKwh`/`maxPriceCentsPerKwh` filtrent par prix — un simple
+tarif €/kWh par défaut, ou le coût total estimé d'une recharge
+(énergie + tarif au temps éventuel + frais de session éventuels) quand
+`chargeKWh` (et optionnellement `chargeMinutes`) est fourni, pour matcher
+ce que le mode "recharge" du frontend affiche réellement plutôt que forcer
+un raisonnement en €/kWh.
+
+`excludeSubscriptionPlans=true` retire les tarifs du palier `subscription`
+du calcul de `pricingSummary`/`selectedSourcesPricing` (et donc du filtre
+de prix ci-dessus), pour ne jamais afficher un prix qui suppose un
+abonnement payant que l'utilisateur n'a pas forcément.
 
 ```json
 [
@@ -282,6 +362,29 @@ quand une source en a plusieurs) à partir de cet endpoint : aucune liste
 n'est codée en dur côté client, une nouvelle source ou un nouveau palier
 apparaît automatiquement dès qu'il est ingéré.
 
+### `GET /freshmile/availability/{locationId}`
+
+Proxy côté serveur pour la disponibilité temps réel Freshmile
+(`backend/internal/api/freshmile.go`) : un appel direct navigateur ->
+Freshmile est bloqué par CORS en production (confirmé — Freshmile
+n'envoie pas d'en-tête `Access-Control-Allow-Origin`), donc le frontend
+appelle ce endpoint (même origine), qui relaie l'appel serveur à serveur
+vers `GET /locations/{id}` de l'API Freshmile.
+
+```json
+{
+  "evsesAvailableCount": 2,
+  "evsesTotalCount": 2,
+  "connectorAvailability": { "T2": { "available": 2, "total": 2 }, "EF": { "available": 2, "total": 2 } }
+}
+```
+
+Compte des bornes (evses), pas des connecteurs : une même borne physique
+peut exposer plusieurs connecteurs (ex. Type 2 + prise domestique) qui
+partagent une seule disponibilité — `connectorAvailability` ventile ce
+même compte par type de connecteur pour matcher l'affichage "un prix par
+connecteur" du frontend (`StationDetails.jsx`).
+
 ## Frontend
 
 ```bash
@@ -316,12 +419,21 @@ nginx décrit dans la section Docker ci-dessous.
     supplémentaire au changement de mode).
   - Une station sans tarif pour la sélection reste visible sur la carte,
     grisée sans prix (jamais masquée).
-  - Clic sur une station : panneau de détail avec le prix par source et
-    palier sélectionnés, le meilleur prix toutes sources en comparaison si
-    différent, et la liste complète des tarifs pour audit. Un tarif dont
-    le prix varie dans la journée (plusieurs plages horaires) s'affiche
-    sous forme de petit graphique en barres prix/heure plutôt qu'un prix
-    unique.
+  - Un même site physique peut avoir plusieurs connecteurs (une ligne IRVE
+    par prise, pas par site) : le frontend les regroupe par coordonnées
+    exactes (`utils/stationGrouping.js`) en un seul marqueur, au prix du
+    connecteur le moins cher, plutôt que plusieurs marqueurs superposés au
+    même point.
+  - Clic sur un site : panneau de détail avec une section "Prix par
+    connecteur" par connecteur du site — chacune avec le prix par source
+    et palier sélectionnés, le meilleur prix toutes sources en comparaison
+    si différent, et la liste complète des tarifs pour audit. Un tarif
+    dont le prix varie dans la journée (plusieurs plages horaires)
+    s'affiche sous forme de petit graphique en barres prix/heure plutôt
+    qu'un prix unique. Pour un site avec des données Freshmile : image
+    Street View et disponibilité temps réel (bornes libres/total, globale
+    et par connecteur — voir `GET /freshmile/availability/{locationId}`
+    ci-dessus).
 - **À propos (`/about`)** : sources de données, méthodologie de
   corrélation, limites de fiabilité des prix affichés.
 
