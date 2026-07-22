@@ -93,6 +93,16 @@ const (
 	// real one is unknown and erring slow costs only wall-clock time on
 	// what's already a background batch job.
 	chargenowMinRequestInterval = 300 * time.Millisecond
+	// chargenowProgressLogInterval controls how often scanPoolsFrom logs
+	// progress while it scans — same rationale as freshmile.go's
+	// freshmileProgressLogInterval, and more important than ever now that
+	// chargenowMinRequestInterval throttles every request: consumePools'
+	// own "N processed so far" log only fires once a full
+	// chargenowPoolBatchSize batch has been discovered, correlated,
+	// priced, and written, which can now take minutes — without this
+	// heartbeat, a slow-but-healthy throttled run looks identical to a
+	// hung one for that whole stretch.
+	chargenowProgressLogInterval = 10 * time.Second
 	// How many (charge_point, power_type, power) triples go in one POST to
 	// the prices endpoint — same reasoning as ingestionBulkChunkSize:
 	// bound request/response size without turning thousands of pools into
@@ -693,6 +703,24 @@ func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []charg
 	var visited int64
 	sem := make(chan struct{}, ing.workers())
 	var wg sync.WaitGroup
+
+	logDone := make(chan struct{})
+	defer close(logDone)
+	go func() {
+		ticker := time.NewTicker(chargenowProgressLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				mu.Lock()
+				found := len(seen)
+				mu.Unlock()
+				log.Printf("chargenow: scanning map, %d tiles visited so far, %d pools found", atomic.LoadInt64(&visited), found)
+			case <-logDone:
+				return
+			}
+		}
+	}()
 
 	var scan func(bbox chargenowBBox, depth int)
 	scan = func(bbox chargenowBBox, depth int) {
