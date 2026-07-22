@@ -209,11 +209,25 @@ charge (seulement son id), alors que l'API de tarifs (`/tariffs/CHARGENOW_PRIME/
 a besoin de `power_type`/`power` pour répondre — l'ingester corrèle donc
 chaque pool avec la station IRVE la plus proche *avant* même d'interroger
 les tarifs, uniquement pour lire ce `connector_type`/`power_kw` déjà connu
-d'IRVE. Nécessite le header WAF `rest-api-path` sur chaque requête
-(`clusters` pour `/query`, confirmé ; `prices` pour `/tariffs/.../prices`
-est une supposition non vérifiée en conditions réelles — voir le
-commentaire sur `doRequest` si ce endpoint se met à échouer de façon
-suspecte).
+d'IRVE.
+
+Le header `rest-api-path` est un routage interne (confirmé sur du trafic
+réel) : `/query` en a besoin (`clusters` pour une recherche par bbox,
+`charge-points` pour un statut temps réel, `pools` pour une recherche par
+id — seul `clusters` est utilisé ici), mais `/tariffs/.../prices` n'en
+prend **aucun** — lui en envoyer un (même une valeur plausible) le
+fait dérouter vers le mauvais micro-service et casse silencieusement
+tous les tarifs. Confirmé en production que le vrai problème n'était pas
+le contenu des requêtes mais leur **volume** : une rafale de requêtes
+concurrentes (l'ancien `chargenowScanWorkers: 16`) ou un lot de prix trop
+gros (plusieurs dizaines d'éléments en un seul POST, alors qu'un vrai
+navigateur n'en envoie jamais plus de 1 à 3) suffisent à faire bloquer
+l'IP entière par le WAF de ChargeNow. Toutes les requêtes (découverte et
+tarifs confondues) passent donc par un limiteur de débit partagé
+(`chargenowMinRequestInterval`, 150ms, confirmé sûr en conditions
+réelles) et les lots de prix sont volontairement petits
+(`chargenowPriceBatchSize`, 3 éléments) pour ressembler à un usage
+normal du site plutôt qu'à un scraping massif.
 
 **Freshmile scanne toute la France puis récupère le détail de chaque site
 — découverte et récupération/écriture tournent en pipeline, pas en deux
@@ -277,7 +291,9 @@ go run ./cmd/opencharge-api
 ### `GET /stations`
 
 Query params : `bbox=minLng,minLat,maxLng,maxLat` (obligatoire),
-`operator`, `hasTariffs`, `source`, `limit`, `offset`.
+`operator`, `hasTariffs`, `source`, `connectorType`, `minPowerKw`,
+`minPriceCentsPerKwh`, `maxPriceCentsPerKwh`, `chargeKWh`,
+`chargeMinutes`, `excludeSubscriptionPlans`, `limit`, `offset`.
 
 `source` accepte une liste de paires `source:plan` séparées par des virgules
 (ex. `source=izivia:standard,electra:subscription`) ; une source sans `:plan`
@@ -285,6 +301,18 @@ est traitée comme `standard`. **Il ne filtre jamais les stations** : il
 contrôle uniquement pour quelles paires (source, plan) `selectedSourcesPricing`
 est calculé, afin que la carte puisse griser une station sans tarif pour la
 sélection au lieu de la masquer.
+
+`minPriceCentsPerKwh`/`maxPriceCentsPerKwh` filtrent par prix — un simple
+tarif €/kWh par défaut, ou le coût total estimé d'une recharge
+(énergie + tarif au temps éventuel + frais de session éventuels) quand
+`chargeKWh` (et optionnellement `chargeMinutes`) est fourni, pour matcher
+ce que le mode "recharge" du frontend affiche réellement plutôt que forcer
+un raisonnement en €/kWh.
+
+`excludeSubscriptionPlans=true` retire les tarifs du palier `subscription`
+du calcul de `pricingSummary`/`selectedSourcesPricing` (et donc du filtre
+de prix ci-dessus), pour ne jamais afficher un prix qui suppose un
+abonnement payant que l'utilisateur n'a pas forcément.
 
 ```json
 [
@@ -334,6 +362,29 @@ quand une source en a plusieurs) à partir de cet endpoint : aucune liste
 n'est codée en dur côté client, une nouvelle source ou un nouveau palier
 apparaît automatiquement dès qu'il est ingéré.
 
+### `GET /freshmile/availability/{locationId}`
+
+Proxy côté serveur pour la disponibilité temps réel Freshmile
+(`backend/internal/api/freshmile.go`) : un appel direct navigateur ->
+Freshmile est bloqué par CORS en production (confirmé — Freshmile
+n'envoie pas d'en-tête `Access-Control-Allow-Origin`), donc le frontend
+appelle ce endpoint (même origine), qui relaie l'appel serveur à serveur
+vers `GET /locations/{id}` de l'API Freshmile.
+
+```json
+{
+  "evsesAvailableCount": 2,
+  "evsesTotalCount": 2,
+  "connectorAvailability": { "T2": { "available": 2, "total": 2 }, "EF": { "available": 2, "total": 2 } }
+}
+```
+
+Compte des bornes (evses), pas des connecteurs : une même borne physique
+peut exposer plusieurs connecteurs (ex. Type 2 + prise domestique) qui
+partagent une seule disponibilité — `connectorAvailability` ventile ce
+même compte par type de connecteur pour matcher l'affichage "un prix par
+connecteur" du frontend (`StationDetails.jsx`).
+
 ## Frontend
 
 ```bash
@@ -368,12 +419,21 @@ nginx décrit dans la section Docker ci-dessous.
     supplémentaire au changement de mode).
   - Une station sans tarif pour la sélection reste visible sur la carte,
     grisée sans prix (jamais masquée).
-  - Clic sur une station : panneau de détail avec le prix par source et
-    palier sélectionnés, le meilleur prix toutes sources en comparaison si
-    différent, et la liste complète des tarifs pour audit. Un tarif dont
-    le prix varie dans la journée (plusieurs plages horaires) s'affiche
-    sous forme de petit graphique en barres prix/heure plutôt qu'un prix
-    unique.
+  - Un même site physique peut avoir plusieurs connecteurs (une ligne IRVE
+    par prise, pas par site) : le frontend les regroupe par coordonnées
+    exactes (`utils/stationGrouping.js`) en un seul marqueur, au prix du
+    connecteur le moins cher, plutôt que plusieurs marqueurs superposés au
+    même point.
+  - Clic sur un site : panneau de détail avec une section "Prix par
+    connecteur" par connecteur du site — chacune avec le prix par source
+    et palier sélectionnés, le meilleur prix toutes sources en comparaison
+    si différent, et la liste complète des tarifs pour audit. Un tarif
+    dont le prix varie dans la journée (plusieurs plages horaires)
+    s'affiche sous forme de petit graphique en barres prix/heure plutôt
+    qu'un prix unique. Pour un site avec des données Freshmile : image
+    Street View et disponibilité temps réel (bornes libres/total, globale
+    et par connecteur — voir `GET /freshmile/availability/{locationId}`
+    ci-dessus).
 - **À propos (`/about`)** : sources de données, méthodologie de
   corrélation, limites de fiabilité des prix affichés.
 
