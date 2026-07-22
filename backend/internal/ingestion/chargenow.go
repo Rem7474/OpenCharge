@@ -88,11 +88,11 @@ const (
 	// alone only bounds concurrency, not request rate, and a WAF blocking
 	// on burst volume doesn't care whether 16 requests arrived from 16
 	// goroutines or 1 goroutine firing 16 times fast — both look nothing
-	// like a human panning/zooming a map. 300ms is conservative (~3.3
-	// req/s) rather than tuned against a measured threshold, since the
-	// real one is unknown and erring slow costs only wall-clock time on
-	// what's already a background batch job.
-	chargenowMinRequestInterval = 300 * time.Millisecond
+	// like a human panning/zooming a map. 150ms (~6.7 req/s) confirmed
+	// against production as safe — a real full-France run at this rate
+	// didn't get IP-blocked, unlike the previous unthrottled/16-worker
+	// burst.
+	chargenowMinRequestInterval = 150 * time.Millisecond
 	// chargenowProgressLogInterval controls how often scanPoolsFrom logs
 	// progress while it scans — same rationale as freshmile.go's
 	// freshmileProgressLogInterval, and more important than ever now that
