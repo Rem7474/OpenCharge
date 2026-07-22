@@ -78,51 +78,57 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 	// station_links row when a source station has no kind-tagged
 	// tariffs), resolve a kind-preferring nearest separately for the
 	// subset of items that actually have an ac or dc tariff to place.
-	var acIdxs, dcIdxs []int
-	var acPoints, dcPoints []repository.NearestStationQuery
+	//
+	// Grouped by (kind, ConnectorType) rather than just kind: a single
+	// source station's tariffs of the same kind can themselves span
+	// several distinct connector types (today: only Freshmile sets
+	// ConnectorType, e.g. a dc/CCS tariff and a dc/CHAdeMO tariff for the
+	// same physical site). Since FindNearestStationsForKind can only
+	// resolve ONE station per (point, kind), lumping both into a single
+	// "dc" lookup would make BOTH tariffs target the same single IRVE row
+	// — confirmed in production: a co-located CHAdeMO row kept the dc
+	// tariff while its sibling CCS row got none. A separate lookup per
+	// (kind, ConnectorType) lets each land on its own matching row instead;
+	// sources that never set ConnectorType (Electra, Izivia, ChargeNow,
+	// Tesla) end up with exactly one group per kind, same as before.
+	type kindConnKey struct{ kind, connectorType string }
+	groupIdxs := map[kindConnKey][]int{}
+	groupPoints := map[kindConnKey][]repository.NearestStationQuery{}
 	for i, item := range items {
-		hasAC, hasDC := false, false
+		seen := map[kindConnKey]bool{}
 		for _, t := range item.Tariffs {
-			switch t.Kind {
-			case domain.TariffKindAC:
-				hasAC = true
-			case domain.TariffKindDC:
-				hasDC = true
+			if t.Kind != domain.TariffKindAC && t.Kind != domain.TariffKindDC {
+				continue
 			}
-		}
-		if hasAC {
-			acIdxs = append(acIdxs, i)
-			acPoint := points[i]
-			acPoint.TargetPowerKW = item.ACPowerKW
-			acPoints = append(acPoints, acPoint)
-		}
-		if hasDC {
-			dcIdxs = append(dcIdxs, i)
-			dcPoint := points[i]
-			dcPoint.TargetPowerKW = item.DCPowerKW
-			dcPoints = append(dcPoints, dcPoint)
+			key := kindConnKey{kind: t.Kind, connectorType: t.ConnectorType}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			point := points[i]
+			if t.Kind == domain.TariffKindAC {
+				point.TargetPowerKW = item.ACPowerKW
+			} else {
+				point.TargetPowerKW = item.DCPowerKW
+			}
+			groupIdxs[key] = append(groupIdxs[key], i)
+			groupPoints[key] = append(groupPoints[key], point)
 		}
 	}
 
-	nearestAC := map[int]repository.NearestStationCandidate{}
-	if len(acPoints) > 0 {
-		byLocalIdx, err := txLinks.FindNearestStationsForKind(ctx, acPoints, domain.TariffKindAC, maxDistanceM)
+	resolved := map[kindConnKey]map[int]repository.NearestStationCandidate{}
+	for key, pts := range groupPoints {
+		byLocalIdx, err := txLinks.FindNearestStationsForKind(ctx, pts, key.kind, key.connectorType, maxDistanceM)
 		if err != nil {
 			return 0, err
 		}
+		idxs := groupIdxs[key]
+		byIdx := make(map[int]repository.NearestStationCandidate, len(byLocalIdx))
 		for local, candidate := range byLocalIdx {
-			nearestAC[acIdxs[local]] = candidate
+			byIdx[idxs[local]] = candidate
 		}
-	}
-	nearestDC := map[int]repository.NearestStationCandidate{}
-	if len(dcPoints) > 0 {
-		byLocalIdx, err := txLinks.FindNearestStationsForKind(ctx, dcPoints, domain.TariffKindDC, maxDistanceM)
-		if err != nil {
-			return 0, err
-		}
-		for local, candidate := range byLocalIdx {
-			nearestDC[dcIdxs[local]] = candidate
-		}
+		resolved[key] = byIdx
 	}
 
 	sourceStationIDs, err := txSourceStations.BulkUpsert(ctx, stations)
@@ -140,9 +146,9 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 		}
 
 		// Every distinct IRVE station this source station's tariffs
-		// actually resolved to gets its own link row — usually one (ac
-		// and dc land on the same station), occasionally two (co-located
-		// but distinct ac/dc rows).
+		// actually resolved to gets its own link row — usually one (every
+		// tariff lands on the same station), occasionally more (co-located
+		// but distinct rows per kind and/or connector type).
 		usedStations := map[uuid.UUID]repository.NearestStationCandidate{}
 		if hasAny {
 			usedStations[anyCandidate.StationID] = anyCandidate
@@ -150,13 +156,9 @@ func writeSourceStationChunk(ctx context.Context, pool *pgxpool.Pool, sourceStat
 
 		for _, t := range item.Tariffs {
 			candidate, ok := anyCandidate, hasAny
-			switch t.Kind {
-			case domain.TariffKindAC:
-				if c, kindOK := nearestAC[i]; kindOK {
-					candidate, ok = c, true
-				}
-			case domain.TariffKindDC:
-				if c, kindOK := nearestDC[i]; kindOK {
+			if t.Kind == domain.TariffKindAC || t.Kind == domain.TariffKindDC {
+				key := kindConnKey{kind: t.Kind, connectorType: t.ConnectorType}
+				if c, kindOK := resolved[key][i]; kindOK {
 					candidate, ok = c, true
 				}
 			}

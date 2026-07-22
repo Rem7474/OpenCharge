@@ -343,11 +343,11 @@ func (ing *ChargenowIngester) processPoolBatch(ctx context.Context, pools []char
 	for i, p := range pools {
 		points[i] = repository.NearestStationQuery{Lat: p.Lat, Lng: p.Lng}
 	}
-	nearestAC, err := ing.Links.FindNearestStationsForKind(ctx, points, domain.TariffKindAC, ing.MaxLinkDistanceM)
+	nearestAC, err := ing.Links.FindNearestStationsForKind(ctx, points, domain.TariffKindAC, "", ing.MaxLinkDistanceM)
 	if err != nil {
 		return 0, fmt.Errorf("correlate chargenow pools (ac): %w", err)
 	}
-	nearestDC, err := ing.Links.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, ing.MaxLinkDistanceM)
+	nearestDC, err := ing.Links.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, "", ing.MaxLinkDistanceM)
 	if err != nil {
 		return 0, fmt.Errorf("correlate chargenow pools (dc): %w", err)
 	}

@@ -128,3 +128,74 @@ func TestWriteSourceStationChunk_KindAwareMatching(t *testing.T) {
 		t.Errorf("station_links count = %d, want 2 (one per co-located kind-matched station)", linkCount)
 	}
 }
+
+// TestWriteSourceStationChunk_ConnectorTypeAwareMatching pins the fix for a
+// real production bug reported against the Annecy area: a physical site
+// with TWO co-located dc-kind IRVE rows (a CHAdeMO PDC and a CCS PDC) only
+// ever got a source's dc tariff attached to ONE of them, because kind-only
+// matching (ac/dc) can't tell same-kind rows apart — even though the
+// source (Freshmile, via domain.StationTariff.ConnectorType) already knew
+// which tariff belonged to which connector. Confirmed in the wild: a
+// CHAdeMO row kept the tariff, the co-located CCS row got none at all.
+func TestWriteSourceStationChunk_ConnectorTypeAwareMatching(t *testing.T) {
+	pool := setupLinkingTestPool(t)
+	ctx := context.Background()
+
+	stationRepo := repository.NewStationRepository(pool)
+	sourceStationRepo := repository.NewSourceStationRepository(pool)
+	tariffRepo := repository.NewTariffRepository(pool)
+	linkRepo := repository.NewLinkRepository(pool)
+
+	// Both dc-kind rows sit at (near enough to be indistinguishable by
+	// distance) the same coordinates — chademo is placed exactly on the
+	// source station's own reported point, ccs a hair farther away, so a
+	// pre-fix kind-only lookup would always resolve both tariffs onto
+	// chademo alone.
+	chademoID, err := stationRepo.UpsertStation(ctx, testIRVEStation("FRCONNCHUNKCHADEMO1", 45.9000, 6.1000, domain.ConnectorTypeCHAdeMO))
+	if err != nil {
+		t.Fatalf("UpsertStation chademo: %v", err)
+	}
+	ccsID, err := stationRepo.UpsertStation(ctx, testIRVEStation("FRCONNCHUNKCCS1", 45.90002, 6.10002, domain.ConnectorTypeCCS))
+	if err != nil {
+		t.Fatalf("UpsertStation ccs: %v", err)
+	}
+
+	item := normalizedSourceStation{
+		Station: domain.SourceStation{
+			Source:          "freshmile",
+			SourceStationID: "conn-aware-1",
+			OperatorName:    "TestOperator",
+			Name:            "Station FRCONNCHUNKCHADEMO1",
+			Lat:             45.9000,
+			Lng:             6.1000,
+		},
+		Tariffs: []domain.StationTariff{
+			{Source: "freshmile", Kind: domain.TariffKindDC, ConnectorType: domain.ConnectorTypeCHAdeMO, Plan: "standard", EnergyPriceCentsPerKWh: ptr(60.0)},
+			{Source: "freshmile", Kind: domain.TariffKindDC, ConnectorType: domain.ConnectorTypeCCS, Plan: "standard", EnergyPriceCentsPerKWh: ptr(70.0)},
+		},
+	}
+
+	n, err := writeSourceStationChunk(ctx, pool, sourceStationRepo, tariffRepo, linkRepo, 150, []normalizedSourceStation{item})
+	if err != nil {
+		t.Fatalf("writeSourceStationChunk: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("writeSourceStationChunk wrote %d items, want 1", n)
+	}
+
+	chademoTariffs, err := tariffRepo.ListByStation(ctx, chademoID)
+	if err != nil {
+		t.Fatalf("ListByStation chademo: %v", err)
+	}
+	if len(chademoTariffs) != 1 || chademoTariffs[0].EnergyPriceCentsPerKWh == nil || *chademoTariffs[0].EnergyPriceCentsPerKWh != 60.0 {
+		t.Fatalf("chademo station tariffs = %+v, want exactly one dc tariff at 60.0", chademoTariffs)
+	}
+
+	ccsTariffs, err := tariffRepo.ListByStation(ctx, ccsID)
+	if err != nil {
+		t.Fatalf("ListByStation ccs: %v", err)
+	}
+	if len(ccsTariffs) != 1 || ccsTariffs[0].EnergyPriceCentsPerKWh == nil || *ccsTariffs[0].EnergyPriceCentsPerKWh != 70.0 {
+		t.Fatalf("ccs station tariffs = %+v, want exactly one dc tariff at 70.0 (this is the bug: it used to be empty)", ccsTariffs)
+	}
+}

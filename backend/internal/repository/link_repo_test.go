@@ -128,7 +128,7 @@ func TestLinkRepository_FindNearestStationsForKind(t *testing.T) {
 		{Lat: 10.0000, Lng: 10.0000}, // index 1: nowhere near anything
 	}
 
-	dcResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, 150)
+	dcResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, "", 150)
 	if err != nil {
 		t.Fatalf("FindNearestStationsForKind(dc): %v", err)
 	}
@@ -146,7 +146,7 @@ func TestLinkRepository_FindNearestStationsForKind(t *testing.T) {
 		t.Errorf("dcResults[0].PowerKW = %v, want 50.0", dcCandidate.PowerKW)
 	}
 
-	acResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindAC, 150)
+	acResults, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindAC, "", 150)
 	if err != nil {
 		t.Fatalf("FindNearestStationsForKind(ac): %v", err)
 	}
@@ -166,8 +166,64 @@ func TestLinkRepository_FindNearestStationsForKind(t *testing.T) {
 		t.Errorf("dcResults[1] = %+v, want absent (no station within range)", dcResults[1])
 	}
 
-	if empty, err := linkRepo.FindNearestStationsForKind(ctx, nil, domain.TariffKindDC, 150); err != nil || empty != nil {
+	if empty, err := linkRepo.FindNearestStationsForKind(ctx, nil, domain.TariffKindDC, "", 150); err != nil || empty != nil {
 		t.Errorf("FindNearestStationsForKind(nil) = (%v, %v), want (nil, nil)", empty, err)
+	}
+}
+
+// TestLinkRepository_FindNearestStationsForKind_ConnectorTypeExactMatch pins
+// the fix for a real production bug: a physical site with TWO co-located
+// dc-kind IRVE rows (e.g. a CHAdeMO and a CCS connector) could only ever
+// resolve to ONE of them via kind-only matching, silently starving the
+// other of any tariff from a source whose own data already distinguishes
+// connector types (Freshmile) — confirmed in production: a CHAdeMO row
+// kept a source's dc tariff while its sibling CCS row got none. Requesting
+// a specific connectorType must resolve to the matching row even when
+// another same-kind row sits at the exact same (or nearer) coordinates.
+func TestLinkRepository_FindNearestStationsForKind_ConnectorTypeExactMatch(t *testing.T) {
+	pool := setupTestPool(t)
+	ctx := context.Background()
+	stationRepo := NewStationRepository(pool)
+	linkRepo := NewLinkRepository(pool)
+
+	// chademo sits exactly on the query point; ccs is very slightly
+	// farther away, so a plain kind-only (dc) lookup would pick chademo —
+	// requesting connectorType="CCS" must still resolve to ccs.
+	chademo := testStation("FRCONNCHADEMO1", 45.9000, 6.1000)
+	chademo.ConnectorType = "CHAdeMO"
+	ccs := testStation("FRCONNCCS1", 45.90002, 6.10002)
+	ccs.ConnectorType = "CCS"
+
+	if _, err := stationRepo.UpsertStation(ctx, chademo); err != nil {
+		t.Fatalf("UpsertStation chademo: %v", err)
+	}
+	ccsID, err := stationRepo.UpsertStation(ctx, ccs)
+	if err != nil {
+		t.Fatalf("UpsertStation ccs: %v", err)
+	}
+
+	points := []NearestStationQuery{{Lat: 45.9000, Lng: 6.1000}}
+
+	results, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, "CCS", 150)
+	if err != nil {
+		t.Fatalf("FindNearestStationsForKind(dc, CCS): %v", err)
+	}
+	candidate, ok := results[0]
+	if !ok {
+		t.Fatal("results[0] missing, want the ccs station")
+	}
+	if candidate.StationID != ccsID {
+		t.Errorf("resolved station = %v, want ccs station %v (got connector_type %q)", candidate.StationID, ccsID, candidate.ConnectorType)
+	}
+
+	// An empty connectorType (the pre-existing behavior) falls back to
+	// plain nearest-of-kind, which should pick chademo (the truly nearest).
+	fallback, err := linkRepo.FindNearestStationsForKind(ctx, points, domain.TariffKindDC, "", 150)
+	if err != nil {
+		t.Fatalf("FindNearestStationsForKind(dc, \"\"): %v", err)
+	}
+	if fallback[0].ConnectorType != "CHAdeMO" {
+		t.Errorf("fallback (no connectorType) resolved to %q, want CHAdeMO (the nearest)", fallback[0].ConnectorType)
 	}
 }
 
