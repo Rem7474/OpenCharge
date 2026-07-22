@@ -240,6 +240,7 @@ func TestChargenowIngester_Run(t *testing.T) {
 	defer srv.Close()
 
 	ing := NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, srv.URL, ChargenowConfig{Workers: 2})
+	ing.limiter = newChargenowRateLimiter(time.Microsecond)
 	ing.retryBackoff = time.Millisecond
 
 	n, err := ing.Run(ctx)
@@ -353,6 +354,7 @@ func TestChargenowIngester_RunStreamsMultipleBatches(t *testing.T) {
 	defer srv.Close()
 
 	ing := NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, srv.URL, ChargenowConfig{Workers: 4})
+	ing.limiter = newChargenowRateLimiter(time.Microsecond)
 	ing.retryBackoff = time.Millisecond
 
 	n, err := ing.Run(ctx)
@@ -467,6 +469,7 @@ func TestChargenowIngester_RunKeepsAlreadyWrittenBatchesOnCancellation(t *testin
 	defer srv.Close()
 
 	ing := NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, srv.URL, ChargenowConfig{Workers: 4})
+	ing.limiter = newChargenowRateLimiter(time.Microsecond)
 	ing.retryBackoff = time.Millisecond
 
 	n, err := ing.Run(runCtx)
@@ -563,6 +566,7 @@ func TestChargenowIngester_RetryFailedCombinesDirectPoolsAndRescannedBBoxes(t *t
 	defer srv.Close()
 
 	ing := NewChargenowIngester(pool, sourceStationRepo, tariffRepo, linkRepo, srv.URL, ChargenowConfig{Workers: 2})
+	ing.limiter = newChargenowRateLimiter(time.Microsecond)
 	ing.retryBackoff = time.Millisecond
 
 	directPoolJSON, err := json.Marshal(directPool)

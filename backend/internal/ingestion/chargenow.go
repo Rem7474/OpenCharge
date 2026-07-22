@@ -68,7 +68,31 @@ const (
 	// and subdivideChargenowBBox's strict halving already bound worst-case
 	// blowup per initial tile.
 	chargenowMaxTilesVisited = 500000
-	chargenowScanWorkers     = 16
+	// chargenowScanWorkers was 16 — confirmed in production that firing
+	// that many requests at once (the natural result of subdividing a
+	// cluster into 4 sub-tiles, recursed 16-wide) gets ChargeNow's WAF to
+	// reject every single one of them, discovery and pricing alike, with
+	// an opaque 403 HTML page — not a per-request rejection, a blanket
+	// one, on requests that succeed individually and instantly from a
+	// browser or a lone curl. A real visitor's browser never has anywhere
+	// near this many requests in flight; see chargenowMinRequestInterval,
+	// the actual fix, for why a lower worker count alone doesn't fully
+	// solve this (it only bounds how many requests can be queued up
+	// waiting, not how fast they're actually sent).
+	chargenowScanWorkers = 4
+	// chargenowMinRequestInterval paces every single request this
+	// ingester makes to chargenow.com (discovery and pricing alike — see
+	// doRequest) to no faster than one every this long, regardless of how
+	// many workers/goroutines are trying to fire at once. This is the
+	// actual fix for the WAF block described above: chargenowScanWorkers
+	// alone only bounds concurrency, not request rate, and a WAF blocking
+	// on burst volume doesn't care whether 16 requests arrived from 16
+	// goroutines or 1 goroutine firing 16 times fast — both look nothing
+	// like a human panning/zooming a map. 300ms is conservative (~3.3
+	// req/s) rather than tuned against a measured threshold, since the
+	// real one is unknown and erring slow costs only wall-clock time on
+	// what's already a background batch job.
+	chargenowMinRequestInterval = 300 * time.Millisecond
 	// How many (charge_point, power_type, power) triples go in one POST to
 	// the prices endpoint — same reasoning as ingestionBulkChunkSize:
 	// bound request/response size without turning thousands of pools into
@@ -125,10 +149,37 @@ type ChargenowIngester struct {
 	// IdleTimeout bounds how long Run/RetryFailed goes without a single
 	// successful request before giving up on the whole run — see
 	// idleWatchdog. Defaults to DefaultIdleTimeout; <= 0 disables it.
-	IdleTimeout  time.Duration
-	idle         *idleWatchdog // set by Run/RetryFailed, read by doRequest
-	client       *http.Client
+	IdleTimeout time.Duration
+	idle        *idleWatchdog // set by Run/RetryFailed, read by doRequest
+	client      *http.Client
+	// limiter paces every request (see chargenowMinRequestInterval);
+	// overridden by tests to a no-op/faster interval to keep them fast.
+	limiter      *chargenowRateLimiter
 	retryBackoff time.Duration // unexported: overridden by tests to keep them fast
+}
+
+// chargenowRateLimiter hands out one token every interval via a shared
+// ticker channel — any number of goroutines can wait on it concurrently,
+// but only one proceeds per tick, which is exactly the property needed
+// here: cap chargenow.com's request rate regardless of how many workers
+// are trying to fire at once (see chargenowMinRequestInterval's doc
+// comment for why that, not just a lower worker count, is the actual fix
+// for the WAF block observed in production).
+type chargenowRateLimiter struct {
+	ticker *time.Ticker
+}
+
+func newChargenowRateLimiter(interval time.Duration) *chargenowRateLimiter {
+	return &chargenowRateLimiter{ticker: time.NewTicker(interval)}
+}
+
+func (rl *chargenowRateLimiter) Wait(ctx context.Context) error {
+	select {
+	case <-rl.ticker.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceStationRepository, tariffs *repository.TariffRepository, links *repository.LinkRepository, baseURL string, cfg ChargenowConfig) *ChargenowIngester {
@@ -147,6 +198,7 @@ func NewChargenowIngester(pool *pgxpool.Pool, sourceStations *repository.SourceS
 		BaseURL: baseURL, Config: cfg, MaxLinkDistanceM: DefaultLinkMaxDistanceMeters,
 		IdleTimeout:  DefaultIdleTimeout,
 		client:       &http.Client{Timeout: 20 * time.Second, Transport: transport},
+		limiter:      newChargenowRateLimiter(chargenowMinRequestInterval),
 		retryBackoff: 2 * time.Second,
 	}
 }
@@ -833,6 +885,14 @@ func (ing *ChargenowIngester) withRetries(ctx context.Context, label string, do 
 // fetching for every run. restAPIPath == "" (see the prices call site in
 // processPoolBatch) leaves the header unset entirely.
 func (ing *ChargenowIngester) doRequest(ctx context.Context, url, restAPIPath string, body []byte) ([]byte, int, error) {
+	// Paces this request against every other one this ingester is making
+	// concurrently — see chargenowMinRequestInterval's doc comment: this,
+	// not chargenowScanWorkers, is what actually stops a burst of parallel
+	// requests from getting the whole run's IP blocked by ChargeNow's WAF.
+	if err := ing.limiter.Wait(ctx); err != nil {
+		return nil, 0, err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, fmt.Errorf("build request for %s: %w", url, err)
