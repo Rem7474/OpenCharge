@@ -646,6 +646,20 @@ a {
   margin-top: 6px;
 }
 
+.fuel-comparison-range-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.fuel-comparison-range-inputs label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 0;
+}
+
 .fuel-comparison-inputs input {
   width: 64px;
   padding: 3px 6px;

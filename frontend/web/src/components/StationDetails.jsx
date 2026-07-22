@@ -97,31 +97,50 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
 // selected-source tariff, or the overall best); fuelPrice is the
 // nationwide-average SP95-E10 price from hooks/useFuelPrice.js (null while
 // loading, in which case this renders nothing rather than guessing).
-function FuelComparison({ tariff, evConsumptionKWhPer100Km, thermalConsumptionLPer100Km, fuelPrice }) {
+//
+// evConsumptionMin/MaxKWhPer100Km is a range, not one number: real EV
+// consumption swings a lot with conditions (highway vs. city, cold
+// weather, driving style), so a single assumed figure would claim a
+// precision this app has no way to back up — this computes the comparison
+// at both ends and shows the resulting range instead.
+function FuelComparison({ tariff, evConsumptionMinKWhPer100Km, evConsumptionMaxKWhPer100Km, thermalConsumptionLPer100Km, fuelPrice }) {
   if (!tariff || !fuelPrice) return null;
   const evPriceCentsPerKWh = currentEnergyPriceCentsPerKWh(tariff);
   if (evPriceCentsPerKWh == null) return null;
-  const comparison = fuelPriceComparison({
-    evPriceCentsPerKWh,
-    evConsumptionKWhPer100Km,
-    thermalConsumptionLPer100Km,
-    fuelPriceCentsPerLiter: fuelPrice.pricePerLiterCents,
-  });
-  if (!comparison) return null;
-  const equivalentEurosPerLiter = comparison.equivalentFuelPriceCentsPerLiter / 100;
+
+  const shared = { evPriceCentsPerKWh, thermalConsumptionLPer100Km, fuelPriceCentsPerLiter: fuelPrice.pricePerLiterCents };
+  const atMin = fuelPriceComparison({ ...shared, evConsumptionKWhPer100Km: evConsumptionMinKWhPer100Km });
+  const atMax = fuelPriceComparison({ ...shared, evConsumptionKWhPer100Km: evConsumptionMaxKWhPer100Km });
+  if (!atMin || !atMax) return null;
+
+  // Lower EV consumption always means a cheaper equivalent and bigger
+  // savings, but this sorts by value rather than assuming that — so the
+  // range still reads low-to-high even if the user enters the two fields
+  // the "wrong" way round.
+  const equivLow = Math.min(atMin.equivalentFuelPriceCentsPerLiter, atMax.equivalentFuelPriceCentsPerLiter) / 100;
+  const equivHigh = Math.max(atMin.equivalentFuelPriceCentsPerLiter, atMax.equivalentFuelPriceCentsPerLiter) / 100;
+  const savingsLow = Math.min(atMin.savingsPercent, atMax.savingsPercent);
+  const savingsHigh = Math.max(atMin.savingsPercent, atMax.savingsPercent);
+  const bothCheaper = atMin.savingsCentsPer100Km > 0 && atMax.savingsCentsPer100Km > 0;
+  const bothPricier = atMin.savingsCentsPer100Km <= 0 && atMax.savingsCentsPer100Km <= 0;
+
   return (
     <p className="fuel-comparison">
       <Fuel size={13} strokeWidth={2.2} />
-      Équivaut à {equivalentEurosPerLiter.toFixed(2)} €/L d&rsquo;essence
-      {comparison.savingsCentsPer100Km > 0 ? (
+      Équivaut à {equivLow.toFixed(2)}–{equivHigh.toFixed(2)} €/L d&rsquo;essence selon la conso
+      {bothCheaper && (
         <>
           {" "}
-          — économie de {(comparison.savingsCentsPer100Km / 100).toFixed(2)} €/100km ({Math.round(comparison.savingsPercent)} % moins
-          cher)
+          — {Math.round(savingsLow)} à {Math.round(savingsHigh)} % moins cher
         </>
-      ) : (
-        <> — {Math.abs(Math.round(comparison.savingsPercent))} % plus cher que l&rsquo;essence</>
       )}
+      {bothPricier && (
+        <>
+          {" "}
+          — {Math.round(Math.abs(savingsHigh))} à {Math.round(Math.abs(savingsLow))} % plus cher que l&rsquo;essence
+        </>
+      )}
+      {!bothCheaper && !bothPricier && <> — moins cher ou plus cher selon la conso réelle</>}
       {!fuelPrice.live && " (prix carburant estimé)"}
     </p>
   );
@@ -142,7 +161,8 @@ function ConnectorPriceSection({
   priceMode,
   chargeKWh,
   chargeMinutes,
-  evConsumptionKWhPer100Km,
+  evConsumptionMinKWhPer100Km,
+  evConsumptionMaxKWhPer100Km,
   thermalConsumptionLPer100Km,
   fuelPrice,
   excludeSubscriptionPlans,
@@ -228,7 +248,8 @@ function ConnectorPriceSection({
 
       <FuelComparison
         tariff={overallBeatsSelection ? overallBest : (cheapestSelected?.tariff ?? overallBest)}
-        evConsumptionKWhPer100Km={evConsumptionKWhPer100Km}
+        evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+        evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
         thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
         fuelPrice={fuelPrice}
       />
@@ -252,7 +273,8 @@ export default function StationDetails({
   priceMode,
   chargeKWh,
   chargeMinutes,
-  evConsumptionKWhPer100Km,
+  evConsumptionMinKWhPer100Km,
+  evConsumptionMaxKWhPer100Km,
   thermalConsumptionLPer100Km,
   excludeSubscriptionPlans,
 }) {
@@ -423,7 +445,8 @@ export default function StationDetails({
               priceMode={priceMode}
               chargeKWh={chargeKWh}
               chargeMinutes={chargeMinutes}
-              evConsumptionKWhPer100Km={evConsumptionKWhPer100Km}
+              evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+              evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
               thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
               fuelPrice={fuelPrice}
               excludeSubscriptionPlans={excludeSubscriptionPlans}

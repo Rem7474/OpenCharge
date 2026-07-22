@@ -270,10 +270,15 @@ export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
 // Default assumptions for the essence/électrique cost comparison (see
 // fuelPriceComparison) — editable by the user (see FilterPanel), not
 // persisted across sessions: same treatment as chargeKWh/chargeMinutes.
-// Plausible round numbers for a typical compact EV/petrol car rather than a
-// real vehicle profile, which this app doesn't model.
-export const DEFAULT_EV_CONSUMPTION_KWH_PER_100KM = 17;
-export const DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM = 6.5;
+// Real EV consumption swings a lot with conditions (highway vs. city, cold
+// weather, driving style) — a single number would imply a precision this
+// app has no way to back up, so callers ask for a low/high estimate
+// instead and show a range (see StationDetails.jsx's FuelComparison). The
+// thermal side stays a single figure: it's just the reference car for the
+// comparison, not the uncertain part.
+export const DEFAULT_EV_CONSUMPTION_MIN_KWH_PER_100KM = 15;
+export const DEFAULT_EV_CONSUMPTION_MAX_KWH_PER_100KM = 22;
+export const DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM = 7;
 
 /**
  * Compares a station's own €/kWh rate against an equivalent thermal

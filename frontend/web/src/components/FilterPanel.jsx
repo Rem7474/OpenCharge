@@ -26,8 +26,10 @@ export default function FilterPanel({
   onChangeChargeKWh,
   chargeMinutes,
   onChangeChargeMinutes,
-  evConsumptionKWhPer100Km,
-  onChangeEvConsumptionKWhPer100Km,
+  evConsumptionMinKWhPer100Km,
+  onChangeEvConsumptionMinKWhPer100Km,
+  evConsumptionMaxKWhPer100Km,
+  onChangeEvConsumptionMaxKWhPer100Km,
   thermalConsumptionLPer100Km,
   onChangeThermalConsumptionLPer100Km,
   showAllStations,
@@ -154,17 +156,30 @@ export default function FilterPanel({
               in "€/kWh" mode as in "recharge" mode. */}
           <details className="fuel-comparison-inputs">
             <summary>Comparer avec un thermique</summary>
-            <label>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                step={0.5}
-                value={evConsumptionKWhPer100Km}
-                onChange={(e) => onChangeEvConsumptionKWhPer100Km(Number(e.target.value))}
-              />{" "}
-              kWh/100km (véhicule électrique)
-            </label>
+            <div className="fuel-comparison-range-inputs">
+              <label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={0.5}
+                  value={evConsumptionMinKWhPer100Km}
+                  onChange={(e) => onChangeEvConsumptionMinKWhPer100Km(Number(e.target.value))}
+                />{" "}
+                à
+              </label>
+              <label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={0.5}
+                  value={evConsumptionMaxKWhPer100Km}
+                  onChange={(e) => onChangeEvConsumptionMaxKWhPer100Km(Number(e.target.value))}
+                />{" "}
+                kWh/100km (véhicule électrique)
+              </label>
+            </div>
             <label>
               <input
                 type="number"

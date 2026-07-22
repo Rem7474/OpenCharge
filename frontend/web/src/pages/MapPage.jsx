@@ -10,7 +10,8 @@ import AddressSearch from "../components/AddressSearch.jsx";
 import StationDeepLink from "../components/StationDeepLink.jsx";
 import {
   PRICE_MODE_PER_KWH,
-  DEFAULT_EV_CONSUMPTION_KWH_PER_100KM,
+  DEFAULT_EV_CONSUMPTION_MIN_KWH_PER_100KM,
+  DEFAULT_EV_CONSUMPTION_MAX_KWH_PER_100KM,
   DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM,
 } from "../utils/pricing.js";
 import { readStoredFilters, writeStoredFilters } from "../utils/storage.js";
@@ -69,10 +70,13 @@ export default function MapPage() {
   // tariffCostBreakdown), alongside chargeKWh for the energy cost.
   const [chargeMinutes, setChargeMinutes] = useState(DEFAULT_CHARGE_MINUTES);
   // Assumptions for the essence/électrique comparison (see utils/pricing.js#
-  // thermalEquivalentCost) — same treatment as chargeKWh/chargeMinutes:
-  // editable, session-only, not persisted. This app doesn't model a real
-  // vehicle profile, so these are just plausible round numbers.
-  const [evConsumptionKWhPer100Km, setEvConsumptionKWhPer100Km] = useState(DEFAULT_EV_CONSUMPTION_KWH_PER_100KM);
+  // fuelPriceComparison) — same treatment as chargeKWh/chargeMinutes:
+  // editable, session-only, not persisted. EV consumption is a min/max
+  // range rather than one number: real consumption swings a lot with
+  // conditions, so StationDetails shows a range instead of a falsely
+  // precise single figure.
+  const [evConsumptionMinKWhPer100Km, setEvConsumptionMinKWhPer100Km] = useState(DEFAULT_EV_CONSUMPTION_MIN_KWH_PER_100KM);
+  const [evConsumptionMaxKWhPer100Km, setEvConsumptionMaxKWhPer100Km] = useState(DEFAULT_EV_CONSUMPTION_MAX_KWH_PER_100KM);
   const [thermalConsumptionLPer100Km, setThermalConsumptionLPer100Km] = useState(DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM);
 
   const toggleConnectorType = (type) => {
@@ -169,8 +173,10 @@ export default function MapPage() {
         onChangeChargeKWh={setChargeKWh}
         chargeMinutes={chargeMinutes}
         onChangeChargeMinutes={setChargeMinutes}
-        evConsumptionKWhPer100Km={evConsumptionKWhPer100Km}
-        onChangeEvConsumptionKWhPer100Km={setEvConsumptionKWhPer100Km}
+        evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+        onChangeEvConsumptionMinKWhPer100Km={setEvConsumptionMinKWhPer100Km}
+        evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
+        onChangeEvConsumptionMaxKWhPer100Km={setEvConsumptionMaxKWhPer100Km}
         thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
         onChangeThermalConsumptionLPer100Km={setThermalConsumptionLPer100Km}
         showAllStations={filters.showAllStations}
@@ -221,7 +227,8 @@ export default function MapPage() {
             priceMode={priceMode}
             chargeKWh={chargeKWh}
             chargeMinutes={chargeMinutes}
-            evConsumptionKWhPer100Km={evConsumptionKWhPer100Km}
+            evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+            evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
             thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
             excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
           />
