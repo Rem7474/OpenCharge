@@ -17,6 +17,7 @@ export default function App() {
         <div className="app-body">
           <Routes>
             <Route path="/" element={<MapPage />} />
+            <Route path="/station/:id" element={<MapPage />} />
             <Route path="/about" element={<AboutPage />} />
           </Routes>
         </div>

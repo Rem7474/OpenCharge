@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMap, CircleMarker } from "react-leaflet";
 import { LocateFixed, LoaderCircle } from "lucide-react";
 
@@ -28,20 +28,30 @@ function geolocationErrorMessage(err) {
  * stations, since the app is entirely viewport-driven (see StationMarkers'
  * MIN_ZOOM_TO_LOAD) — there's no separate "nearby stations" endpoint to
  * call, moving the viewport there is enough.
+ *
+ * autoLocate triggers the same lookup once on mount (opt out via
+ * MapPage when a deep-linked station is already deciding the viewport —
+ * see StationDeepLink — so the two don't fight over where the map ends up).
+ * A failure from that automatic attempt stays silent (no error banner): the
+ * user never asked for it this time, so surfacing a permission-denied
+ * banner on every single page load would just be noise. The manual button
+ * click still reports errors as before.
  */
-export default function GeolocateControl() {
+export default function GeolocateControl({ autoLocate = true }) {
   const map = useMap();
   const [status, setStatus] = useState("idle"); // idle | locating | error
   const [error, setError] = useState(null);
   const [position, setPosition] = useState(null);
 
-  const locate = () => {
+  const locate = (silent = false) => {
     if (!("geolocation" in navigator)) {
-      setStatus("error");
-      setError("La géolocalisation n'est pas disponible sur cet appareil.");
+      if (!silent) {
+        setStatus("error");
+        setError("La géolocalisation n'est pas disponible sur cet appareil.");
+      }
       return;
     }
-    setStatus("locating");
+    if (!silent) setStatus("locating");
     setError(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
@@ -51,6 +61,10 @@ export default function GeolocateControl() {
         setStatus("idle");
       },
       (err) => {
+        if (silent) {
+          setStatus("idle");
+          return;
+        }
         setStatus("error");
         setError(geolocationErrorMessage(err));
       },
@@ -58,12 +72,19 @@ export default function GeolocateControl() {
     );
   };
 
+  useEffect(() => {
+    if (autoLocate) locate(true);
+    // Once, on mount only — a later autoLocate prop flip isn't meant to
+    // re-trigger this, only the initial "page just opened" moment is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <>
       <button
         type="button"
         className="geolocate-btn"
-        onClick={locate}
+        onClick={() => locate()}
         disabled={status === "locating"}
         aria-label="Me localiser et afficher les bornes à proximité"
         title="Me localiser"

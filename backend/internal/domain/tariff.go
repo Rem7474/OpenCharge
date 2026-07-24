@@ -45,6 +45,12 @@ type StationTariff struct {
 	// session de charge"). Not to be confused with SessionPriceCentsPerMin,
 	// which despite the similar name is a per-minute rate.
 	SessionFeeCents *float64
+	// SessionPriceGraceMinutes, when set, means SessionPriceCentsPerMin only
+	// applies to charging minutes beyond this threshold — e.g. Izivia's
+	// "surcoût de 0,30€/min après 1h de charge", where the first 60 minutes
+	// carry no per-minute charge at all. nil means the rate applies from
+	// minute 1, same as every source that doesn't have this concept.
+	SessionPriceGraceMinutes *float64
 	// ConnectorType, when set, is the specific connector (see
 	// domain.ConnectorType*) this tariff applies to — populated only by
 	// sources whose raw data actually differentiates price by connector

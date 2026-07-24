@@ -3,7 +3,7 @@ package ingestion
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"regexp"
 	"strconv"
@@ -46,7 +46,7 @@ func withRetries(ctx context.Context, sourceName, label string, maxRetries int, 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			wait := (1 << (attempt - 1)) * backoff
-			log.Printf("%s: retrying %s in %v (attempt %d/%d) after: %v", sourceName, label, wait, attempt+1, maxRetries+1, lastErr)
+			slog.Warn("retrying request", "source", sourceName, "label", label, "wait", wait, "attempt", attempt+1, "maxAttempts", maxRetries+1, "error", lastErr)
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
@@ -208,12 +208,31 @@ func matchEuroCentsFirstNonZero(pattern *regexp.Regexp, text string) *float64 {
 		if err != nil || parsed == 0 {
 			continue
 		}
-		// Round to avoid float64 noise from the euro->cents multiplication
-		// (e.g. 2.3 * 100 = 229.99999999999997).
-		cents := math.Round(parsed*10000) / 100
+		cents := euroToCentsRounded(parsed)
 		return &cents
 	}
 	return nil
+}
+
+// euroToCentsRounded converts a euro amount to cents, rounding away
+// float64 noise from the multiplication (e.g. 2.3 * 100 = 229.99999999999997).
+func euroToCentsRounded(euros float64) float64 {
+	return math.Round(euros*10000) / 100
+}
+
+// euroStringToCentsRounded parses a French- or dot-decimal euro amount
+// (e.g. "0,35" or "0.35") straight to cents — for a price captured by a
+// regex submatch outside of matchEuroCentsFirstNonZero's own
+// first-non-zero-match scanning (see izivia.go's
+// parseIziviaTimeOfDayWindowsAt, which needs a *specific* submatch, not
+// "whichever non-zero price appears first in the text").
+func euroStringToCentsRounded(raw string) (*float64, bool) {
+	parsed, err := strconv.ParseFloat(strings.ReplaceAll(raw, ",", "."), 64)
+	if err != nil {
+		return nil, false
+	}
+	cents := euroToCentsRounded(parsed)
+	return &cents, true
 }
 
 func firstNonEmpty(values ...string) string {

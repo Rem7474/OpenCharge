@@ -2,7 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -127,7 +127,7 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 
 	summaries, err := h.Stations.ListByBBox(r.Context(), filter)
 	if err != nil {
-		log.Printf("api: list stations: %v", err)
+		slog.Error("list stations", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list stations")
 		return
 	}
@@ -147,7 +147,7 @@ func (h *StationsHandler) ListStations(w http.ResponseWriter, r *http.Request) {
 func (h *StationsHandler) ListSources(w http.ResponseWriter, r *http.Request) {
 	sources, err := h.Tariffs.ListDistinctSourcesWithPlans(r.Context())
 	if err != nil {
-		log.Printf("api: list sources: %v", err)
+		slog.Error("list sources", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list sources")
 		return
 	}
@@ -175,7 +175,7 @@ func (h *StationsHandler) GetStation(w http.ResponseWriter, r *http.Request) {
 
 	station, err := h.Stations.GetByIRVEID(r.Context(), irveID)
 	if err != nil {
-		log.Printf("api: get station: %v", err)
+		slog.Error("get station", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to get station")
 		return
 	}
@@ -186,7 +186,7 @@ func (h *StationsHandler) GetStation(w http.ResponseWriter, r *http.Request) {
 
 	tariffs, err := h.Tariffs.ListByStation(r.Context(), station.ID)
 	if err != nil {
-		log.Printf("api: list tariffs: %v", err)
+		slog.Error("list tariffs", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to load tariffs")
 		return
 	}

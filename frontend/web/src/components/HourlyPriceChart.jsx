@@ -1,4 +1,5 @@
-import { formatPrice, timeInWindow } from "../utils/pricing.js";
+import { Moon } from "lucide-react";
+import { formatPrice, timeInWindow, offPeakRecommendation } from "../utils/pricing.js";
 
 const CHART_WIDTH = 280;
 const CHART_HEIGHT = 64;
@@ -57,6 +58,8 @@ export default function HourlyPriceChart({ tariff, priceMode, chargeKWh }) {
   // when they land on the same or adjacent bars.
   const labeledIdxs = new Set([minIdx, maxIdx, nowIdx].filter((i) => i >= 0));
 
+  const recommendation = offPeakRecommendation(tariff);
+
   const bars = hourly.map((b, i) => {
     const x = i * (CHART_WIDTH / HOURS);
     const heightRatio = MIN_BAR_HEIGHT / CHART_HEIGHT + (1 - MIN_BAR_HEIGHT / CHART_HEIGHT) * ((b.price - minPrice) / priceRange);
@@ -108,6 +111,14 @@ export default function HourlyPriceChart({ tariff, priceMode, chargeKWh }) {
           </text>
         ))}
       </svg>
+      {recommendation && (
+        <p className="hourly-price-chart-recommendation">
+          <Moon size={12} strokeWidth={2.2} />
+          Moins cher {recommendation.startTime}–{recommendation.endTime} :{" "}
+          {formatPrice(recommendation.priceCentsPerKWh, priceMode, chargeKWh)} (
+          {Math.round(recommendation.savingsPercent)}&nbsp;% de moins qu'actuellement)
+        </p>
+      )}
       <table className="visually-hidden">
         <caption>Prix par créneau horaire pour ce tarif</caption>
         <thead>

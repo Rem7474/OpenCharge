@@ -1,0 +1,1 @@
+ALTER TABLE station_tariffs DROP COLUMN session_price_grace_minutes;

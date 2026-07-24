@@ -204,6 +204,42 @@ export function currentEnergyPriceCentsPerKWh(tariff) {
   return (match ?? priced[0]).energyPriceCentsPerKwh;
 }
 
+// Minimum saving (%) worth surfacing as a recommendation — a 1-2% gap
+// between "now" and the cheapest window isn't worth telling anyone to
+// change their charging habits over.
+const MIN_OFFPEAK_SAVINGS_PERCENT = 5;
+
+/**
+ * Whether waiting for this tariff's cheapest window would meaningfully beat
+ * the price right now — the "charge at off-peak hours" tip shown next to
+ * HourlyPriceChart. null when the tariff has no varying price (see
+ * hasHourlyPricing), when the current price already IS the cheapest window
+ * (nothing to recommend), or when the gap is too small to bother with (see
+ * MIN_OFFPEAK_SAVINGS_PERCENT).
+ */
+export function offPeakRecommendation(tariff) {
+  if (!hasHourlyPricing(tariff)) return null;
+  const priced = tariff.extra.windows.filter((w) => w.energyPriceCentsPerKwh != null);
+  if (priced.length < 2) return null;
+
+  const currentPriceCentsPerKWh = currentEnergyPriceCentsPerKWh(tariff);
+  if (currentPriceCentsPerKWh == null) return null;
+
+  const cheapest = priced.reduce((min, w) => (w.energyPriceCentsPerKwh < min.energyPriceCentsPerKwh ? w : min));
+  if (cheapest.energyPriceCentsPerKwh >= currentPriceCentsPerKWh) return null;
+
+  const savingsPercent = ((currentPriceCentsPerKWh - cheapest.energyPriceCentsPerKwh) / currentPriceCentsPerKWh) * 100;
+  if (savingsPercent < MIN_OFFPEAK_SAVINGS_PERCENT) return null;
+
+  return {
+    startTime: cheapest.startTime,
+    endTime: cheapest.endTime,
+    priceCentsPerKWh: cheapest.energyPriceCentsPerKwh,
+    currentPriceCentsPerKWh,
+    savingsPercent,
+  };
+}
+
 export const PRICE_MODE_PER_KWH = "per_kwh";
 export const PRICE_MODE_RECHARGE = "recharge";
 
@@ -231,19 +267,86 @@ export function formatPrice(priceCentsPerKWh, mode, chargeKWh) {
   return `${(priceCentsPerKWh / 100).toFixed(2)} €/kWh`;
 }
 
+// Default assumptions for the essence/électrique cost comparison (see
+// fuelPriceComparison) — editable by the user (see FilterPanel), not
+// persisted across sessions: same treatment as chargeKWh/chargeMinutes.
+// Real EV consumption swings a lot with conditions (highway vs. city, cold
+// weather, driving style) — a single number would imply a precision this
+// app has no way to back up, so callers ask for a low/high estimate
+// instead and show a range (see StationDetails.jsx's FuelComparison). The
+// thermal side stays a single figure: it's just the reference car for the
+// comparison, not the uncertain part.
+export const DEFAULT_EV_CONSUMPTION_MIN_KWH_PER_100KM = 15;
+export const DEFAULT_EV_CONSUMPTION_MAX_KWH_PER_100KM = 22;
+export const DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM = 7;
+
+/**
+ * Compares a station's own €/kWh rate against an equivalent thermal
+ * (essence) car for the same distance — the essence/électrique argument
+ * shown in StationDetails. Works directly off the tariff's per-kWh rate
+ * (not a specific charge amount), so it's just as meaningful in "€/kWh"
+ * mode as in "recharge" mode — a rate comparison doesn't need a session
+ * size at all, unlike tariffCostBreakdown's totals.
+ *
+ * equivalentFuelPriceCentsPerLiter is the fuel price at which a thermal car
+ * would cost exactly the same per 100km as this electricity rate — useful
+ * on its own even before/regardless of a live fuel price ("this is like
+ * paying X €/L for petrol"). savingsCentsPer100Km/savingsPercent instead
+ * compare against the real fuelPriceCentsPerLiter (see
+ * hooks/useFuelPrice.js), and can come out negative for an unusually
+ * expensive tariff — callers should handle that case explicitly rather
+ * than assume electricity always wins.
+ *
+ * Returns null when any input is missing or non-positive — in particular
+ * before hooks/useFuelPrice.js has resolved a real fuel price.
+ */
+export function fuelPriceComparison({
+  evPriceCentsPerKWh,
+  evConsumptionKWhPer100Km,
+  thermalConsumptionLPer100Km,
+  fuelPriceCentsPerLiter,
+}) {
+  if (
+    !(evPriceCentsPerKWh > 0) ||
+    !(evConsumptionKWhPer100Km > 0) ||
+    !(thermalConsumptionLPer100Km > 0) ||
+    !(fuelPriceCentsPerLiter > 0)
+  ) {
+    return null;
+  }
+  const evCostCentsPer100Km = evPriceCentsPerKWh * evConsumptionKWhPer100Km;
+  const thermalCostCentsPer100Km = fuelPriceCentsPerLiter * thermalConsumptionLPer100Km;
+  const equivalentFuelPriceCentsPerLiter = evCostCentsPer100Km / thermalConsumptionLPer100Km;
+  const savingsCentsPer100Km = thermalCostCentsPer100Km - evCostCentsPer100Km;
+  const savingsPercent = (savingsCentsPer100Km / thermalCostCentsPer100Km) * 100;
+  return {
+    evCostCentsPer100Km,
+    thermalCostCentsPer100Km,
+    equivalentFuelPriceCentsPerLiter,
+    savingsCentsPer100Km,
+    savingsPercent,
+  };
+}
+
 /**
  * Break a tariff's estimated cost for a chargeKWh/chargeMinutes session
  * down into its known components — energy (€/kWh × kWh), time (a
- * per-minute rate × minutes charging, e.g. Freshmile's "0,40 € par
+ * per-minute rate × billable minutes, e.g. Freshmile's "0,40 € par
  * minute"), and a flat session fee (a one-time amount just for starting,
  * e.g. Izivia's "2,3€ la session de charge") — plus their sum. Each
  * component is null when the tariff doesn't carry that kind of price, so
  * callers can render only the lines that apply; total is null only when
  * none of the three are known at all.
+ *
+ * Billable minutes excludes tariff.session_price_grace_minutes when set
+ * (e.g. Izivia's "surcoût de 0,30€/min après 1h de charge" — the
+ * per-minute rate only applies beyond that threshold, so a 45-minute
+ * charge under a 60-minute grace period owes nothing for time at all).
  */
 export function tariffCostBreakdown(tariff, chargeKWh, chargeMinutes) {
   const energy = tariff.energy_price_cents_per_kwh != null ? (tariff.energy_price_cents_per_kwh / 100) * chargeKWh : null;
-  const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * chargeMinutes : null;
+  const billableMinutes = Math.max(chargeMinutes - (tariff.session_price_grace_minutes ?? 0), 0);
+  const time = tariff.session_price_cents_per_min != null ? (tariff.session_price_cents_per_min / 100) * billableMinutes : null;
   const fee = tariff.session_fee_cents != null ? tariff.session_fee_cents / 100 : null;
   if (energy == null && time == null && fee == null) {
     return { energy, time, fee, total: null };

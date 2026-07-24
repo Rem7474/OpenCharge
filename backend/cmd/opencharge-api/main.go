@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,10 +14,14 @@ import (
 	"github.com/go-chi/cors"
 
 	"opencharge/internal/api"
+	"opencharge/internal/logging"
 	"opencharge/internal/repository"
 )
 
 func main() {
+	logger := logging.New()
+	slog.SetDefault(logger)
+
 	dsn := getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable")
 	addr := getEnv("LISTEN_ADDR", ":8080")
 	corsOrigin := getEnv("CORS_ORIGIN", "*")
@@ -27,7 +31,8 @@ func main() {
 
 	pool, err := repository.Open(ctx, dsn)
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		logger.Error("connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer pool.Close()
 
@@ -35,10 +40,11 @@ func main() {
 	tariffRepo := repository.NewTariffRepository(pool)
 	stationsHandler := api.NewStationsHandler(stationRepo, tariffRepo)
 	freshmileHandler := api.NewFreshmileHandler()
+	fuelPriceHandler := api.NewFuelPriceHandler()
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
-	router.Use(middleware.Logger)
+	router.Use(logging.RequestLogger(logger))
 	router.Use(middleware.Recoverer)
 	router.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{corsOrigin},
@@ -55,6 +61,7 @@ func main() {
 	router.Get("/stations/{id}", stationsHandler.GetStation)
 	router.Get("/sources", stationsHandler.ListSources)
 	router.Get("/freshmile/availability/{locationId}", freshmileHandler.GetAvailability)
+	router.Get("/fuel-price", fuelPriceHandler.GetFuelPrice)
 
 	server := &http.Server{
 		Addr:              addr,
@@ -63,9 +70,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("opencharge-api listening on %s", addr)
+		logger.Info("opencharge-api listening", "addr", addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server: %v", err)
+			logger.Error("http server", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -73,11 +81,11 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	log.Println("opencharge-api shutting down")
+	logger.Info("opencharge-api shutting down")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown error: %v", err)
+		logger.Error("shutdown error", "error", err)
 	}
 }
 

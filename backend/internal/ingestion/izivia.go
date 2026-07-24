@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,11 +132,11 @@ func (ing *IziviaIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("izivia: %d unique markers found", len(markers))
+	slog.Info("unique markers found", "source", "izivia", "count", len(markers))
 
 	result, firstErr := ing.processMarkers(ctx, markers)
 
-	log.Printf("izivia: done, %d stations processed", result)
+	slog.Info("ingestion done", "source", "izivia", "processed", result)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData) —
 	// firstErr covers both ctx cancellation and a write failure. result
@@ -185,12 +186,12 @@ func (ing *IziviaIngester) RetryFailed(ctx context.Context, failures []FailedFet
 		case failKindIziviaSquare:
 			var square iziviaSquare
 			if err := json.Unmarshal(f.Params, &square); err != nil {
-				log.Printf("izivia: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "izivia", "kind", f.Kind, "error", err)
 				continue
 			}
 			squareMarkers, err := ing.fetchSquareMarkers(ctx, square)
 			if err != nil {
-				log.Printf("izivia: markers square still failing: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
+				slog.Warn("markers square still failing", "source", "izivia", "centerLng", square.CenterLng, "centerLat", square.CenterLat, "zoom", square.Zoom, "error", err)
 				if ctx.Err() == nil {
 					ing.Failures.Record(failKindIziviaSquare, iziviaBaseURL+"/map/markers", square, err)
 				}
@@ -202,18 +203,18 @@ func (ing *IziviaIngester) RetryFailed(ctx context.Context, failures []FailedFet
 		case failKindIziviaStation:
 			var marker map[string]any
 			if err := json.Unmarshal(f.Params, &marker); err != nil {
-				log.Printf("izivia: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "izivia", "kind", f.Kind, "error", err)
 				continue
 			}
 			addMarker(marker)
 		default:
-			log.Printf("izivia: skipping failure of unknown kind %q", f.Kind)
+			slog.Warn("skipping failure of unknown kind", "source", "izivia", "kind", f.Kind)
 		}
 	}
 
-	log.Printf("izivia: retrying %d markers from %d recorded failure(s)", len(markers), len(failures))
+	slog.Info("retrying recorded failures", "source", "izivia", "markers", len(markers), "failures", len(failures))
 	processed, err := ing.processMarkers(ctx, markers)
-	log.Printf("izivia: retry done, %d stations processed", processed)
+	slog.Info("retry done", "source", "izivia", "processed", processed)
 	return processed, err
 }
 
@@ -245,7 +246,7 @@ func (ing *IziviaIngester) processMarkers(ctx context.Context, markers []map[str
 			item, ok, err := ing.fetchAndNormalizeMarker(pipelineCtx, marker)
 			if err != nil {
 				stationID, _ := marker["id"].(string)
-				log.Printf("izivia: station %s failed: %v", stationID, err)
+				slog.Warn("station failed", "source", "izivia", "stationId", stationID, "error", err)
 				// Not recorded when the pipeline itself is shutting down
 				// (timeout/SIGINT/write error): those markers didn't fail on
 				// their own, and recording the cancellation-error flood
@@ -339,7 +340,7 @@ func (ing *IziviaIngester) writeResults(ctx context.Context, resultsCh <-chan no
 		if err != nil {
 			return err
 		}
-		log.Printf("izivia: %d/%d processed", processed, total)
+		slog.Info("processing progress", "source", "izivia", "processed", processed, "total", total)
 		return nil
 	}
 
@@ -598,26 +599,223 @@ func iziviaPricingTexts(pricing []any) []string {
 // payload shapes) and returns the first that yields a usable price, instead
 // of only ever looking at the first nested entry.
 func normalizeIziviaTariffs(station map[string]any, pricing []any) []domain.StationTariff {
+	// Same French-network timezone assumption electra.go's electraLocation
+	// already makes for its own time-of-day windows — Izivia's day/night
+	// wording (see parseIziviaTimeOfDayWindowsAt) is just as Europe/Paris-
+	// local, so this reuses that var rather than re-deriving it.
+	return normalizeIziviaTariffsAt(station, pricing, time.Now().In(electraLocation))
+}
+
+// normalizeIziviaTariffsAt is normalizeIziviaTariffs with an explicit "now"
+// — split out so tests can pin which of a windowed tariff's prices is
+// "current" without depending on the real clock, same reason electra.go
+// splits normalizeElectraTariffs/normalizeElectraTariffsAt.
+func normalizeIziviaTariffsAt(station map[string]any, pricing []any, now time.Time) []domain.StationTariff {
 	for _, rawText := range iziviaPricingTexts(pricing) {
 		price, sessionPrice, sessionFee, fee := parsePriceText(rawText)
+
+		extra := map[string]any{}
+		if windows, snapshotPrice := parseIziviaTimeOfDayWindowsAt(rawText, now); windows != nil {
+			extra["windows"] = windows
+			price = snapshotPrice
+		}
+
+		var graceMinutes *float64
+		if surchargePrice, grace := parseIziviaSessionSurcharge(rawText); grace != nil {
+			sessionPrice = surchargePrice
+			graceMinutes = grace
+		}
+
 		if price == nil && sessionPrice == nil && sessionFee == nil && fee == nil {
 			continue
 		}
 		return []domain.StationTariff{{
-			Source:                  "izivia",
-			Plan:                    domain.TariffPlanStandard,
-			Kind:                    iziviaTariffKind(station, rawText),
-			Model:                   "izivia_text",
-			Currency:                "EUR",
-			EnergyPriceCentsPerKWh:  price,
-			SessionPriceCentsPerMin: sessionPrice,
-			SessionFeeCents:         sessionFee,
-			ServiceFeePercent:       fee,
-			RawText:                 rawText,
-			Extra:                   map[string]any{},
+			Source:                   "izivia",
+			Plan:                     domain.TariffPlanStandard,
+			Kind:                     iziviaTariffKind(station, rawText),
+			Model:                    "izivia_text",
+			Currency:                 "EUR",
+			EnergyPriceCentsPerKWh:   price,
+			SessionPriceCentsPerMin:  sessionPrice,
+			SessionPriceGraceMinutes: graceMinutes,
+			SessionFeeCents:          sessionFee,
+			ServiceFeePercent:        fee,
+			RawText:                  rawText,
+			Extra:                    extra,
 		}}
 	}
 	return nil
+}
+
+// iziviaTimeRangePattern matches one "de Xh(mm) à Yh(mm)" clause, e.g. "de
+// 9h à 11h" or "de 15h00 à 17h00" — Izivia's day/night (or peak/off-peak)
+// pricing wording.
+var iziviaTimeRangePattern = mustCompileFrenchWS(`(?i)de\s+([0-9]{1,2})h([0-9]{2})?\s*à\s+([0-9]{1,2})h([0-9]{2})?`)
+
+// iziviaOutsideMarkerPattern locates "en dehors" (case-insensitive) in the
+// original text, so parseIziviaTimeOfDayWindowsAt can split the string
+// around it — used instead of strings.ToLower+strings.Index so the byte
+// offset it returns always refers to the original (not case-folded) text.
+var iziviaOutsideMarkerPattern = mustCompileFrenchWS(`(?i)en\s+dehors`)
+
+// iziviaOutsideHoursPattern matches the €/kWh price that applies outside
+// every iziviaTimeRangePattern range in the same text, e.g. "en dehors de
+// ces horaires : 0,35€/kWh".
+var iziviaOutsideHoursPattern = mustCompileFrenchWS(`(?i)en\s+dehors\s+de\s+ces\s+horaires\s*:?\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:€|eur)`)
+
+// parseIziviaTimeOfDayWindowsAt recognizes Izivia's "de Xh à Yh [et de Xh à
+// Yh] : PRIX€/kWh; en dehors de ces horaires : PRIX2€/kWh" wording (e.g.
+// cheaper off-peak hours) and turns it into the same extra.windows shape
+// Electra's own time-of-day pricing uses (see electra.go's
+// electraWindow.toExtra) — fully covering the 24h day (a run of contiguous
+// windows, one per "special" range plus one per gap between/around them)
+// so a live lookup (current_window_price/currentEnergyPriceCentsPerKWh)
+// always finds a match, instead of falling back to an arbitrary "first
+// window".
+//
+// A plain matchEuroCentsFirstNonZero can't represent this correctly: it
+// only ever keeps the *first* of several non-zero prices in the same text
+// (by design, to skip a leading placeholder "0.00€/kWh" before the real
+// price — see TestParsePriceText's "skips a leading zero price" case),
+// which for this wording would silently keep the special-hours price and
+// discard the — usually more common — default price entirely.
+//
+// Returns (nil, nil) when the text doesn't match this specific wording —
+// callers fall back to the plain flat-price parsing. The second return
+// value is the price for `at`'s time of day, for the tariff's
+// top-level/snapshot field — mirrors electra.go's withPlan/currentWindow
+// (a snapshot fixed at ingestion time; see migration 008 for why the live
+// lookup above re-derives it instead of trusting that column directly).
+func parseIziviaTimeOfDayWindowsAt(text string, at time.Time) ([]map[string]any, *float64) {
+	rangeMatches := iziviaTimeRangePattern.FindAllStringSubmatch(text, -1)
+	if len(rangeMatches) == 0 {
+		return nil, nil
+	}
+	outsideLoc := iziviaOutsideMarkerPattern.FindStringIndex(text)
+	if outsideLoc == nil {
+		return nil, nil
+	}
+	outsideMatch := iziviaOutsideHoursPattern.FindStringSubmatch(text)
+	if outsideMatch == nil {
+		return nil, nil
+	}
+	outsideCents, ok := euroStringToCentsRounded(outsideMatch[1])
+	if !ok || *outsideCents == 0 {
+		return nil, nil
+	}
+	// Scoped to the text before "en dehors" so this can't accidentally pick
+	// up the outside-hours price instead of the special-hours one.
+	specialCents := matchEuroCentsFirstNonZero(pricePerKWhPattern, text[:outsideLoc[0]])
+	if specialCents == nil {
+		return nil, nil
+	}
+
+	type timeRange struct{ start, end string }
+	ranges := make([]timeRange, 0, len(rangeMatches))
+	for _, m := range rangeMatches {
+		start := iziviaHourMinute(m[1], m[2])
+		end := iziviaHourMinute(m[3], m[4])
+		if start == "" || end == "" {
+			continue
+		}
+		ranges = append(ranges, timeRange{start, end})
+	}
+	if len(ranges) == 0 {
+		return nil, nil
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
+
+	windows := make([]map[string]any, 0, len(ranges)*2+1)
+	cursor := "00:00"
+	for _, r := range ranges {
+		if r.start > cursor {
+			windows = append(windows, iziviaWindowExtra(cursor, r.start, *outsideCents))
+		}
+		windows = append(windows, iziviaWindowExtra(r.start, r.end, *specialCents))
+		cursor = r.end
+	}
+	if cursor != "24:00" {
+		windows = append(windows, iziviaWindowExtra(cursor, "24:00", *outsideCents))
+	}
+
+	hm := at.Format("15:04")
+	snapshot := *outsideCents
+	for _, w := range windows {
+		if timeInWindow(hm, w["startTime"].(string), w["endTime"].(string)) {
+			snapshot = w["energyPriceCentsPerKwh"].(float64)
+			break
+		}
+	}
+	return windows, &snapshot
+}
+
+func iziviaWindowExtra(start, end string, priceCents float64) map[string]any {
+	return map[string]any{"startTime": start, "endTime": end, "energyPriceCentsPerKwh": priceCents}
+}
+
+// iziviaHourMinute formats an hour string (1-2 digits, e.g. "9") and an
+// optional minute string (2 digits, or "" meaning ":00") as "HH:MM",
+// zero-padding the hour via strconv+Sprintf rather than a "%02s" width
+// flag (which pads with spaces, not zeros, for the string verb) — the
+// half-open [start, end) windows current_window_price/timeInWindow expect
+// need real zero-padding to compare correctly as plain strings. Returns ""
+// if hourStr isn't a valid number.
+func iziviaHourMinute(hourStr, minuteStr string) string {
+	hour, err := strconv.Atoi(hourStr)
+	if err != nil {
+		return ""
+	}
+	minute := minuteStr
+	if minute == "" {
+		minute = "00"
+	}
+	return fmt.Sprintf("%02d:%s", hour, minute)
+}
+
+// iziviaGraceAfterHoursPattern matches "après Xh(Ymin) de charge" (e.g.
+// "après 1h de charge", "après 1h30 de charge") — a grace period of
+// charging time, in hours(+minutes), before a per-minute surcharge starts.
+var iziviaGraceAfterHoursPattern = mustCompileFrenchWS(`(?i)après\s+([0-9]+)\s*h\s*([0-9]{1,2})?\s+de\s+charge`)
+
+// iziviaGraceAfterMinutesPattern matches the same grace period expressed
+// directly in minutes, e.g. "après 90 min de charge".
+var iziviaGraceAfterMinutesPattern = mustCompileFrenchWS(`(?i)après\s+([0-9]+)\s*min(?:ute)?s?\s+de\s+charge`)
+
+// parseIziviaSessionSurcharge recognizes Izivia's "surcoût de X€/min après
+// Y(h|min) de charge" wording: a per-minute rate that only applies to
+// charging time beyond a grace period — unlike pricePerMinutePattern's
+// (and parsePriceText's) flat from-minute-1 rate. Returns the flat
+// per-minute price unconditionally (same match parsePriceText would find),
+// and graceMinutes only when the grace wording is actually present — nil
+// means "from minute 1", same as every other source that doesn't have
+// this concept at all, so callers only need to override
+// SessionPriceGraceMinutes when grace isn't nil.
+func parseIziviaSessionSurcharge(text string) (priceCentsPerMin, graceMinutes *float64) {
+	price := matchEuroCentsFirstNonZero(pricePerMinutePattern, text)
+	if price == nil {
+		return nil, nil
+	}
+	if m := iziviaGraceAfterHoursPattern.FindStringSubmatch(text); m != nil {
+		hours, err := strconv.Atoi(m[1])
+		if err != nil {
+			return price, nil
+		}
+		minutes := 0
+		if m[2] != "" {
+			if mm, err := strconv.Atoi(m[2]); err == nil {
+				minutes = mm
+			}
+		}
+		grace := float64(hours*60 + minutes)
+		return price, &grace
+	}
+	if m := iziviaGraceAfterMinutesPattern.FindStringSubmatch(text); m != nil {
+		if mm, err := strconv.Atoi(m[1]); err == nil {
+			grace := float64(mm)
+			return price, &grace
+		}
+	}
+	return price, nil
 }
 
 func extractStringList(value any) []string {
@@ -709,7 +907,7 @@ func (ing *IziviaIngester) fetchMarkers(ctx context.Context) ([]map[string]any, 
 				markers, err := ing.fetchSquareMarkers(ctx, square)
 				if err != nil {
 					atomic.AddInt64(&failed, 1)
-					log.Printf("izivia: markers square failed: centerLng=%g centerLat=%g zoom=%d: %v", square.CenterLng, square.CenterLat, square.Zoom, err)
+					slog.Warn("markers square failed", "source", "izivia", "centerLng", square.CenterLng, "centerLat", square.CenterLat, "zoom", square.Zoom, "error", err)
 					if ctx.Err() == nil {
 						ing.Failures.Record(failKindIziviaSquare, iziviaBaseURL+"/map/markers", square, err)
 					}

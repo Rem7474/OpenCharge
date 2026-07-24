@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"math/rand"
 	"net/http"
@@ -187,7 +187,7 @@ func (ing *FreshmileIngester) Run(ctx context.Context) (int, error) {
 
 	processed, err := ing.runPipeline(ctx, ing.scanLocationIDs)
 
-	log.Printf("freshmile: done, %d locations processed", processed)
+	slog.Info("ingestion done", "source", "freshmile", "processed", processed)
 
 	// Only sweep after a fully successful run (see repository.SweepStaleSourceData).
 	// processed > 0 guards against a scan that silently found/fetched
@@ -225,7 +225,7 @@ func (ing *FreshmileIngester) RetryFailed(ctx context.Context, failures []Failed
 				ID int `json:"id"`
 			}
 			if err := json.Unmarshal(f.Params, &params); err != nil || params.ID == 0 {
-				log.Printf("freshmile: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "freshmile", "kind", f.Kind, "error", err)
 				continue
 			}
 			if _, dup := seenIDs[params.ID]; dup {
@@ -236,16 +236,16 @@ func (ing *FreshmileIngester) RetryFailed(ctx context.Context, failures []Failed
 		case failKindFreshmileTile:
 			var bbox freshmileBBox
 			if err := json.Unmarshal(f.Params, &bbox); err != nil {
-				log.Printf("freshmile: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "freshmile", "kind", f.Kind, "error", err)
 				continue
 			}
 			tiles = append(tiles, bbox)
 		default:
-			log.Printf("freshmile: skipping failure of unknown kind %q", f.Kind)
+			slog.Warn("skipping failure of unknown kind", "source", "freshmile", "kind", f.Kind)
 		}
 	}
 
-	log.Printf("freshmile: retrying %d locations and %d map tiles from %d recorded failure(s)", len(ids), len(tiles), len(failures))
+	slog.Info("retrying recorded failures", "source", "freshmile", "locations", len(ids), "tiles", len(tiles), "failures", len(failures))
 
 	// A location fed directly by id may also be re-discovered by a retried
 	// tile's scan; the resulting duplicate fetch is harmless (the write
@@ -264,7 +264,7 @@ func (ing *FreshmileIngester) RetryFailed(ctx context.Context, failures []Failed
 		}
 	}
 	processed, err := ing.runPipeline(ctx, feed)
-	log.Printf("freshmile: retry done, %d locations processed", processed)
+	slog.Info("retry done", "source", "freshmile", "processed", processed)
 	return processed, err
 }
 
@@ -314,7 +314,7 @@ func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx con
 			item, ok, err := ing.fetchAndNormalizeLocation(pipelineCtx, id)
 			if err != nil {
 				atomic.AddInt64(&fetchFailed, 1)
-				log.Printf("freshmile: location %d failed: %v", id, err)
+				slog.Warn("location failed", "source", "freshmile", "locationId", id, "error", err)
 				// Not recorded when the pipeline itself is shutting down:
 				// those locations didn't fail on their own — see the same
 				// guard in izivia.go's worker.
@@ -356,7 +356,7 @@ func (ing *FreshmileIngester) runPipeline(ctx context.Context, feed func(ctx con
 		for {
 			select {
 			case <-ticker.C:
-				log.Printf("freshmile: fetch/write in progress, %d fetched ok, %d failed so far", atomic.LoadInt64(&fetchedOK), atomic.LoadInt64(&fetchFailed))
+				slog.Info("fetch/write in progress", "source", "freshmile", "fetchedOk", atomic.LoadInt64(&fetchedOK), "failed", atomic.LoadInt64(&fetchFailed))
 			case <-heartbeatDone:
 				return
 			}
@@ -426,7 +426,7 @@ func (ing *FreshmileIngester) writeResults(ctx context.Context, resultsCh <-chan
 		if err != nil {
 			return err
 		}
-		log.Printf("freshmile: %d processed so far", processed)
+		slog.Info("processing progress", "source", "freshmile", "processed", processed)
 		return nil
 	}
 
@@ -548,7 +548,7 @@ func (ing *FreshmileIngester) scanBBoxes(ctx context.Context, idCh chan<- int, i
 				mu.Lock()
 				found := len(seen)
 				mu.Unlock()
-				log.Printf("freshmile: scanning map-locations, %d tiles visited so far, %d locations found", atomic.LoadInt64(&visited), found)
+				slog.Info("scanning map-locations", "source", "freshmile", "tilesVisited", atomic.LoadInt64(&visited), "locationsFound", found)
 			case <-logDone:
 				return
 			}
@@ -574,7 +574,7 @@ func (ing *FreshmileIngester) scanBBoxes(ctx context.Context, idCh chan<- int, i
 
 		features, err := ing.fetchMapLocations(ctx, bbox, sem)
 		if err != nil {
-			log.Printf("freshmile: map-locations bbox %+v failed: %v", bbox, err)
+			slog.Warn("map-locations bbox failed", "source", "freshmile", "bbox", fmt.Sprintf("%+v", bbox), "error", err)
 			// A failed tile drops its whole branch of the subdivision tree
 			// (a region can go missing from discovery entirely), so it's
 			// worth recording for a targeted retry — unless the scan is
@@ -634,7 +634,7 @@ func (ing *FreshmileIngester) scanBBoxes(ctx context.Context, idCh chan<- int, i
 	wg.Wait()
 	close(logDone)
 
-	log.Printf("freshmile: discovery done, %d unique locations across %d map-locations tiles visited", len(seen), atomic.LoadInt64(&visited))
+	slog.Info("discovery done", "source", "freshmile", "uniqueLocations", len(seen), "tilesVisited", atomic.LoadInt64(&visited))
 }
 
 // freshmileClusterBBox reads properties.bbox.{sw,ne} off a cluster feature.
@@ -1004,7 +1004,7 @@ func normalizeFreshmileConnectorTariff(conn, tariffRaw map[string]any, bestPower
 	price, lang, priceText, priceOK := freshmilePriceFromDescription(tariffRaw["description"])
 	sessionPrice, sessionText, sessionOK := freshmileSessionPriceFromDescription(tariffRaw["description"])
 	if !priceOK && !sessionOK {
-		log.Printf("freshmile: could not extract a €/kWh or €/min price from tariff %v description: %v", tariffRaw["id"], tariffRaw["description"])
+		slog.Warn("could not extract a price from tariff description", "source", "freshmile", "tariffId", tariffRaw["id"], "description", tariffRaw["description"])
 		return t
 	}
 	if priceOK {

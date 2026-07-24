@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star } from "lucide-react";
+import { X, MapPin, Zap, Clock, Building2, Accessibility, Cable, Tag, Star, Copy, Check, Fuel } from "lucide-react";
 import { fetchStationDetails } from "../api/stations.js";
 import {
   connectorPriceKind,
@@ -7,6 +7,7 @@ import {
   formatPrice,
   hasHourlyPricing,
   tariffCostBreakdown,
+  fuelPriceComparison,
   bestTariffForSource,
   cheapestTariff,
   PRICE_MODE_RECHARGE,
@@ -15,8 +16,21 @@ import {
 import { formatSourceLabel, formatPlanLabel, formatConnectorLabel, formatUpdatedAt, friendlyFetchErrorMessage } from "../utils/format.js";
 import { findFreshmileSiteMeta } from "../utils/freshmile.js";
 import { useFreshmileAvailability } from "../hooks/useFreshmileAvailability.js";
+import { useFuelPrice } from "../hooks/useFuelPrice.js";
 import HourlyPriceChart from "./HourlyPriceChart.jsx";
 import FreshmileAvailability from "./FreshmileAvailability.jsx";
+
+// Shared by TariffCost and TariffTimeAndFee so the grace-period wording
+// (e.g. Izivia's "après 1h de charge") can't drift between the two places
+// a tariff's time cost renders.
+function timeLine(tariff, chargeMinutes, time) {
+  return (
+    <div>
+      Temps ({chargeMinutes} min
+      {tariff.session_price_grace_minutes ? `, ${tariff.session_price_grace_minutes} min offertes` : ""}) : {time.toFixed(2)} €
+    </div>
+  );
+}
 
 // TariffCost renders a tariff's price for the active mode: in "recharge"
 // mode, a breakdown of every cost component the tariff actually carries
@@ -40,13 +54,29 @@ function TariffCost({ tariff, priceMode, chargeKWh, chargeMinutes }) {
           Énergie ({chargeKWh} kWh) : {energy.toFixed(2)} €
         </div>
       )}
-      {time != null && (
-        <div>
-          Temps ({chargeMinutes} min) : {time.toFixed(2)} €
-        </div>
-      )}
+      {time != null && timeLine(tariff, chargeMinutes, time)}
       {fee != null && <div>Frais de session : {fee.toFixed(2)} €</div>}
       <div className="price">Total estimé : {total.toFixed(2)} €</div>
+    </div>
+  );
+}
+
+// HourlyPriceChart only ever shows a windowed tariff's energy/kWh side —
+// but the same tariff can independently carry a per-minute rate and/or a
+// flat session fee (e.g. Izivia's day/night pricing plus its "surcoût
+// après 1h de charge"), which would otherwise never be shown anywhere:
+// TariffCost, the only other place these render, is entirely skipped for
+// a windowed tariff (see TariffDisplay). Passing chargeKWh=0 to
+// tariffCostBreakdown here is deliberate — this only ever reads its
+// time/fee fields, never energy (already covered by the chart) or total
+// (a single blended figure doesn't make sense when energy varies by hour).
+function TariffTimeAndFee({ tariff, chargeMinutes }) {
+  const { time, fee } = tariffCostBreakdown(tariff, 0, chargeMinutes);
+  if (time == null && fee == null) return null;
+  return (
+    <div className="tariff-cost-breakdown">
+      {time != null && timeLine(tariff, chargeMinutes, time)}
+      {fee != null && <div>Frais de session : {fee.toFixed(2)} €</div>}
     </div>
   );
 }
@@ -58,11 +88,15 @@ function TariffCost({ tariff, priceMode, chargeKWh, chargeMinutes }) {
 // instead of repeating the same hasHourlyPricing(...) ? <A/> : <B/> check
 // three times.
 function TariffDisplay({ tariff, priceMode, chargeKWh, chargeMinutes }) {
-  return hasHourlyPricing(tariff) ? (
-    <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
-  ) : (
-    <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
-  );
+  if (hasHourlyPricing(tariff)) {
+    return (
+      <>
+        <HourlyPriceChart tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} />
+        {priceMode === PRICE_MODE_RECHARGE && <TariffTimeAndFee tariff={tariff} chargeMinutes={chargeMinutes} />}
+      </>
+    );
+  }
+  return <TariffCost tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />;
 }
 
 function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
@@ -75,7 +109,10 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
       <TariffDisplay tariff={tariff} priceMode={priceMode} chargeKWh={chargeKWh} chargeMinutes={chargeMinutes} />
       {tariff.service_fee_percent != null && <div>Frais de service : {tariff.service_fee_percent}%</div>}
       {priceMode !== PRICE_MODE_RECHARGE && tariff.session_price_cents_per_min != null && (
-        <div>{(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min</div>
+        <div>
+          {(tariff.session_price_cents_per_min / 100).toFixed(2)} € / min
+          {tariff.session_price_grace_minutes ? ` après ${tariff.session_price_grace_minutes} min de charge` : ""}
+        </div>
       )}
       {priceMode !== PRICE_MODE_RECHARGE && tariff.session_fee_cents != null && (
         <div>{(tariff.session_fee_cents / 100).toFixed(2)} € / session</div>
@@ -83,6 +120,64 @@ function TariffRow({ tariff, priceMode, chargeKWh, chargeMinutes }) {
       {tariff.raw_text && <div className="raw-text">{tariff.raw_text}</div>}
       {updatedAt && <div className="updated-at">Mis à jour le {updatedAt}</div>}
     </div>
+  );
+}
+
+// Shown once per connector, alongside whichever price is already
+// highlighted there — a €/kWh-vs-€/L rate comparison, meaningful
+// regardless of priceMode (no chargeKWh/session size involved) or of which
+// tariff happens to be cheapest, so this doesn't repeat per tariff row the
+// way TariffCost does. tariff is whichever one ConnectorPriceSection is
+// already treating as "the" price for this connector (its best
+// selected-source tariff, or the overall best); fuelPrice is the
+// nationwide-average SP95-E10 price from hooks/useFuelPrice.js (null while
+// loading, in which case this renders nothing rather than guessing).
+//
+// evConsumptionMin/MaxKWhPer100Km is a range, not one number: real EV
+// consumption swings a lot with conditions (highway vs. city, cold
+// weather, driving style), so a single assumed figure would claim a
+// precision this app has no way to back up — this computes the comparison
+// at both ends and shows the resulting range instead.
+function FuelComparison({ tariff, evConsumptionMinKWhPer100Km, evConsumptionMaxKWhPer100Km, thermalConsumptionLPer100Km, fuelPrice }) {
+  if (!tariff || !fuelPrice) return null;
+  const evPriceCentsPerKWh = currentEnergyPriceCentsPerKWh(tariff);
+  if (evPriceCentsPerKWh == null) return null;
+
+  const shared = { evPriceCentsPerKWh, thermalConsumptionLPer100Km, fuelPriceCentsPerLiter: fuelPrice.pricePerLiterCents };
+  const atMin = fuelPriceComparison({ ...shared, evConsumptionKWhPer100Km: evConsumptionMinKWhPer100Km });
+  const atMax = fuelPriceComparison({ ...shared, evConsumptionKWhPer100Km: evConsumptionMaxKWhPer100Km });
+  if (!atMin || !atMax) return null;
+
+  // Lower EV consumption always means a cheaper equivalent and bigger
+  // savings, but this sorts by value rather than assuming that — so the
+  // range still reads low-to-high even if the user enters the two fields
+  // the "wrong" way round.
+  const equivLow = Math.min(atMin.equivalentFuelPriceCentsPerLiter, atMax.equivalentFuelPriceCentsPerLiter) / 100;
+  const equivHigh = Math.max(atMin.equivalentFuelPriceCentsPerLiter, atMax.equivalentFuelPriceCentsPerLiter) / 100;
+  const savingsLow = Math.min(atMin.savingsPercent, atMax.savingsPercent);
+  const savingsHigh = Math.max(atMin.savingsPercent, atMax.savingsPercent);
+  const bothCheaper = atMin.savingsCentsPer100Km > 0 && atMax.savingsCentsPer100Km > 0;
+  const bothPricier = atMin.savingsCentsPer100Km <= 0 && atMax.savingsCentsPer100Km <= 0;
+
+  return (
+    <p className="fuel-comparison">
+      <Fuel size={13} strokeWidth={2.2} />
+      Équivaut à {equivLow.toFixed(2)}–{equivHigh.toFixed(2)} €/L d&rsquo;essence selon la conso
+      {bothCheaper && (
+        <>
+          {" "}
+          — {Math.round(savingsLow)} à {Math.round(savingsHigh)} % moins cher
+        </>
+      )}
+      {bothPricier && (
+        <>
+          {" "}
+          — {Math.round(Math.abs(savingsHigh))} à {Math.round(Math.abs(savingsLow))} % plus cher que l&rsquo;essence
+        </>
+      )}
+      {!bothCheaper && !bothPricier && <> — moins cher ou plus cher selon la conso réelle</>}
+      {!fuelPrice.live && " (prix carburant estimé)"}
+    </p>
   );
 }
 
@@ -101,6 +196,10 @@ function ConnectorPriceSection({
   priceMode,
   chargeKWh,
   chargeMinutes,
+  evConsumptionMinKWhPer100Km,
+  evConsumptionMaxKWhPer100Km,
+  thermalConsumptionLPer100Km,
+  fuelPrice,
   excludeSubscriptionPlans,
 }) {
   // GET /stations/{id} always returns every known tariff, including
@@ -182,6 +281,14 @@ function ConnectorPriceSection({
       )}
       {!overallBest && selectedEntries.length === 0 && <p>Aucun tarif connu pour ce connecteur.</p>}
 
+      <FuelComparison
+        tariff={overallBeatsSelection ? overallBest : (cheapestSelected?.tariff ?? overallBest)}
+        evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+        evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
+        thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
+        fuelPrice={fuelPrice}
+      />
+
       {tariffs.length > 0 && (
         <details className="connector-all-tariffs">
           <summary>Tous les tarifs ({tariffs.length})</summary>
@@ -201,10 +308,15 @@ export default function StationDetails({
   priceMode,
   chargeKWh,
   chargeMinutes,
+  evConsumptionMinKWhPer100Km,
+  evConsumptionMaxKWhPer100Km,
+  thermalConsumptionLPer100Km,
   excludeSubscriptionPlans,
 }) {
   const [details, setDetails] = useState(null);
   const [error, setError] = useState(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const fuelPrice = useFuelPrice();
 
   useEffect(() => {
     if (!site) return undefined;
@@ -231,6 +343,17 @@ export default function StationDetails({
   // must run on every render regardless of whether site is null.
   const { imgPreviewUrl, locationId } = findFreshmileSiteMeta(details);
   const freshmileAvailability = useFreshmileAvailability(locationId);
+
+  // Shares the current URL as-is rather than rebuilding it from site.key:
+  // MapPage's selectSite already wrote /station/<id> here on selection (or
+  // StationDeepLink resolved it from one on load), so location.href is
+  // already the right link to hand out.
+  const copyLink = () => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 1500);
+    });
+  };
 
   if (!site) return null;
 
@@ -259,9 +382,20 @@ export default function StationDetails({
             {first.enseigne ? ` · ${first.enseigne}` : ""}
           </div>
         </div>
-        <button className="close-btn" onClick={onClose} aria-label="Fermer">
-          <X size={15} strokeWidth={2.2} />
-        </button>
+        <div className="station-header-actions">
+          <button
+            type="button"
+            className="copy-link-btn"
+            onClick={copyLink}
+            aria-label="Copier le lien de cette borne"
+            title="Copier le lien"
+          >
+            {linkCopied ? <Check size={14} strokeWidth={2.4} /> : <Copy size={14} strokeWidth={2.2} />}
+          </button>
+          <button className="close-btn" onClick={onClose} aria-label="Fermer">
+            <X size={15} strokeWidth={2.2} />
+          </button>
+        </div>
       </div>
 
       {imgPreviewUrl ? (
@@ -346,6 +480,10 @@ export default function StationDetails({
               priceMode={priceMode}
               chargeKWh={chargeKWh}
               chargeMinutes={chargeMinutes}
+              evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+              evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
+              thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
+              fuelPrice={fuelPrice}
               excludeSubscriptionPlans={excludeSubscriptionPlans}
             />
           ))}

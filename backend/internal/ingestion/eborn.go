@@ -3,7 +3,7 @@ package ingestion
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -70,7 +70,7 @@ func (ing *EbornIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("list eborn stations: %w", err)
 	}
-	log.Printf("eborn: %d IRVE stations found", len(stations))
+	slog.Info("IRVE stations found", "source", ebornSourceName, "count", len(stations))
 
 	tariffs := make([]domain.StationTariff, 0, len(stations)*3)
 	for _, s := range stations {
@@ -113,7 +113,7 @@ func (ing *EbornIngester) Run(ctx context.Context) (int, error) {
 	if err := ing.Tariffs.BulkUpsert(ctx, tariffs); err != nil {
 		return 0, fmt.Errorf("bulk upsert eborn tariffs: %w", err)
 	}
-	log.Printf("eborn: done, %d tariffs written for %d stations", len(tariffs), len(stations))
+	slog.Info("ingestion done", "source", ebornSourceName, "tariffs", len(tariffs), "stations", len(stations))
 
 	if len(stations) > 0 {
 		if err := repository.SweepStaleSourceData(ctx, ing.Pool, ebornSourceName, runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {

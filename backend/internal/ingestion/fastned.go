@@ -3,7 +3,7 @@ package ingestion
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,7 +50,7 @@ func (ing *FastnedIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("list fastned stations: %w", err)
 	}
-	log.Printf("fastned: %d IRVE stations found", len(stations))
+	slog.Info("IRVE stations found", "source", fastnedSourceName, "count", len(stations))
 
 	tariffs := make([]domain.StationTariff, 0, len(stations)*2)
 	for _, s := range stations {
@@ -79,7 +79,7 @@ func (ing *FastnedIngester) Run(ctx context.Context) (int, error) {
 	if err := ing.Tariffs.BulkUpsert(ctx, tariffs); err != nil {
 		return 0, fmt.Errorf("bulk upsert fastned tariffs: %w", err)
 	}
-	log.Printf("fastned: done, %d tariffs written for %d stations", len(tariffs), len(stations))
+	slog.Info("ingestion done", "source", fastnedSourceName, "tariffs", len(tariffs), "stations", len(stations))
 
 	// Only sweep after actually finding stations this run — see the same
 	// guard (and the incident that motivated it) in izivia.go. Sweeping

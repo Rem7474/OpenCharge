@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   connectorPriceKind,
   tariffAppliesToBucket,
@@ -8,6 +8,9 @@ import {
   pickPriceCentsPerKWh,
   cheapestPriceAcrossStations,
   priceTier,
+  offPeakRecommendation,
+  fuelPriceComparison,
+  tariffCostBreakdown,
 } from "./pricing.js";
 import { groupStationsByLocation } from "./stationGrouping.js";
 
@@ -189,6 +192,162 @@ describe("cheapestPriceAcrossStations", () => {
   it("ignores connectors with no known price and returns null if none have one", () => {
     const stations = [station({ pricingSummary: {} }), station({ pricingSummary: {} })];
     expect(cheapestPriceAcrossStations(stations, false)).toBeNull();
+  });
+});
+
+describe("offPeakRecommendation", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function windowedTariff(windows) {
+    return tariff({ energy_price_cents_per_kwh: null, extra: { windows } });
+  }
+
+  it("recommends the cheapest window when it meaningfully beats the current price", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 10, 0)); // 10:00, inside the peak window
+    const t = windowedTariff([
+      { startTime: "07:00", endTime: "22:00", energyPriceCentsPerKwh: 45 },
+      { startTime: "22:00", endTime: "07:00", energyPriceCentsPerKwh: 20 },
+    ]);
+    const rec = offPeakRecommendation(t);
+    expect(rec).not.toBeNull();
+    expect(rec.startTime).toBe("22:00");
+    expect(rec.endTime).toBe("07:00");
+    expect(rec.priceCentsPerKWh).toBe(20);
+    expect(rec.currentPriceCentsPerKWh).toBe(45);
+    expect(Math.round(rec.savingsPercent)).toBe(56);
+  });
+
+  it("returns null when the current window is already the cheapest one", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 23, 0)); // 23:00, inside the cheap window
+    const t = windowedTariff([
+      { startTime: "07:00", endTime: "22:00", energyPriceCentsPerKwh: 45 },
+      { startTime: "22:00", endTime: "07:00", energyPriceCentsPerKwh: 20 },
+    ]);
+    expect(offPeakRecommendation(t)).toBeNull();
+  });
+
+  it("returns null when the gap is too small to be worth recommending", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 10, 0));
+    const t = windowedTariff([
+      { startTime: "07:00", endTime: "22:00", energyPriceCentsPerKwh: 30 },
+      { startTime: "22:00", endTime: "07:00", energyPriceCentsPerKwh: 29.5 },
+    ]);
+    expect(offPeakRecommendation(t)).toBeNull();
+  });
+
+  it("returns null for a tariff with a single (non-varying) window", () => {
+    expect(offPeakRecommendation(tariff({ extra: { windows: [{ startTime: "00:00", endTime: "24:00", energyPriceCentsPerKwh: 30 }] } }))).toBeNull();
+  });
+
+  it("returns null for a flat tariff with no windows at all", () => {
+    expect(offPeakRecommendation(tariff({ energy_price_cents_per_kwh: 30 }))).toBeNull();
+  });
+});
+
+describe("fuelPriceComparison", () => {
+  // Regression numbers straight from a user-provided spreadsheet: 0,35
+  // €/kWh, 7 L/100km thermal, 1,90 €/L, at 15 kWh/100km (min) and 22
+  // kWh/100km (max) EV consumption.
+  it("matches the reference spreadsheet at the low end of EV consumption", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 35,
+      evConsumptionKWhPer100Km: 15,
+      thermalConsumptionLPer100Km: 7,
+      fuelPriceCentsPerLiter: 190,
+    });
+    expect(got.evCostCentsPer100Km).toBeCloseTo(525); // 5,25 €/100km
+    expect(got.thermalCostCentsPer100Km).toBeCloseTo(1330); // 13,3 €/100km
+    expect(got.savingsCentsPer100Km).toBeCloseTo(805); // 8,05 €/100km
+    expect(got.savingsPercent).toBeCloseTo(60.5, 0);
+  });
+
+  it("matches the reference spreadsheet at the high end of EV consumption", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 35,
+      evConsumptionKWhPer100Km: 22,
+      thermalConsumptionLPer100Km: 7,
+      fuelPriceCentsPerLiter: 190,
+    });
+    expect(got.evCostCentsPer100Km).toBeCloseTo(770); // 7,7 €/100km
+    expect(got.savingsCentsPer100Km).toBeCloseTo(560); // 5,6 €/100km
+    expect(got.savingsPercent).toBeCloseTo(42.1, 1);
+  });
+
+  it("derives the fuel price this electricity rate is equivalent to", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 35,
+      evConsumptionKWhPer100Km: 15,
+      thermalConsumptionLPer100Km: 7,
+      fuelPriceCentsPerLiter: 190,
+    });
+    // 5,25 €/100km / 7 L/100km = 0,75 €/L — independent of the real fuel price.
+    expect(got.equivalentFuelPriceCentsPerLiter).toBeCloseTo(75);
+  });
+
+  it("can report a negative saving for an unusually expensive tariff, rather than pretending it's a win", () => {
+    const got = fuelPriceComparison({
+      evPriceCentsPerKWh: 90,
+      evConsumptionKWhPer100Km: 20,
+      thermalConsumptionLPer100Km: 6,
+      fuelPriceCentsPerLiter: 180,
+    });
+    expect(got.savingsCentsPer100Km).toBeLessThan(0);
+  });
+
+  it("returns null when the fuel price hasn't loaded yet", () => {
+    expect(
+      fuelPriceComparison({
+        evPriceCentsPerKWh: 35,
+        evConsumptionKWhPer100Km: 20,
+        thermalConsumptionLPer100Km: 6,
+        fuelPriceCentsPerLiter: null,
+      })
+    ).toBeNull();
+  });
+
+  it("returns null for a non-positive price or consumption", () => {
+    expect(
+      fuelPriceComparison({ evPriceCentsPerKWh: 0, evConsumptionKWhPer100Km: 20, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
+    ).toBeNull();
+    expect(
+      fuelPriceComparison({ evPriceCentsPerKWh: 35, evConsumptionKWhPer100Km: 0, thermalConsumptionLPer100Km: 6, fuelPriceCentsPerLiter: 180 })
+    ).toBeNull();
+  });
+});
+
+describe("tariffCostBreakdown", () => {
+  // Regression for the real Izivia wording: "Surcoût de 0,30€/min après 1h
+  // de charge" — the per-minute rate must not apply to the first 60
+  // minutes at all.
+  function graceTariff(overrides) {
+    return tariff({
+      energy_price_cents_per_kwh: 35,
+      session_price_cents_per_min: 30,
+      session_price_grace_minutes: 60,
+      ...overrides,
+    });
+  }
+
+  it("charges nothing for time when the session stays within the grace period", () => {
+    const got = tariffCostBreakdown(graceTariff(), 10, 45);
+    expect(got.time).toBe(0);
+    expect(got.total).toBeCloseTo(3.5); // energy only: 0,35€ x 10 kWh
+  });
+
+  it("only bills the minutes beyond the grace period", () => {
+    const got = tariffCostBreakdown(graceTariff(), 10, 90);
+    expect(got.time).toBeCloseTo(9); // (90 - 60) min x 0,30€
+    expect(got.total).toBeCloseTo(3.5 + 9);
+  });
+
+  it("behaves exactly as before when a tariff has no grace period", () => {
+    const got = tariffCostBreakdown(tariff({ energy_price_cents_per_kwh: 35, session_price_cents_per_min: 30 }), 10, 45);
+    expect(got.time).toBeCloseTo(13.5); // full 45 min x 0,30€, from minute 1
   });
 });
 

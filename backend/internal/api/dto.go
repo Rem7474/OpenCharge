@@ -178,6 +178,10 @@ type tariffDTO struct {
 	// SessionFeeCents is a flat, one-time fee for starting a session,
 	// distinct from SessionPriceCentsPerMin (a per-minute rate).
 	SessionFeeCents *float64 `json:"session_fee_cents,omitempty"`
+	// SessionPriceGraceMinutes, when set, means SessionPriceCentsPerMin only
+	// applies to charging minutes beyond this threshold (e.g. Izivia's
+	// "après 1h de charge") — nil means the rate applies from minute 1.
+	SessionPriceGraceMinutes *float64 `json:"session_price_grace_minutes,omitempty"`
 	// ConnectorType is set only when the source differentiates price by
 	// actual connector (today: only Freshmile) — empty means this tariff
 	// applies to the whole Kind bucket regardless of connector.
@@ -241,6 +245,7 @@ func toTariffDTO(t domain.StationTariff) tariffDTO {
 		CongestionPriceCentsPerMin: t.CongestionPriceCentsPerMin,
 		ServiceFeePercent:          t.ServiceFeePercent,
 		SessionFeeCents:            t.SessionFeeCents,
+		SessionPriceGraceMinutes:   t.SessionPriceGraceMinutes,
 		ConnectorType:              t.ConnectorType,
 		RawText:                    t.RawText,
 		Extra:                      extra,

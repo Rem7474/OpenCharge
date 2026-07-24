@@ -3,7 +3,7 @@ package ingestion
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,7 +52,7 @@ func (ing *IonityIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("list ionity stations: %w", err)
 	}
-	log.Printf("ionity: %d IRVE stations found", len(stations))
+	slog.Info("IRVE stations found", "source", ionitySourceName, "count", len(stations))
 
 	tariffs := make([]domain.StationTariff, 0, len(stations)*2)
 	for _, s := range stations {
@@ -73,7 +73,7 @@ func (ing *IonityIngester) Run(ctx context.Context) (int, error) {
 	if err := ing.Tariffs.BulkUpsert(ctx, tariffs); err != nil {
 		return 0, fmt.Errorf("bulk upsert ionity tariffs: %w", err)
 	}
-	log.Printf("ionity: done, %d tariffs written for %d stations", len(tariffs), len(stations))
+	slog.Info("ingestion done", "source", ionitySourceName, "tariffs", len(tariffs), "stations", len(stations))
 
 	if len(stations) > 0 {
 		if err := repository.SweepStaleSourceData(ctx, ing.Pool, ionitySourceName, runStart.Add(-repository.StaleSourceDataGracePeriod)); err != nil {

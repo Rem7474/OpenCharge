@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -257,7 +257,7 @@ func (ing *ChargenowIngester) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return processed, err
 	}
-	log.Printf("chargenow: done, %d source stations processed", processed)
+	slog.Info("ingestion done", "source", "chargenow", "processed", processed)
 
 	// Only sweep after actually finding stations this run — see the same
 	// guard (and the incident that motivated it) in izivia.go.
@@ -289,23 +289,23 @@ func (ing *ChargenowIngester) RetryFailed(ctx context.Context, failures []Failed
 		case failKindChargenowBBox:
 			var bbox chargenowBBox
 			if err := json.Unmarshal(f.Params, &bbox); err != nil {
-				log.Printf("chargenow: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "chargenow", "kind", f.Kind, "error", err)
 				continue
 			}
 			bboxes = append(bboxes, bbox)
 		case failKindChargenowPool:
 			var pool chargenowPool
 			if err := json.Unmarshal(f.Params, &pool); err != nil || pool.ID == "" {
-				log.Printf("chargenow: skipping unreadable %s failure: %v", f.Kind, err)
+				slog.Warn("skipping unreadable failure", "source", "chargenow", "kind", f.Kind, "error", err)
 				continue
 			}
 			directPools = append(directPools, pool)
 		default:
-			log.Printf("chargenow: skipping failure of unknown kind %q", f.Kind)
+			slog.Warn("skipping failure of unknown kind", "source", "chargenow", "kind", f.Kind)
 		}
 	}
 
-	log.Printf("chargenow: retrying %d pools directly and %d bboxes from %d recorded failure(s)", len(directPools), len(bboxes), len(failures))
+	slog.Info("retrying recorded failures", "source", "chargenow", "directPools", len(directPools), "bboxes", len(bboxes), "failures", len(failures))
 
 	// A pool fed directly may also be re-discovered by a retried bbox's
 	// own scan; the resulting duplicate send is harmless (the write path
@@ -324,7 +324,7 @@ func (ing *ChargenowIngester) RetryFailed(ctx context.Context, failures []Failed
 		}
 	}
 	processed, err := ing.runPipeline(ctx, feed)
-	log.Printf("chargenow: retry done, %d source stations processed", processed)
+	slog.Info("retry done", "source", "chargenow", "processed", processed)
 	return processed, err
 }
 
@@ -392,7 +392,7 @@ func (ing *ChargenowIngester) consumePools(ctx context.Context, poolCh <-chan ch
 		if err != nil {
 			return err
 		}
-		log.Printf("chargenow: %d processed so far", processed)
+		slog.Info("processing progress", "source", "chargenow", "processed", processed)
 		return nil
 	}
 
@@ -510,13 +510,13 @@ func (ing *ChargenowIngester) processPoolBatch(ctx context.Context, pools []char
 			return ing.doRequest(ctx, ing.BaseURL+chargenowPricesPath, "", body)
 		})
 		if err != nil {
-			log.Printf("chargenow: price batch [%d:%d] failed, skipping: %v", start, end, err)
+			slog.Warn("price batch failed, skipping", "source", "chargenow", "start", start, "end", end, "error", err)
 			recordFailedBatch(targets, start, end, err)
 			continue
 		}
 		var results []chargenowPriceResult
 		if err := json.Unmarshal(respBody, &results); err != nil {
-			log.Printf("chargenow: decode price batch [%d:%d] failed, skipping: %v", start, end, err)
+			slog.Warn("decode price batch failed, skipping", "source", "chargenow", "start", start, "end", end, "error", err)
 			recordFailedBatch(targets, start, end, err)
 			continue
 		}
@@ -529,7 +529,7 @@ func (ing *ChargenowIngester) processPoolBatch(ctx context.Context, pools []char
 			energyCents, flatCents := chargenowExtractPrices(res)
 			pricesByPoolKind[fmt.Sprintf("%d|%s", target.poolIdx, target.kind)] = poolPrice{energyCents, flatCents}
 		}
-		log.Printf("chargenow: %d/%d price queries done", end, len(items))
+		slog.Info("price queries progress", "source", "chargenow", "done", end, "total", len(items))
 	}
 
 	var normalized []normalizedSourceStation
@@ -579,7 +579,7 @@ func (ing *ChargenowIngester) processPoolBatch(ctx context.Context, pools []char
 		if err != nil {
 			return processed, err
 		}
-		log.Printf("chargenow: %d/%d processed", processed, len(normalized))
+		slog.Info("processing progress", "source", "chargenow", "processed", processed, "total", len(normalized))
 	}
 	// A batch's price fetches can fail on a mid-run ctx expiry without
 	// that ever producing a non-nil err above (each failed price batch is
@@ -725,7 +725,7 @@ func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []charg
 				mu.Lock()
 				found := len(seen)
 				mu.Unlock()
-				log.Printf("chargenow: scanning map, %d tiles visited so far, %d pools found", atomic.LoadInt64(&visited), found)
+				slog.Info("scanning map", "source", "chargenow", "tilesVisited", atomic.LoadInt64(&visited), "poolsFound", found)
 			case <-logDone:
 				return
 			}
@@ -743,7 +743,7 @@ func (ing *ChargenowIngester) scanPoolsFrom(ctx context.Context, initial []charg
 		bbox = padDegenerateChargenowBBox(bbox)
 		resp, err := ing.fetchQuery(ctx, bbox, sem)
 		if err != nil {
-			log.Printf("chargenow: query bbox %+v failed: %v", bbox, err)
+			slog.Warn("query bbox failed", "source", "chargenow", "bbox", fmt.Sprintf("%+v", bbox), "error", err)
 			// A failed query drops its whole branch of the subdivision
 			// tree — record it for a targeted retry, unless the scan is
 			// just being canceled (see the same guard in izivia.go).

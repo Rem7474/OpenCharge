@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { MapContainer, TileLayer } from "react-leaflet";
 import FilterBar from "../components/FilterBar.jsx";
 import StationMarkers from "../components/StationMarkers.jsx";
 import StationDetails from "../components/StationDetails.jsx";
 import OnboardingScreen from "../components/OnboardingScreen.jsx";
 import GeolocateControl from "../components/GeolocateControl.jsx";
-import { PRICE_MODE_PER_KWH } from "../utils/pricing.js";
+import AddressSearch from "../components/AddressSearch.jsx";
+import StationDeepLink from "../components/StationDeepLink.jsx";
+import {
+  PRICE_MODE_PER_KWH,
+  DEFAULT_EV_CONSUMPTION_MIN_KWH_PER_100KM,
+  DEFAULT_EV_CONSUMPTION_MAX_KWH_PER_100KM,
+  DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM,
+} from "../utils/pricing.js";
 import { readStoredFilters, writeStoredFilters } from "../utils/storage.js";
 
 const FRANCE_CENTER = [46.8, 2.5];
@@ -43,6 +51,9 @@ const DEFAULT_FILTERS = {
 };
 
 export default function MapPage() {
+  const navigate = useNavigate();
+  const { id: stationIdParam } = useParams();
+
   // The site (group of same-location connectors) whose detail card is open
   // — see StationMarkers/StationDetails and utils/stationGrouping.js.
   const [selectedSite, setSelectedSite] = useState(null);
@@ -58,6 +69,15 @@ export default function MapPage() {
   // per-minute rate and any flat session fee (see utils/pricing.js#
   // tariffCostBreakdown), alongside chargeKWh for the energy cost.
   const [chargeMinutes, setChargeMinutes] = useState(DEFAULT_CHARGE_MINUTES);
+  // Assumptions for the essence/électrique comparison (see utils/pricing.js#
+  // fuelPriceComparison) — same treatment as chargeKWh/chargeMinutes:
+  // editable, session-only, not persisted. EV consumption is a min/max
+  // range rather than one number: real consumption swings a lot with
+  // conditions, so StationDetails shows a range instead of a falsely
+  // precise single figure.
+  const [evConsumptionMinKWhPer100Km, setEvConsumptionMinKWhPer100Km] = useState(DEFAULT_EV_CONSUMPTION_MIN_KWH_PER_100KM);
+  const [evConsumptionMaxKWhPer100Km, setEvConsumptionMaxKWhPer100Km] = useState(DEFAULT_EV_CONSUMPTION_MAX_KWH_PER_100KM);
+  const [thermalConsumptionLPer100Km, setThermalConsumptionLPer100Km] = useState(DEFAULT_THERMAL_CONSUMPTION_L_PER_100KM);
 
   const toggleConnectorType = (type) => {
     setFilters((prev) => ({
@@ -103,6 +123,23 @@ export default function MapPage() {
 
   const resetFilters = () => setFilters(DEFAULT_FILTERS);
 
+  // Selecting a marker both opens its detail card and writes a shareable
+  // URL for it (see StationDeepLink, the counterpart that reads this same
+  // route back into a selected site on load/back-forward). A site can group
+  // several co-located connectors (see utils/stationGrouping.js) — the
+  // first one is the link's canonical id, same as StationDetails already
+  // treats it as "the" station for header info.
+  const selectSite = (site) => {
+    setSelectedSite(site);
+    const firstId = site?.stations?.[0]?.id;
+    if (firstId) navigate(`/station/${encodeURIComponent(firstId)}`);
+  };
+
+  const closeSite = () => {
+    setSelectedSite(null);
+    navigate("/", { replace: true });
+  };
+
   // Mirrors every filter change to localStorage, not just the onboarding
   // step, so later adjustments made from FilterBar also survive a reload.
   useEffect(() => {
@@ -136,6 +173,12 @@ export default function MapPage() {
         onChangeChargeKWh={setChargeKWh}
         chargeMinutes={chargeMinutes}
         onChangeChargeMinutes={setChargeMinutes}
+        evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+        onChangeEvConsumptionMinKWhPer100Km={setEvConsumptionMinKWhPer100Km}
+        evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
+        onChangeEvConsumptionMaxKWhPer100Km={setEvConsumptionMaxKWhPer100Km}
+        thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
+        onChangeThermalConsumptionLPer100Km={setThermalConsumptionLPer100Km}
         showAllStations={filters.showAllStations}
         onChangeShowAllStations={setShowAllStations}
         excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
@@ -159,7 +202,7 @@ export default function MapPage() {
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
             <StationMarkers
-              onSelect={setSelectedSite}
+              onSelect={selectSite}
               selectedSources={filters.sources}
               priceMode={priceMode}
               chargeKWh={chargeKWh}
@@ -171,17 +214,22 @@ export default function MapPage() {
               maxPriceCentsPerKwh={filters.maxPriceCentsPerKwh}
               excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
             />
-            <GeolocateControl />
+            <GeolocateControl autoLocate={!stationIdParam} />
+            <AddressSearch />
+            <StationDeepLink selectedSite={selectedSite} onSelect={setSelectedSite} />
           </MapContainer>
         </div>
         {selectedSite && (
           <StationDetails
             site={selectedSite}
-            onClose={() => setSelectedSite(null)}
+            onClose={closeSite}
             selectedSources={filters.sources}
             priceMode={priceMode}
             chargeKWh={chargeKWh}
             chargeMinutes={chargeMinutes}
+            evConsumptionMinKWhPer100Km={evConsumptionMinKWhPer100Km}
+            evConsumptionMaxKWhPer100Km={evConsumptionMaxKWhPer100Km}
+            thermalConsumptionLPer100Km={thermalConsumptionLPer100Km}
             excludeSubscriptionPlans={filters.excludeSubscriptionPlans}
           />
         )}
