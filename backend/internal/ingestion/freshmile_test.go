@@ -581,6 +581,23 @@ func TestFreshmileClusterBBoxMissing(t *testing.T) {
 	}
 }
 
+func TestFreshmileMapLocationsURL(t *testing.T) {
+	bbox := freshmileBBox{MinLng: 5.378897, MinLat: 45.700492, MaxLng: 6.283027, MaxLat: 46.199676}
+
+	ing := newTestFreshmileIngester("https://prod-driver-api.freshmile.com/charge/api/v2")
+	if got, want := ing.mapLocationsURL(bbox), fmt.Sprintf(
+		"https://prod-driver-api.freshmile.com/charge/api/v2/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
+		bbox.MinLng, bbox.MinLat, bbox.MaxLng, bbox.MaxLat, freshmileZoom,
+	); got != want {
+		t.Errorf("mapLocationsURL = %q, want %q", got, want)
+	}
+
+	ing.Network = "FRFR1"
+	if got := ing.mapLocationsURL(bbox); !strings.HasSuffix(got, "&network=FRFR1") {
+		t.Errorf("mapLocationsURL = %q, want it to end with &network=FRFR1", got)
+	}
+}
+
 func newTestFreshmileIngester(baseURL string) *FreshmileIngester {
 	ing := NewFreshmileIngester(nil, nil, nil, nil, baseURL, FreshmileConfig{})
 	ing.retryBackoff = time.Millisecond // keep retry tests fast

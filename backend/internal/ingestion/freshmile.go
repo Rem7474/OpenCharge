@@ -122,6 +122,10 @@ type FreshmileIngester struct {
 	BaseURL          string
 	Config           FreshmileConfig
 	MaxLinkDistanceM float64
+	// Network, when set, is passed as map-locations' own `network` query
+	// param (e.g. "FRFR1") to restrict discovery to that operator network
+	// instead of every network Freshmile's map covers.
+	Network string
 	// Failures, when set, records every request that failed for good
 	// (location detail fetch, map-locations tile scan) so a later
 	// -retry-failed pass can replay just those — see FailureLog.
@@ -667,8 +671,12 @@ func subdivideBBox(b freshmileBBox) []freshmileBBox {
 }
 
 func (ing *FreshmileIngester) mapLocationsURL(bbox freshmileBBox) string {
-	return fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
+	url := fmt.Sprintf("%s/map-locations?bbox=%g,%g,%g,%g&zoom=%d",
 		ing.BaseURL, bbox.MinLng, bbox.MinLat, bbox.MaxLng, bbox.MaxLat, freshmileZoom)
+	if ing.Network != "" {
+		url += "&network=" + ing.Network
+	}
+	return url
 }
 
 func (ing *FreshmileIngester) fetchMapLocations(ctx context.Context, bbox freshmileBBox, sem chan struct{}) ([]map[string]any, error) {

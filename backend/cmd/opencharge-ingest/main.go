@@ -16,18 +16,19 @@ import (
 
 func main() {
 	var (
-		dsn          = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
-		source       = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
-		irveURL      = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
-		electraURL   = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
-		teslaURL     = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
-		teslaChrome  = flag.String("tesla-chrome-path", getEnv("TESLA_CHROME_PATH", ""), "path to the Chromium/Chrome binary used to fetch tesla.com (empty = chromedp's own PATH lookup)")
-		freshmileURL = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
-		chargenowURL = flag.String("chargenow-url", ingestion.DefaultChargenowBaseURL, "ChargeNow map API base URL")
-		linkMaxM     = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
-		idleTimeout  = flag.Duration("idle-timeout", ingestion.DefaultIdleTimeout, "for izivia/tesla/freshmile/chargenow: abort the run if it goes this long without a single successful request (0 disables it) — unlike a flat overall timeout, this doesn't cut off a run that's still making progress")
-		failedDir    = flag.String("failed-dir", getEnv("INGEST_FAILED_DIR", "ingest-failures"), "directory where each source saves its failed URLs as <source>.json, for a later -retry-failed pass")
-		retryFailed  = flag.Bool("retry-failed", false, "instead of a full scan, replay only the URLs recorded as failed in -failed-dir by a previous run (izivia, tesla, freshmile, chargenow)")
+		dsn              = flag.String("dsn", getEnv("DATABASE_URL", "postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable"), "PostgreSQL DSN")
+		source           = flag.String("source", "", "source to ingest: irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, or all")
+		irveURL          = flag.String("irve-url", ingestion.DefaultIRVEURL, "IRVE GeoJSON URL")
+		electraURL       = flag.String("electra-url", ingestion.DefaultElectraURL, "Electra stations.js URL")
+		teslaURL         = flag.String("tesla-url", ingestion.DefaultTeslaLocationsURL, "Tesla find-us get-locations URL")
+		teslaChrome      = flag.String("tesla-chrome-path", getEnv("TESLA_CHROME_PATH", ""), "path to the Chromium/Chrome binary used to fetch tesla.com (empty = chromedp's own PATH lookup)")
+		freshmileURL     = flag.String("freshmile-url", ingestion.DefaultFreshmileBaseURL, "Freshmile charge API base URL")
+		freshmileNetwork = flag.String("freshmile-network", "", "restrict Freshmile map-locations discovery to this network id (e.g. FRFR1 for Freshmile's own network); empty scans every network")
+		chargenowURL     = flag.String("chargenow-url", ingestion.DefaultChargenowBaseURL, "ChargeNow map API base URL")
+		linkMaxM         = flag.Float64("link-max-distance-m", ingestion.DefaultLinkMaxDistanceMeters, "max distance (meters) to correlate a source station with an IRVE station")
+		idleTimeout      = flag.Duration("idle-timeout", ingestion.DefaultIdleTimeout, "for izivia/tesla/freshmile/chargenow: abort the run if it goes this long without a single successful request (0 disables it) — unlike a flat overall timeout, this doesn't cut off a run that's still making progress")
+		failedDir        = flag.String("failed-dir", getEnv("INGEST_FAILED_DIR", "ingest-failures"), "directory where each source saves its failed URLs as <source>.json, for a later -retry-failed pass")
+		retryFailed      = flag.Bool("retry-failed", false, "instead of a full scan, replay only the URLs recorded as failed in -failed-dir by a previous run (izivia, tesla, freshmile, chargenow)")
 	)
 	flag.Parse()
 
@@ -163,6 +164,7 @@ func main() {
 		ingester := ingestion.NewFreshmileIngester(pool, sourceStationRepo, tariffRepo, linkRepo, *freshmileURL, ingestion.DefaultFreshmileConfig())
 		ingester.MaxLinkDistanceM = *linkMaxM
 		ingester.IdleTimeout = *idleTimeout
+		ingester.Network = *freshmileNetwork
 		ingester.Failures = ingestion.NewFailureLog(failureLogPath("freshmile"), "freshmile")
 		if *retryFailed {
 			failures, ok := loadFailures("freshmile")
