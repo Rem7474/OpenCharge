@@ -1,520 +1,58 @@
-# OpenCharge
+<div align="center">
 
-OpenCharge visualise les bornes de recharge en France (puis en Europe) en
-combinant :
+# 🔌 OpenCharge
 
-- **IRVE** comme référentiel canonique des points de charge (données déjà
-  consolidées par Etalab, chargées telles quelles puis enrichies) ;
-- des **sources tarifaires externes** (Izivia, Electra, ...) corrélées à
-  IRVE par géolocalisation (et, quand c'est fiable, par opérateur/enseigne) ;
-- une **carte dynamique** qui ne charge jamais l'intégralité des ~132 000
-  points de charge : tout est piloté par le viewport (bounding box).
+**Quelle borne de recharge est vraiment la moins chère, près de vous ?**
 
-## Architecture
+Carte des bornes de recharge en France (bientôt en Europe), avec les prix
+réels de chaque opérateur superposés au référentiel officiel IRVE —
+Electra, Izivia, Tesla, Freshmile, Ionity, Fastned et d'autres.
 
-```
-opencharge/
-  backend/
-    cmd/
-      opencharge-api/      # API HTTP (GET /stations, GET /stations/{id}, GET /sources)
-      opencharge-ingest/   # CLI d'ingestion (irve, electra, izivia, tesla, freshmile, fastned, lidl, chargenow, ionity, eborn, sowatt, all)
-    internal/
-      api/                 # handlers HTTP + DTOs JSON
-      domain/               # modèle métier (Station, SourceStation, Tariff, Link)
-      repository/           # accès PostgreSQL/PostGIS (pgx)
-      ingestion/             # import + normalisation IRVE/Electra/Izivia/Tesla/Freshmile + corrélation
-    db/migrations/          # migrations SQL (golang-migrate)
-  frontend/
-    web/                     # React + Leaflet, carte pilotée par bbox
-      android/, ios/         # shells natifs Capacitor (générés, cf. section Mobile)
-  docker-compose.yml        # Postgres+PostGIS, migrations, API, frontend web
-```
+### 👉 [**opencharge.remcorp.fr**](https://opencharge.remcorp.fr) 👈
 
-### Modèle de données
+</div>
 
-- `stations` : le référentiel IRVE, à la granularité **point de charge**
-  (`irve_id_pdc` est la clé d'upsert). Géométrie `Point(4326)` indexée GIST.
-- `source_stations` : stations telles que vues par une source externe
-  (Izivia, Electra), avant corrélation.
-- `station_links` : corrélation `source_stations` → `stations`, avec une
-  qualité de lien (`exact`, `by_geolocation`, `by_operator+name`, `manual`)
-  et la distance en mètres.
-- `station_tariffs` : tarifs normalisés attachés à une station IRVE, un par
-  `(station, source, kind, plan)`.
+<br>
 
-La corrélation se fait via PostGIS (`ST_DWithin` / opérateur KNN `<->`) :
-pour chaque station externe, on cherche la station IRVE la plus proche dans
-un rayon configurable (150 m par défaut).
+## Pourquoi cet outil ?
 
-### Paliers tarifaires (`plan`)
+Le référentiel officiel IRVE liste ~132 000 points de charge en France,
+mais sans les prix. Chaque opérateur (Electra, Izivia, Tesla...) publie
+les siens séparément, souvent selon plusieurs paliers (avec ou sans appli,
+abonné ou non). OpenCharge corrèle ces deux mondes géographiquement, pour
+afficher sur une seule carte : où sont les bornes, ce qu'elles coûtent
+réellement selon votre mode de paiement, et via quel opérateur.
 
-Une source peut exposer plusieurs prix pour la même station selon le moyen
-de paiement (ex. Electra : `public` sans l'appli, `app` avec l'appli,
-`subscription` avec l'abonnement Smart). Les sources à palier unique
-(Izivia, ...) utilisent le plan `standard`. Règle Electra actuellement
-implémentée (`backend/internal/ingestion/electra.go`) :
-- `public` : tarif fixe 0,64 €/kWh (constante non scrapée, à mettre à jour
-  à la main si Electra change ce prix) ;
-- `app` : le prix scrapé tel quel, éventuellement variable par plage horaire ;
-- `subscription` : le prix `app`, chaque plage horaire réduite de 20 cts/kWh.
+## Ce que vous pouvez faire
 
-Tesla (`backend/internal/ingestion/tesla.go`) expose jusqu'à 4 paliers par
-Supercharger, un par combinaison véhicule/abonnement issue de ses
-`effectivePricebooks` : `tesla_member`, `tesla_public`,
-`non_tesla_member`, `non_tesla_public`. Un éventuel frais de stationnement
-(`feeType: "PARKING"`) pour la même combinaison alimente
-`congestion_price_cents_per_min` du tarif correspondant plutôt que de
-créer une ligne séparée.
+- 🗺️ **Carte dynamique** qui ne charge jamais l'intégralité des bornes :
+  tout est piloté par ce que vous regardez (zoom/déplacement)
+- 🔍 **Filtrer par opérateur**, avec sélection multiple — le prix affiché
+  est le moins cher parmi les sources cochées
+- 💳 **Choisir votre palier tarifaire** quand un opérateur en propose
+  plusieurs (ex. Electra : sans l'appli / avec l'appli / abonné Smart)
+- 🔋 **Basculer entre €/kWh et prix pour une recharge donnée** (nombre de
+  kWh configurable)
+- 📊 **Voir le détail par connecteur** d'une station : prix par source,
+  meilleur prix toutes sources confondues, et pour les tarifs variables
+  dans la journée, un graphique horaire
+- 📍 **Disponibilité en temps réel** (bornes libres/total) pour les
+  stations Freshmile
+- 📱 **Applications mobiles** (Android/iOS) en plus de la version web
 
-Freshmile (`backend/internal/ingestion/freshmile.go`) peut exposer
-plusieurs tarifs distincts par station, un par produit tarifaire
-(`custom_ref`, ex. `normal-k-wh-interop-20`), chacun devenant son propre
-`Plan` — avec un suffixe `:preferential` quand le tarif est marqué
-`is_preferential` (abonnement/partenaire). Le prix €/kWh est extrait par
-regex depuis le texte de description multilingue du tarif (FR en priorité,
-sinon EN) ; un tarif dont le prix n'a pas pu être extrait est quand même
-conservé (`energy_price_cents_per_kwh` à `null`, brut dans `extra.tariff`)
-plutôt que d'être jeté, pour audit/futur raffinement de la regex.
+## Sources de données
 
-Chaque tarif porte aussi `extra.windows`, la liste de ses plages horaires
-avec leur propre prix (`{"startTime","endTime","energyPriceCentsPerKwh"}`) —
-c'est cette donnée qui alimente le graphique horaire du frontend.
+- **IRVE** (Etalab, consolidé par transport.data.gouv.fr) — le
+  référentiel canonique des points de charge
+- **Tarifs** : Electra, Izivia, Tesla Superchargers, Freshmile, Fastned,
+  Lidl, Ionity, ChargeNow, eborn, Sowatt Solutions
 
-## Lancer l'environnement
+Le détail de la méthodologie de corrélation et les limites de fiabilité
+des prix affichés sont expliqués dans la page **À propos** de
+l'application.
 
-```bash
-cp .env.example .env   # ajuster APP_PORT si 8081 est déjà pris
+## Envie de contribuer ou de faire tourner le projet en local ?
 
-docker compose up -d db migrate
-# ou, sans docker : appliquer backend/db/migrations/*.sql avec golang-migrate
-# migrate -path backend/db/migrations -database "$DATABASE_URL" up
-
-# environnement complet (API + frontend, un seul port exposé) :
-docker compose up -d db migrate api web
-```
-
-`web` (nginx) est le seul point d'entrée HTTP : il sert le frontend sur `/`
-et fait reverse-proxy de `/api/*` vers le conteneur `api`, qui n'est jamais
-publié sur l'hôte. Une fois lancé : `http://localhost:8081/` (frontend) et
-`http://localhost:8081/api/stations?...` (API). `docker compose` lit `.env`
-automatiquement : `DB_PORT` et `APP_PORT` contrôlent les ports exposés sur
-l'hôte (défauts 5432/8081), et `POSTGRES_USER`/`POSTGRES_PASSWORD`/
-`POSTGRES_DB`/`CORS_ORIGIN`/`VITE_API_BASE_URL` les autres réglages. Voir
-`.env.example` pour la liste complète.
-
-## Ingestion
-
-```bash
-cd backend
-go run ./cmd/opencharge-ingest -source irve       # référentiel IRVE (GeoJSON)
-go run ./cmd/opencharge-ingest -source electra    # stations + tarifs Electra, corrélation
-go run ./cmd/opencharge-ingest -source izivia     # stations + tarifs Izivia, corrélation
-go run ./cmd/opencharge-ingest -source tesla      # Superchargers Tesla, corrélation
-go run ./cmd/opencharge-ingest -source freshmile  # stations + tarifs Freshmile, corrélation
-go run ./cmd/opencharge-ingest -source fastned    # tarifs fixes Fastned sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source lidl       # tarif fixe Lidl sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source chargenow  # stations + tarifs ChargeNow (DCS), corrélation
-go run ./cmd/opencharge-ingest -source ionity     # tarifs fixes Ionity sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source eborn      # tarifs fixes (par palier de puissance) eborn sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source sowatt     # tarif fixe Sowatt Solutions sur les stations IRVE déjà taguées
-go run ./cmd/opencharge-ingest -source all        # les onze, dans cet ordre
-```
-
-Variables utiles : `-dsn` (DSN Postgres, ou `DATABASE_URL`), `-irve-url`,
-`-electra-url`, `-tesla-url`, `-freshmile-url`, `-chargenow-url`,
-`-link-max-distance-m`, `-idle-timeout`, `-failed-dir` (ou
-`INGEST_FAILED_DIR`), `-retry-failed`.
-
-### Arrêt automatique en cas de blocage (`-idle-timeout`)
-
-Izivia, Tesla, Freshmile et ChargeNow n'ont **pas** de timeout global fixe :
-scanner toute la France peut légitimement prendre plus d'une heure tant que
-le run progresse (Freshmile seul traite des dizaines de milliers
-d'emplacements par run), donc couper après une durée fixe finissait soit
-par interrompre un run sain, soit imposait une limite si généreuse qu'elle
-ne détectait jamais une source réellement en panne.
-
-À la place, `-idle-timeout` (défaut 5 min) mesure le temps écoulé depuis la
-**dernière requête réussie**, tous types confondus (scan de tuile/square,
-détail de station, lot de prix...) : tant qu'au moins une requête aboutit
-dans cette fenêtre, le run continue sans limite de durée globale. Si plus
-aucune requête n'aboutit pendant `-idle-timeout` (ex. l'API de la source
-tombe en panne en plein run), le run s'arrête avec un message explicite
-(`no successful request in the last 5m0s, aborting run`) plutôt que de
-continuer à retenter indéfiniment. Comme pour un Ctrl+C ou un `docker
-stop`, ce qui a déjà été écrit en base reste acquis, et aucun sweep de
-données périmées n'est tenté sur un run interrompu de la sorte (voir plus
-bas). `-idle-timeout 0` désactive complètement ce mécanisme.
-
-### Rejouer les URLs en échec
-
-Les sources qui fannent sur de nombreuses URLs (Izivia, Tesla, Freshmile,
-ChargeNow) sauvegardent en fin de run — même interrompu — chaque requête
-définitivement en échec (après épuisement de leurs retries HTTP) dans un
-JSON local par source : `<failed-dir>/<source>.json` (défaut :
-`ingest-failures/`, surchargeable via `-failed-dir` ou `INGEST_FAILED_DIR`).
-Chaque entrée garde l'URL, les paramètres nécessaires pour rejouer la
-requête (marker/square Izivia, slug Tesla, id de location ou tuile
-Freshmile, bbox ou pool ChargeNow) et l'erreur rencontrée.
-
-```bash
-go run ./cmd/opencharge-ingest -source freshmile -retry-failed  # ne rejoue que les échecs du run précédent
-```
-
-`-retry-failed` ne rescanne pas toute la France : il ne rejoue que les
-requêtes listées dans le fichier. Le fichier est réécrit à chaque passe
-avec les échecs restants (et supprimé quand tout a fini par passer), donc
-la commande peut être relancée jusqu'à convergence. Aucun sweep de données
-périmées n'est fait dans ce mode (la passe ne rafraîchit qu'un
-sous-ensemble des stations, le reste est légitimement non touché). Via
-Docker, le dossier est monté depuis l'hôte (`./ingest-failures`, voir
-`docker-compose.yml`), donc les fichiers survivent au conteneur `--rm` :
-`docker compose run --rm ingest -source freshmile -retry-failed`.
-
-IRVE doit toujours être ingéré en premier : c'est le référentiel contre
-lequel Electra, Izivia, Tesla, Freshmile et ChargeNow sont corrélés, et
-que Fastned/Lidl/Ionity/eborn/Sowatt tagguent directement (leurs stations
-sont déjà les lignes IRVE elles-mêmes, identifiées par `operator_name`/
-`enseigne` contenant leur nom — voir `backend/internal/ingestion/
-fastned.go`, `lidl.go`, `ionity.go`, `eborn.go`, `sowatt.go`).
-
-**Fastned, Lidl, Ionity et Sowatt Solutions n'ont pas d'API de tarifs
-publique scrapable** : leurs tarifs (Fastned : 0,61 €/kWh standard,
-0,43 €/kWh abonné ; Lidl : 0,29 €/kWh unique, AC comme DC ; Ionity :
-0,55 €/kWh sans appli, 0,52 €/kWh avec appli ; Sowatt Solutions :
-0,54 €/kWh unique, AC comme DC) sont des constantes fixes dans le code, à
-mettre à jour manuellement si l'un de ces réseaux change ses prix. Aucune
-requête réseau n'est faite pour ces runs.
-
-**eborn** (`backend/internal/ingestion/eborn.go`) est dans la même
-situation (pas d'API scrapable), mais son tarif dépend du kind (ac/dc) et,
-pour le dc, d'un palier de puissance (≤60kW vs >60kW) — chaque station
-reçoit donc exactement un prix par plan (standard/carte/forfait), choisi à
-partir de son propre `connector_type`/`power_kw` déjà connu d'IRVE, plutôt
-que tous les paliers. Le plan "forfait" (abonnement mensuel à 49€ rendant
-la recharge gratuite) n'a pas de champ dédié pour un coût récurrent dans le
-schéma actuel — le prix énergie est à 0 et le coût de l'abonnement est
-seulement documenté dans `raw_text`.
-
-**ChargeNow** (`backend/internal/ingestion/chargenow.go`) scanne toute la
-France via son API de clusters/pools (`/api/map/v1/fr/query`, même logique
-de subdivision par bounding box que Freshmile) — découverte, corrélation,
-tarification et écriture tournent en pipeline (comme Freshmile), par lots
-de 100 pools au fur et à mesure qu'ils sont découverts, plutôt qu'en trois
-phases séparées (tout découvrir, puis tout tarifer, puis tout écrire) :
-un arrêt en cours de route ne perd donc que le lot en cours, pas tout ce
-qui a déjà été récupéré. Particularité : l'API de découverte de ChargeNow
-ne renvoie ni le type de connecteur ni la puissance de chaque point de
-charge (seulement son id), alors que l'API de tarifs (`/tariffs/CHARGENOW_PRIME/prices`)
-a besoin de `power_type`/`power` pour répondre — l'ingester corrèle donc
-chaque pool avec la station IRVE la plus proche *avant* même d'interroger
-les tarifs, uniquement pour lire ce `connector_type`/`power_kw` déjà connu
-d'IRVE.
-
-Le header `rest-api-path` est un routage interne (confirmé sur du trafic
-réel) : `/query` en a besoin (`clusters` pour une recherche par bbox,
-`charge-points` pour un statut temps réel, `pools` pour une recherche par
-id — seul `clusters` est utilisé ici), mais `/tariffs/.../prices` n'en
-prend **aucun** — lui en envoyer un (même une valeur plausible) le
-fait dérouter vers le mauvais micro-service et casse silencieusement
-tous les tarifs. Confirmé en production que le vrai problème n'était pas
-le contenu des requêtes mais leur **volume** : une rafale de requêtes
-concurrentes (l'ancien `chargenowScanWorkers: 16`) ou un lot de prix trop
-gros (plusieurs dizaines d'éléments en un seul POST, alors qu'un vrai
-navigateur n'en envoie jamais plus de 1 à 3) suffisent à faire bloquer
-l'IP entière par le WAF de ChargeNow. Toutes les requêtes (découverte et
-tarifs confondues) passent donc par un limiteur de débit partagé
-(`chargenowMinRequestInterval`, 150ms, confirmé sûr en conditions
-réelles) et les lots de prix sont volontairement petits
-(`chargenowPriceBatchSize`, 3 éléments) pour ressembler à un usage
-normal du site plutôt qu'à un scraping massif.
-
-**Freshmile scanne toute la France puis récupère le détail de chaque site
-— découverte et récupération/écriture tournent en pipeline, pas en deux
-phases séparées.** Le scan des tuiles `map-locations` (avec subdivision
-récursive des clusters) est parallélisé sur 16 requêtes concurrentes, et
-chaque emplacement découvert est immédiatement envoyé aux workers de
-détail (8 par défaut, `FreshmileConfig.Workers`) puis écrit en base par
-paquets de 200 au fur et à mesure — sans attendre la fin du scan complet.
-Un arrêt en cours de route (Ctrl+C, `docker stop`, ou `-idle-timeout` qui
-donne l'abandon faute de requête réussie — voir plus haut) n'efface donc
-pas le travail déjà fait : ce qui a été récupéré avant l'arrêt reste écrit
-en base, et le run suivant repart pour compléter.
-
-**Tesla nécessite Chromium — en mode "headed", pas headless.**
-`tesla.com/api/findus/*` est protégé par un bot-mitigation (Akamai) qui
-rejette toute requête HTTP classique quels que soient les en-têtes envoyés
-— un vrai moteur de navigateur est nécessaire. Mais Akamai détecte
-également Chrome lancé en `--headless` et le bloque de la même façon
-(vérifié empiriquement : `Access Denied`) ; il faut donc un Chrome
-"headed" classique, tourné vers un display (réel ou virtuel).
-`backend/internal/ingestion/tesla.go` pilote donc Chromium via
-[chromedp](https://github.com/chromedp/chromedp) plutôt que `net/http`
-pour cette source uniquement, avec `headless=false`. En local sur un poste
-avec écran, il faut un binaire Chrome/Chromium installé et accessible :
-soit dans le `PATH` (`google-chrome`, `chromium`, ...), soit désigné
-explicitement via `-tesla-chrome-path` ou la variable `TESLA_CHROME_PATH`.
-Sur un serveur/CI sans display, il faut lancer la commande sous un display
-virtuel, ex. `xvfb-run -a go run ./cmd/opencharge-ingest -source tesla`.
-L'image Docker `ingest` (`backend/Dockerfile`, cible `ingest`) installe
-Chromium + `xvfb`, positionne `TESLA_CHROME_PATH=/usr/bin/chromium`, et son
-`ENTRYPOINT` est déjà enveloppé dans `xvfb-run` — rien de plus à faire
-côté Docker. C'est pour ça que cette image est nettement plus lourde que
-`api` (base `debian:bookworm-slim` + Chromium + xvfb, au lieu de
-distroless).
-
-## Tests
-
-```bash
-cd backend
-go test ./internal/ingestion/...          # tests unitaires purs (parsing, normalisation)
-TEST_DATABASE_URL=postgres://opencharge:opencharge@localhost:5432/opencharge?sslmode=disable \
-  go test ./internal/... -p 1
-```
-
-Les tests de `internal/repository` et `internal/api` sont des tests
-d'intégration : ils s'exécutent contre une vraie base Postgres/PostGIS
-(migrations déjà appliquées) et sont **skippés automatiquement** si
-`TEST_DATABASE_URL` (ou `DATABASE_URL`) n'est pas défini. Chaque test
-tronque les tables au démarrage, donc `-p 1` est nécessaire pour éviter
-que deux packages ne se marchent dessus sur la même base. C'est exactement
-ce que fait la CI (`.github/workflows/backend.yml`), avec un service
-`postgis/postgis` éphémère.
-
-## API
-
-```bash
-cd backend
-go run ./cmd/opencharge-api
-```
-
-### `GET /stations`
-
-Query params : `bbox=minLng,minLat,maxLng,maxLat` (obligatoire),
-`operator`, `hasTariffs`, `source`, `connectorType`, `minPowerKw`,
-`minPriceCentsPerKwh`, `maxPriceCentsPerKwh`, `chargeKWh`,
-`chargeMinutes`, `excludeSubscriptionPlans`, `limit`, `offset`.
-
-`source` accepte une liste de paires `source:plan` séparées par des virgules
-(ex. `source=izivia:standard,electra:subscription`) ; une source sans `:plan`
-est traitée comme `standard`. **Il ne filtre jamais les stations** : il
-contrôle uniquement pour quelles paires (source, plan) `selectedSourcesPricing`
-est calculé, afin que la carte puisse griser une station sans tarif pour la
-sélection au lieu de la masquer.
-
-`minPriceCentsPerKwh`/`maxPriceCentsPerKwh` filtrent par prix — un simple
-tarif €/kWh par défaut, ou le coût total estimé d'une recharge
-(énergie + tarif au temps éventuel + frais de session éventuels) quand
-`chargeKWh` (et optionnellement `chargeMinutes`) est fourni, pour matcher
-ce que le mode "recharge" du frontend affiche réellement plutôt que forcer
-un raisonnement en €/kWh.
-
-`excludeSubscriptionPlans=true` retire les tarifs du palier `subscription`
-du calcul de `pricingSummary`/`selectedSourcesPricing` (et donc du filtre
-de prix ci-dessus), pour ne jamais afficher un prix qui suppose un
-abonnement payant que l'utilisateur n'a pas forcément.
-
-```json
-[
-  {
-    "id": "irve:FR-123456",
-    "name": "Station X",
-    "location": { "lat": 45.9123, "lng": 6.1213 },
-    "operator": "Izivia",
-    "address": { "city": "Annecy", "postalCode": "74000", "countryCode": "FR" },
-    "connectors": [{ "kind": "CCS", "maxPowerKw": 150, "count": 1 }],
-    "hasTariffs": true,
-    "tariffSources": ["izivia", "electra"],
-    "pricingSummary": { "ac_min_cents_per_kwh": 45, "dc_min_cents_per_kwh": 54 },
-    "selectedSourcesPricing": { "dc_min_cents_per_kwh": 48 }
-  }
-]
-```
-
-`pricingSummary` est le prix minimum toutes sources confondues.
-`selectedSourcesPricing` n'apparaît que si `source` était fourni : c'est le
-prix minimum parmi uniquement les sources demandées (absent ou champs à
-`null` si aucune des sources sélectionnées n'a de tarif pour cette station).
-
-### `GET /stations/{id}`
-
-`id` est l'identifiant IRVE, ex. `irve:FR-123456`. Retourne la station et
-la liste de ses tarifs normalisés (un par source/kind), avec le texte brut
-d'origine quand la source est textuelle (ex. Izivia). Le frontend calcule
-côté client, à partir de cette liste complète, le prix par source
-sélectionnée et le meilleur prix toutes sources — aucun paramètre `source`
-n'est nécessaire ici.
-
-### `GET /sources`
-
-Retourne chaque source tarifaire actuellement ingérée avec ses paliers
-disponibles, ex. :
-
-```json
-[
-  { "id": "electra", "plans": ["app", "public", "subscription"] },
-  { "id": "izivia", "plans": ["standard"] }
-]
-```
-
-Le frontend construit son filtre d'opérateurs (et le sélecteur de palier
-quand une source en a plusieurs) à partir de cet endpoint : aucune liste
-n'est codée en dur côté client, une nouvelle source ou un nouveau palier
-apparaît automatiquement dès qu'il est ingéré.
-
-### `GET /freshmile/availability/{locationId}`
-
-Proxy côté serveur pour la disponibilité temps réel Freshmile
-(`backend/internal/api/freshmile.go`) : un appel direct navigateur ->
-Freshmile est bloqué par CORS en production (confirmé — Freshmile
-n'envoie pas d'en-tête `Access-Control-Allow-Origin`), donc le frontend
-appelle ce endpoint (même origine), qui relaie l'appel serveur à serveur
-vers `GET /locations/{id}` de l'API Freshmile.
-
-```json
-{
-  "evsesAvailableCount": 2,
-  "evsesTotalCount": 2,
-  "connectorAvailability": { "T2": { "available": 2, "total": 2 }, "EF": { "available": 2, "total": 2 } }
-}
-```
-
-Compte des bornes (evses), pas des connecteurs : une même borne physique
-peut exposer plusieurs connecteurs (ex. Type 2 + prise domestique) qui
-partagent une seule disponibilité — `connectorAvailability` ventile ce
-même compte par type de connecteur pour matcher l'affichage "un prix par
-connecteur" du frontend (`StationDetails.jsx`).
-
-## Frontend
-
-```bash
-cd frontend/web
-npm install
-npm run dev
-```
-
-`VITE_API_BASE_URL` (défaut `http://localhost:8080`) pointe vers l'API
-lancée en local (`go run ./cmd/opencharge-api`, cf. section API ci-dessus).
-Ce mode (frontend et API lancés séparément, hors Docker) cible l'API
-directement par une URL absolue ; il ne passe pas par le reverse-proxy
-nginx décrit dans la section Docker ci-dessous.
-
-### Pages et parcours
-
-- **Carte (`/`)** : la carte (Leaflet) recharge `GET /stations` à chaque
-  déplacement/zoom, jamais le dataset complet ; en dessous du zoom 10, un
-  message invite à zoomer plutôt que de charger des milliers de marqueurs.
-  - **Filtre opérateurs** : liste à cocher, avec recherche, alimentée par
-    `GET /sources` (aucune liste codée en dur — une nouvelle source
-    ingérée apparaît automatiquement). Sélection multiple : le prix affiché
-    sur un marqueur est le moins cher parmi les sources cochées. Aucune
-    sélection = comportement par défaut (prix le moins cher toutes sources
-    confondues). Quand une source a plusieurs paliers tarifaires (ex.
-    Electra : sans l'appli / avec l'appli / abonné), un petit sélecteur
-    apparaît sous son libellé pour choisir celui qui s'applique à
-    l'utilisateur — entièrement piloté par `GET /sources`, aucun palier
-    codé en dur.
-  - **Mode de prix** : bascule entre €/kWh et prix pour une recharge d'un
-    nombre de kWh configurable (calcul client, aucun appel réseau
-    supplémentaire au changement de mode).
-  - Une station sans tarif pour la sélection reste visible sur la carte,
-    grisée sans prix (jamais masquée).
-  - Un même site physique peut avoir plusieurs connecteurs (une ligne IRVE
-    par prise, pas par site) : le frontend les regroupe par coordonnées
-    exactes (`utils/stationGrouping.js`) en un seul marqueur, au prix du
-    connecteur le moins cher, plutôt que plusieurs marqueurs superposés au
-    même point.
-  - Clic sur un site : panneau de détail avec une section "Prix par
-    connecteur" par connecteur du site — chacune avec le prix par source
-    et palier sélectionnés, le meilleur prix toutes sources en comparaison
-    si différent, et la liste complète des tarifs pour audit. Un tarif
-    dont le prix varie dans la journée (plusieurs plages horaires)
-    s'affiche sous forme de petit graphique en barres prix/heure plutôt
-    qu'un prix unique. Pour un site avec des données Freshmile : image
-    Street View et disponibilité temps réel (bornes libres/total, globale
-    et par connecteur — voir `GET /freshmile/availability/{locationId}`
-    ci-dessus).
-- **À propos (`/about`)** : sources de données, méthodologie de
-  corrélation, limites de fiabilité des prix affichés.
-
-### Docker
-
-```bash
-docker compose up -d db migrate api web
-```
-
-Le `Dockerfile` (`frontend/web/Dockerfile`) est un build multi-stage
-`node:20-alpine` → `nginx:alpine`. `VITE_API_BASE_URL` est un argument de
-build (les variables Vite sont figées à la compilation, pas au runtime) :
-par défaut `/api`, un chemin relatif résolu contre l'origine de la page —
-c'est ce même conteneur `web` (nginx) qui sert le frontend sur `/` **et**
-fait reverse-proxy de `/api/*` vers le conteneur `api` (`frontend/web/nginx.conf`),
-qui lui n'est jamais exposé sur l'hôte. Un seul port est donc publié :
-`http://localhost:${APP_PORT:-8081}/` pour le frontend,
-`http://localhost:${APP_PORT:-8081}/api/*` pour l'API.
-
-### Mobile (Capacitor)
-
-Le web app est encapsulé tel quel dans une coquille native iOS/Android via
-Capacitor — aucune logique dupliquée. Config et projets natifs
-(`android/`, `ios/`) vivent dans `frontend/web/` (convention standard de
-l'outil : Capacitor a besoin d'être co-localisé avec `package.json`).
-
-```bash
-cd frontend/web
-npm run cap:sync      # build web + copie dans android/ et ios/
-npm run cap:android   # + ouvre Android Studio
-npm run cap:ios       # + ouvre Xcode (macOS uniquement)
-```
-
-Xcode (iOS) reste local uniquement — hors périmètre de ce dépôt/CI pour
-l'instant (nécessite macOS + un compte développeur Apple).
-
-Contrairement au déploiement navigateur/Docker ci-dessus, la coquille
-Capacitor (WebView native) n'a pas d'origine de page contre laquelle
-résoudre un chemin relatif comme `/api` : `cap:sync` a donc besoin d'une
-URL absolue. C'est le rôle de `frontend/web/.env.production` (chargé
-automatiquement par `vite build`, donc par `cap:sync`/`cap:android`/
-`cap:ios` — sans effet sur le build Docker, qui fixe `VITE_API_BASE_URL`
-explicitement en argument de build) :
-
-```
-VITE_API_BASE_URL=https://opencharge.remcorp.fr/api
-```
-
-soit l'instance hébergée à <https://opencharge.remcorp.fr>.
-
-#### CI — build Android automatique sur tag
-
-`.github/workflows/mobile-android.yml` build l'app Android (build web →
-`cap sync android` → Gradle) à chaque tag `v*.*.*`, comme
-`docker-publish.yml` le fait pour les images Docker, et attache le(s)
-APK à la Release GitHub correspondante :
-
-- un **APK debug** est toujours produit et publié (signé avec la clé
-  debug par défaut de Gradle — installable directement pour tester, pas
-  pour le Play Store) ;
-- un **APK release signé** est produit et publié en plus si les secrets
-  de signature sont configurés sur le dépôt (`ANDROID_KEYSTORE_BASE64`
-  — le keystore encodé en base64 avec `base64 -w0 release.keystore` —,
-  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`).
-  Sans ces secrets, seul l'APK debug est publié.
-
-Pour un build release signé en local, copier
-`frontend/web/android/keystore.properties.example` vers
-`keystore.properties` (gitignored) dans le même dossier et y placer le
-keystore ainsi que les mots de passe — `frontend/web/android/app/build.gradle`
-active automatiquement la signature s'il détecte ce fichier.
-
-## Sources
-
-- IRVE (Etalab, consolidé) : GeoJSON republié par transport.data.gouv.fr
-- Electra : `https://stations.go-electra.com/stations.js`
-- Izivia : API front `https://fronts-map.izivia.com/api` (markers, détails,
-  tarifs), scannée par grille sur la métropole
-- Tesla : API front `https://www.tesla.com/api/findus/*` (liste des sites,
-  détails/tarifs par Supercharger)
-- Freshmile : API carto `https://prod-driver-api.freshmile.com/charge/api/v2`
-  (`map-locations` en clusters/points, `locations/{id}` pour le détail),
-  clusters résolus par subdivision récursive de bbox jusqu'aux points
-  unitaires
+Toute la partie technique (architecture backend/frontend, modèle de
+données, ingestion par source, API, Docker, build mobile) est documentée
+séparément dans [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
