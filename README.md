@@ -6,7 +6,7 @@
 
 Carte des bornes de recharge en France (bientôt en Europe), avec les prix
 réels de chaque opérateur superposés au référentiel officiel IRVE —
-Electra, Izivia, Tesla, Freshmile, Ionity, Fastned et d'autres.
+Electra, Izivia, Freshmile, Ionity, Fastned et d'autres.
 
 ### 👉 [**opencharge.remcorp.fr**](https://opencharge.remcorp.fr) 👈
 
@@ -44,7 +44,7 @@ réellement selon votre mode de paiement, et via quel opérateur.
 
 - **IRVE** (Etalab, consolidé par transport.data.gouv.fr) — le
   référentiel canonique des points de charge
-- **Tarifs** : Electra, Izivia, Tesla Superchargers, Freshmile, Fastned,
+- **Tarifs** : Electra, Izivia, Freshmile, Fastned,
   Lidl, Ionity, ChargeNow, eborn, Sowatt Solutions
 
 Le détail de la méthodologie de corrélation et les limites de fiabilité
