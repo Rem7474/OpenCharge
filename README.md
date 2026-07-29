@@ -14,6 +14,8 @@ Electra, Izivia, Freshmile, Ionity, Fastned et d'autres.
 
 <br>
 
+<img src="docs/screenshots/detail.png" alt="OpenCharge — détail d'une station avec prix par connecteur et courbe horaire" width="100%">
+
 ## Pourquoi cet outil ?
 
 Le référentiel officiel IRVE liste ~132 000 points de charge en France,
@@ -39,6 +41,8 @@ réellement selon votre mode de paiement, et via quel opérateur.
 - 📍 **Disponibilité en temps réel** (bornes libres/total) pour les
   stations Freshmile
 - 📱 **Applications mobiles** (Android/iOS) en plus de la version web
+
+<img src="docs/screenshots/map.png" alt="Carte OpenCharge avec les prix des bornes autour d'Annecy" width="100%">
 
 ## Sources de données
 
