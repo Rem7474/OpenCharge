@@ -1203,6 +1203,9 @@ a {
 }
 
 .onboarding-header {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
   padding: 24px 20px 8px;
 }
 
@@ -1219,12 +1222,16 @@ a {
 }
 
 .onboarding-list {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
   flex: 1;
   overflow-y: auto;
   padding: 8px 20px 20px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  box-sizing: border-box;
 }
 
 .onboarding-empty {
