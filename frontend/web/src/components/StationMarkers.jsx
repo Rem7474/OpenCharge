@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
+import MarkerClusterGroup from "react-leaflet-cluster";
 import L from "leaflet";
+import "leaflet.markercluster/dist/MarkerCluster.css";
+import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 import { fetchStationsInBBox } from "../api/stations.js";
 import {
   cheapestPriceAcrossStations,
@@ -23,6 +26,21 @@ function priceIcon(label, hasPrice, tier) {
   return L.divIcon({
     className: "",
     html: `<div class="price-marker${hasPrice ? "" : " no-price"}${tierClass}">${label}</div>`,
+    iconSize: null,
+  });
+}
+
+// Sites within ~50px of each other on screen (well under the ~70-90px width
+// of a price pill) get grouped into a count bubble instead of stacking
+// illegibly — see MarkerClusterGroup below. Clicking a bubble zooms in, and
+// spiderfies at max zoom for sites too close together to ever separate by
+// zoom alone.
+function clusterIcon(cluster) {
+  const count = cluster.getChildCount();
+  const sizeClass = count < 10 ? "sm" : count < 50 ? "md" : "lg";
+  return L.divIcon({
+    className: "",
+    html: `<div class="cluster-marker cluster-marker--${sizeClass}">${count}</div>`,
     iconSize: null,
   });
 }
@@ -133,35 +151,41 @@ export default function StationMarkers({
         )}
         {isEmpty && <div className="status-banner">Aucune borne ne correspond à vos filtres dans cette zone.</div>}
       </div>
-      {sites.map((site) => {
-        const hasSelection = Object.keys(selectedSources).length > 0;
-        const priceCents = cheapestPriceAcrossStations(site.stations, hasSelection);
-        // With a sources selection active, a site with no tariff for any
-        // selected source/plan on any of its connectors isn't relevant to
-        // what the user is looking for — hide it instead of showing a dead
-        // "—" marker they'd have to click through to learn nothing from.
-        if (hasSelection && priceCents == null) return null;
-        const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
-        const tier = priceTier(priceCents);
-        const first = site.stations[0];
+      <MarkerClusterGroup
+        iconCreateFunction={clusterIcon}
+        maxClusterRadius={60}
+        showCoverageOnHover={false}
+      >
+        {sites.map((site) => {
+          const hasSelection = Object.keys(selectedSources).length > 0;
+          const priceCents = cheapestPriceAcrossStations(site.stations, hasSelection);
+          // With a sources selection active, a site with no tariff for any
+          // selected source/plan on any of its connectors isn't relevant to
+          // what the user is looking for — hide it instead of showing a dead
+          // "—" marker they'd have to click through to learn nothing from.
+          if (hasSelection && priceCents == null) return null;
+          const label = priceCents != null ? formatPrice(priceCents, priceMode, chargeKWh) : "—";
+          const tier = priceTier(priceCents);
+          const first = site.stations[0];
 
-        return (
-          <Marker
-            key={site.key}
-            position={[site.location.lat, site.location.lng]}
-            icon={priceIcon(label, priceCents != null, tier)}
-            eventHandlers={{ click: () => onSelect(site) }}
-          >
-            <Popup>
-              <strong>{first.name || "Station"}</strong>
-              <br />
-              {first.operator}
-              <br />
-              {priceCents != null ? label : "Pas de tarif pour la sélection"}
-            </Popup>
-          </Marker>
-        );
-      })}
+          return (
+            <Marker
+              key={site.key}
+              position={[site.location.lat, site.location.lng]}
+              icon={priceIcon(label, priceCents != null, tier)}
+              eventHandlers={{ click: () => onSelect(site) }}
+            >
+              <Popup>
+                <strong>{first.name || "Station"}</strong>
+                <br />
+                {first.operator}
+                <br />
+                {priceCents != null ? label : "Pas de tarif pour la sélection"}
+              </Popup>
+            </Marker>
+          );
+        })}
+      </MarkerClusterGroup>
     </>
   );
 }
