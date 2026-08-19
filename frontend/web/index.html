@@ -4,6 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>OpenCharge — Comparateur de bornes de recharge</title>
+    <meta name="description" content="Comparez le prix des bornes de recharge pour véhicule électrique autour de vous : tarifs par réseau, filtres par connecteur et puissance, carte interactive." />
+    <link rel="canonical" href="https://opencharge.remcorp.fr/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="OpenCharge" />
+    <meta property="og:title" content="OpenCharge — Comparateur de bornes de recharge" />
+    <meta property="og:description" content="Comparez le prix des bornes de recharge pour véhicule électrique autour de vous : tarifs par réseau, filtres par connecteur et puissance, carte interactive." />
+    <meta property="og:url" content="https://opencharge.remcorp.fr/" />
+    <meta property="og:image" content="https://opencharge.remcorp.fr/og-image.png" />
+    <meta property="og:locale" content="fr_FR" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="OpenCharge — Comparateur de bornes de recharge" />
+    <meta name="twitter:description" content="Comparez le prix des bornes de recharge pour véhicule électrique autour de vous : tarifs par réseau, filtres par connecteur et puissance, carte interactive." />
+    <meta name="twitter:image" content="https://opencharge.remcorp.fr/og-image.png" />
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link
       rel="stylesheet"
@@ -13,6 +29,12 @@
     />
   </head>
   <body>
+    <noscript>
+      <p style="margin:16px;padding:14px 16px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:10px;font-family:system-ui,sans-serif;">
+        OpenCharge nécessite JavaScript pour afficher la carte interactive et comparer les tarifs des bornes de recharge.
+        Merci d'activer JavaScript dans votre navigateur.
+      </p>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

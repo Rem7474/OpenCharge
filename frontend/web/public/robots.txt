@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://opencharge.remcorp.fr/sitemap.xml
