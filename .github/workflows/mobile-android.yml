@@ -50,7 +50,7 @@ jobs:
       - name: Sync Capacitor Android project
         run: npx cap sync android
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           # @capacitor/android's own build.gradle sets sourceCompatibility/
